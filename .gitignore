@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+backend/.local/
+backend/*.egg-info/
+
+.env
+.env.local
+*.local.env
+infra/env/*.secret.env
+
+.DS_Store
