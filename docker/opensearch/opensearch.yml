@@ -1,0 +1,22 @@
+# OpenSearch 3.6.0 — single_gpu 전용 설정
+# 호스트 Python(CUDA) 인코딩 + OpenSearch는 vector/sparse 저장소 + hybrid 결합만.
+# ml-commons 관련 cluster setting 일체 없음.
+
+# ---- 보안 ----
+# 벤치마크 단순화를 위해 비활성화 (운영에서는 재활성화 필요)
+plugins.security.disabled: true
+
+# ---- 인덱스 ----
+# 자동 생성 비활성화: 매핑이 항상 명시적이어야 한다.
+action.auto_create_index: false
+
+# ---- kNN ----
+# off-heap 메모리 한도. JVM heap 외 공간에서 HNSW 그래프 보관.
+knn.memory.circuit_breaker.enabled: true
+knn.memory.circuit_breaker.limit: "70%"
+# 색인 시 그래프 빌드 병렬도 (3.x cluster setting; deprecation 경고가 뜨면
+# index.knn.algo_param.index_thread_qty 인덱스 설정으로 이전).
+knn.algo_param.index_thread_qty: 4
+
+# ---- 네트워크 ----
+network.host: 0.0.0.0
