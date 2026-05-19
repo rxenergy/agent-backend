@@ -1,0 +1,256 @@
+# Base services shared across profiles. Per-profile overlays live alongside this file:
+#   compose.local.yml, compose.aws-mvp.yml (Phase 4), compose.onprem.yml (Phase 5).
+#
+# Usage (local profile):
+#   docker compose \
+#     --env-file ../env/local.env \
+#     --profile local \
+#     -f compose.yml -f compose.local.yml up
+
+services:
+
+  agent-api:
+    image: agent-backend:${BACKEND_TAG:-dev}
+    container_name: agent-api
+    restart: unless-stopped
+    env_file:
+      - ../env/${APP_PROFILE:-local}.env
+    ports:
+      - "8000:8000"
+    depends_on:
+      otel-collector:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    volumes:
+      - ../../prompts:/app/prompts:ro
+      - ../../tools:/app/tools:ro
+      - agent_events:/var/lib/agent/events
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8000/health\",timeout=2).status==200 else 1)'"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agent_state
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../postgres/00_databases.sql:/docker-entrypoint-initdb.d/00_databases.sql:ro
+      - ../postgres/init.sql:/docker-entrypoint-initdb.d/10_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent_state"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    profiles: ["local", "aws-mvp", "onprem"]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    profiles: ["memory-scale"]
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  phoenix:
+    image: arizephoenix/phoenix:${PHOENIX_VERSION:-version-7.12.0}
+    container_name: phoenix
+    restart: unless-stopped
+    ports:
+      - "6006:6006"
+      - "9091:9090"
+    volumes:
+      - phoenix_data:/data/phoenix
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:6006/healthz\",timeout=2).status<500 else 1)' || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:${OTEL_COLLECTOR_VERSION:-0.111.0}
+    container_name: otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ../otel/collector.yaml:/etc/otel-collector.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      - tempo
+      - phoenix
+
+  tempo:
+    image: grafana/tempo:${TEMPO_VERSION:-2.6.0}
+    container_name: tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ../tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v2.55.0}
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+  loki:
+    image: grafana/loki:${LOKI_VERSION:-3.2.0}
+    container_name: loki
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ../loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki_data:/loki
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:-11.3.0}
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - tempo
+      - prometheus
+      - loki
+
+  opensearch:
+    image: opensearchproject/opensearch:${OPENSEARCH_VERSION:-2.17.1}
+    container_name: opensearch
+    restart: unless-stopped
+    profiles: ["local", "aws-mvp", "onprem"]
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:${MINIO_VERSION:-RELEASE.2024-10-13T13-34-11Z}
+    container_name: minio
+    restart: unless-stopped
+    profiles: ["local", "onprem"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:${OPEN_WEBUI_VERSION:-main}
+    container_name: open-webui
+    restart: unless-stopped
+    profiles: ["local", "aws-mvp", "onprem"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      agent-api:
+        condition: service_healthy
+    environment:
+      # Persistence: external Postgres (separate DB on the shared instance)
+      DATABASE_URL: postgresql://agent:agent@postgres:5432/openwebui
+      # Point OpenWebUI's OpenAI-compatible client at the agent backend
+      OPENAI_API_BASE_URL: http://agent-api:8000/v1
+      OPENAI_API_KEY: ${OPEN_WEBUI_AGENT_KEY:-dummy}
+      # Disable Ollama integration — backend speaks OpenAI-compatible only
+      ENABLE_OLLAMA_API: "false"
+      WEBUI_AUTH: ${OPEN_WEBUI_AUTH:-true}
+      WEBUI_SECRET_KEY: ${OPEN_WEBUI_SECRET_KEY:-change-me-local}
+      WEBUI_NAME: ${OPEN_WEBUI_NAME:-SMR Agent}
+    ports:
+      - "${OPEN_WEBUI_PORT:-3100}:8080"
+    volumes:
+      # File uploads / vector cache / RAG temp — DB rows live in Postgres
+      - open_webui_data:/app/backend/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+  minio-init:
+    image: minio/mc:${MC_VERSION:-RELEASE.2024-10-08T09-37-26Z}
+    container_name: minio-init
+    profiles: ["local", "onprem"]
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/scripts/init-buckets.sh"]
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      EVENT_BUCKET: ${EVENT_BUCKET:-smr-agent-events}
+    volumes:
+      - ../minio/init-buckets.sh:/scripts/init-buckets.sh:ro
+
+volumes:
+  agent_events:
+  phoenix_data:
+  tempo_data:
+  prometheus_data:
+  loki_data:
+  grafana_data:
+  minio_data:
+  postgres_data:
+  qdrant_data:
+  opensearch_data:
+  open_webui_data:

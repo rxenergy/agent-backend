@@ -1,0 +1,38 @@
+# Local profile overrides:
+#   - build agent-api from backend/Dockerfile (instead of pulling)
+#   - build open-webui from frontend/Dockerfile (RX-branded image)
+#   - relax cookie-secure / signup gates so first-user signup works over plain http
+# Compose with: docker compose --profile local -f compose.yml -f compose.local.yml up
+
+services:
+  agent-api:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    image: agent-backend:dev
+    environment:
+      APP_PROFILE: local
+    depends_on:
+      otel-collector:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
+  open-webui:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      args:
+        OPENWEBUI_VERSION: ${OPENWEBUI_VERSION:-v0.9.5}
+    image: agent-saas/frontend:dev
+    environment:
+      # Local-only overrides on top of the values baked into frontend/Dockerfile.
+      # The image ships with WEBUI_AUTH=true, ENABLE_SIGNUP=false,
+      # DEFAULT_USER_ROLE=pending, WEBUI_SESSION_COOKIE_SECURE=true —
+      # appropriate for prod, but they prevent first-user signup over plain http.
+      ENABLE_SIGNUP: "true"
+      DEFAULT_USER_ROLE: admin
+      WEBUI_SESSION_COOKIE_SECURE: "false"
+      WEBUI_URL: http://localhost:${OPEN_WEBUI_PORT:-3100}
