@@ -144,16 +144,23 @@ services:
       - loki
 
   opensearch:
-    image: opensearchproject/opensearch:${OPENSEARCH_VERSION:-2.17.1}
+    # 전략 A' — 단일 인덱스 (nrc-all-v3) — v1+3.6 경로
+    # OpenSearch 3.6.0만. ml-commons / fermi-encoder / model-host 사이드카 미사용.
+    # 인코딩은 호스트의 Python(CUDA)이 직접 수행하고, OpenSearch에는 사전 인코딩
+    # 결과(dense_e5 벡터, sparse_fermi rank_features dict)를 그대로 색인한다.
+    # 검색은 OpenSearch 3.0+의 hybrid query + hybrid.filter 사용.
+    image: opensearchproject/opensearch:${OPENSEARCH_VERSION:-3.6.0}
     container_name: opensearch
     restart: unless-stopped
     profiles: ["local", "aws-mvp", "onprem"]
     environment:
-      discovery.type: single-node
-      bootstrap.memory_lock: "true"
-      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
-      DISABLE_SECURITY_PLUGIN: "true"
-      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      - cluster.name=nrc-bench-single-gpu
+      - node.name=nrc-bench-single-gpu-node
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - DISABLE_SECURITY_PLUGIN=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms6g -Xmx6g"
     ulimits:
       memlock:
         soft: -1
@@ -161,15 +168,19 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+    mem_limit: 12g
     ports:
       - "9200:9200"
+      - "9600:9600"
     volumes:
       - opensearch_data:/usr/share/opensearch/data
+      - ../opensearch/opensearch.yml:/usr/share/opensearch/config/opensearch.yml:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health | grep -E '\"status\":\"(green|yellow)\"' >/dev/null"]
       interval: 10s
       timeout: 5s
-      retries: 20
+      retries: 30
+      start_period: 30s
 
   minio:
     image: minio/minio:${MINIO_VERSION:-RELEASE.2024-10-13T13-34-11Z}
