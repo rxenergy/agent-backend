@@ -1,0 +1,11 @@
+# Default: exclude everything from the build context.
+*
+
+# Allow what the image build needs.
+!Dockerfile
+!.dockerignore
+!branding/**
+!assets/**
+
+# Exclude operator documentation inside branding/ — repo docs, not runtime assets.
+branding/**/README.md

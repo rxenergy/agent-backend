@@ -1,0 +1,18 @@
+[
+  {
+    "id": "rx-internal-disclaimer",
+    "type": "info",
+    "title": "RX Agent — 사내 시범 운영",
+    "content": "본 시스템은 RX Inc. 내부 도메인 전문가 대상 시범 서비스입니다. 외부 공유·재배포를 금지합니다.",
+    "dismissible": true,
+    "timestamp": 1715472000
+  },
+  {
+    "id": "rx-data-handling",
+    "type": "info",
+    "title": "데이터 처리 안내",
+    "content": "입력하신 질의·피드백·대화 기록은 검색·모델 품질 개선 목적으로 익명화 후 보존됩니다. 개인 식별 정보·민감 정보 입력을 자제해 주세요.",
+    "dismissible": true,
+    "timestamp": 1715472000
+  }
+]
