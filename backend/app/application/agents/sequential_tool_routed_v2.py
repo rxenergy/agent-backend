@@ -11,8 +11,8 @@ from app.application.memory.policies import decide_session_injection
 from app.application.memory.summarizer import ConversationSummarizer
 from app.application.prompting.renderer import PromptRenderer, RenderedPrompt
 from app.application.prompting.resolver import PromptResolver
-from app.application.tools.errors import RequiredToolFailed
-from app.application.tools.executor import ToolExecutor
+from app.application.tool_runtime.errors import RequiredToolFailed
+from app.application.tool_runtime.executor import ToolExecutor
 from app.domain.classification import DEFAULT_DEPTH, DEFAULT_OBJECT, ClassificationResult
 from app.domain.errors import RefusalReason, VerificationStatus
 from app.domain.interaction import (

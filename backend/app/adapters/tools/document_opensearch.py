@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
+from app.domain.errors import RetrievalTimeoutError, RetrievalUnavailableError
 from app.domain.tools import ToolResult
 from app.ports.tool import ToolExecutionContext
 
@@ -63,14 +64,31 @@ class OpenSearchDocumentResolverTool:
                 "query": {"terms": {"chunk_id": unique_chunks}},
                 "_source": ["chunk_id", "document_id", "page", "section"],
             }
-            async with httpx.AsyncClient(
-                timeout=self._timeout_s, verify=self._verify, auth=self._auth
-            ) as client:
-                resp = await client.post(
-                    url, json=body, headers={"Content-Type": "application/json"}
-                )
-            resp.raise_for_status()
-            hits = (resp.json().get("hits") or {}).get("hits") or []
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self._timeout_s, verify=self._verify, auth=self._auth
+                ) as client:
+                    resp = await client.post(
+                        url, json=body, headers={"Content-Type": "application/json"}
+                    )
+                if resp.status_code >= 500:
+                    raise RetrievalUnavailableError(
+                        f"opensearch document {resp.status_code}: {resp.text[:200]}"
+                    )
+                resp.raise_for_status()
+                hits = (resp.json().get("hits") or {}).get("hits") or []
+            except httpx.TimeoutException as exc:
+                raise RetrievalTimeoutError(
+                    f"opensearch document timeout: {exc}"
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                raise RetrievalUnavailableError(
+                    f"opensearch document http error: {exc}"
+                ) from exc
+            except httpx.RequestError as exc:
+                raise RetrievalUnavailableError(
+                    f"opensearch document unreachable: {exc}"
+                ) from exc
             for hit in hits:
                 src = hit.get("_source") or {}
                 key = src.get("chunk_id") or hit.get("_id")

@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
+from app.domain.errors import RetrievalTimeoutError, RetrievalUnavailableError
 from app.domain.tools import ToolResult
 from app.ports.tool import ToolExecutionContext
 
@@ -64,12 +65,29 @@ class OpenSearchRetrieverTool:
         body = self._build_query(tool_input)
         url = f"{self._endpoint}/{self._index}/_search"
 
-        async with httpx.AsyncClient(
-            timeout=self._timeout_s, verify=self._verify, auth=self._auth
-        ) as client:
-            resp = await client.post(url, json=body, headers={"Content-Type": "application/json"})
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout_s, verify=self._verify, auth=self._auth
+            ) as client:
+                resp = await client.post(
+                    url, json=body, headers={"Content-Type": "application/json"}
+                )
+            if resp.status_code >= 500:
+                raise RetrievalUnavailableError(
+                    f"opensearch retriever {resp.status_code}: {resp.text[:200]}"
+                )
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.TimeoutException as exc:
+            raise RetrievalTimeoutError(f"opensearch retriever timeout: {exc}") from exc
+        except httpx.HTTPStatusError as exc:
+            raise RetrievalUnavailableError(
+                f"opensearch retriever http error: {exc}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise RetrievalUnavailableError(
+                f"opensearch retriever unreachable: {exc}"
+            ) from exc
 
         hits = (data.get("hits") or {}).get("hits") or []
         chunks = [self._hit_to_chunk(hit) for hit in hits[: max(1, tool_input.top_k)]]
