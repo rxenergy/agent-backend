@@ -5,12 +5,14 @@ from pathlib import Path
 from typing import Any
 
 import asyncpg
+import httpx
+import structlog
 
-from app.adapters.event_sink_filesystem import FilesystemEventSink
-from app.adapters.event_sink_minio import MinioEventSink
-from app.adapters.in_memory_session_store import InMemorySessionMemoryStore
-from app.adapters.llm_fake import FakeEchoLLM
-from app.adapters.llm_http import HttpLLM
+from app.adapters.event_sink.filesystem import FilesystemEventSink
+from app.adapters.event_sink.minio import MinioEventSink
+from app.adapters.session_store.in_memory import InMemorySessionMemoryStore
+from app.adapters.llm.fake import FakeEchoLLM
+from app.adapters.llm.http import HttpLLM
 from app.adapters.postgres.client import create_pool
 from app.adapters.postgres.session_memory_store import PostgresSessionMemoryStore
 from app.adapters.tools.artifact_event import WriteEventTool
@@ -34,8 +36,8 @@ from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
 from app.application.prompting.renderer import PromptRenderer
 from app.application.prompting.resolver import PromptResolver
-from app.application.tools.executor import ToolExecutor
-from app.application.tools.registry import ToolRegistry
+from app.application.tool_runtime.executor import ToolExecutor
+from app.application.tool_runtime.registry import ToolRegistry
 from app.config.settings import Settings
 from app.ports.event_sink import EventSinkPort
 from app.ports.llm import LLMPort
@@ -66,6 +68,51 @@ def _build_llm(settings: Settings) -> LLMPort:
         timeout_s=settings.llm_timeout_s,
         max_attempts=settings.llm_max_attempts,
     )
+
+
+async def _opensearch_preflight(endpoint: str, index: str) -> None:
+    """Best-effort reachability + index existence check.
+
+    Logs structured warnings and swallows errors — Agent boot continues regardless
+    so local development isn't blocked when OpenSearch or the seed is missing.
+    """
+    log = structlog.get_logger("opensearch.preflight")
+    base = endpoint.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
+            health = await client.get(f"{base}/_cluster/health")
+            if health.status_code >= 400:
+                log.warning(
+                    "opensearch_health_unreachable",
+                    endpoint=base,
+                    status=health.status_code,
+                )
+                return
+            head = await client.request("HEAD", f"{base}/{index}")
+            if head.status_code == 404:
+                log.warning(
+                    "opensearch_index_missing",
+                    endpoint=base,
+                    index=index,
+                    hint="run `make seed` to create and populate the index",
+                )
+                return
+            if head.status_code >= 400:
+                log.warning(
+                    "opensearch_index_check_failed",
+                    endpoint=base,
+                    index=index,
+                    status=head.status_code,
+                )
+                return
+        log.info("opensearch_preflight_ok", endpoint=base, index=index)
+    except httpx.RequestError as exc:
+        log.warning(
+            "opensearch_preflight_unreachable",
+            endpoint=base,
+            index=index,
+            error=str(exc),
+        )
 
 
 def _build_event_sink(settings: Settings) -> EventSinkPort:
@@ -114,6 +161,9 @@ async def build_container(settings: Settings) -> AppContainer:
     registry = ToolRegistry.from_yaml(settings.tool_registry_path)
 
     if settings.retriever_backend == "opensearch":
+        await _opensearch_preflight(
+            settings.opensearch_endpoint, settings.opensearch_index
+        )
         retriever_tool = OpenSearchRetrieverTool(
             endpoint=settings.opensearch_endpoint,
             index=settings.opensearch_index,

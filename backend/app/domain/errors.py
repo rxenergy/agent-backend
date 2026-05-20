@@ -19,3 +19,15 @@ class VerificationStatus(str, Enum):
     PARTIAL = "partial"
     FAIL = "fail"
     SKIPPED = "skipped"
+
+
+class RetrievalError(Exception):
+    """Base for retriever/document tool failures crossing the adapter boundary."""
+
+
+class RetrievalTimeoutError(RetrievalError):
+    """Retrieval call exceeded its timeout."""
+
+
+class RetrievalUnavailableError(RetrievalError):
+    """Retrieval backend unreachable or returned a 5xx response."""
