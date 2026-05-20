@@ -7,10 +7,10 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from app.adapters.event_sink_filesystem import FilesystemEventSink
-from app.application.tools.errors import RequiredToolFailed
-from app.application.tools.executor import ToolExecutor
-from app.application.tools.registry import ToolRegistry, ToolSpec
+from app.adapters.event_sink.filesystem import FilesystemEventSink
+from app.application.tool_runtime.errors import RequiredToolFailed
+from app.application.tool_runtime.executor import ToolExecutor
+from app.application.tool_runtime.registry import ToolRegistry, ToolSpec
 from app.domain.tools import ToolResult
 from app.ports.tool import ToolExecutionContext
 

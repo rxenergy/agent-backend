@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from app.adapters.llm_fake import FakeEchoLLM
-from app.adapters.llm_http import HttpLLM
+from app.adapters.llm.fake import FakeEchoLLM
+from app.adapters.llm.http import HttpLLM
 from app.config.profiles import _build_llm
 from app.config.settings import Settings
 

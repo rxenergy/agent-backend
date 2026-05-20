@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from app.application.tools.errors import ToolUnknown
-from app.application.tools.registry import ToolRegistry
+from app.application.tool_runtime.errors import ToolUnknown
+from app.application.tool_runtime.registry import ToolRegistry
 
 
 def test_loads_specs_from_yaml() -> None:

@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from app.adapters.event_sink_filesystem import FilesystemEventSink
-from app.adapters.in_memory_session_store import InMemorySessionMemoryStore
-from app.adapters.llm_fake import FakeEchoLLM
+from app.adapters.event_sink.filesystem import FilesystemEventSink
+from app.adapters.session_store.in_memory import InMemorySessionMemoryStore
+from app.adapters.llm.fake import FakeEchoLLM
 from app.adapters.tools.artifact_event import WriteEventTool
 from app.adapters.tools.document_local import LocalDocumentResolverTool
 from app.adapters.tools.memory_approved_stub import ApprovedSearchStubTool
@@ -26,8 +26,8 @@ from app.application.events.recorder import EventRecorder
 from app.application.memory.summarizer import ConversationSummarizer
 from app.application.prompting.renderer import PromptRenderer
 from app.application.prompting.resolver import PromptResolver
-from app.application.tools.executor import ToolExecutor
-from app.application.tools.registry import ToolRegistry
+from app.application.tool_runtime.executor import ToolExecutor
+from app.application.tool_runtime.registry import ToolRegistry
 from app.domain.classification import ClassificationResult
 from app.domain.interaction import AgentRequest
 

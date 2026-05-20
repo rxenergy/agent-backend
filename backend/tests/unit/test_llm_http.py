@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from app.adapters.llm_http import HttpLLM, LLMUnavailableError
+from app.adapters.llm.http import HttpLLM, LLMUnavailableError
 
 
 def _mock_transport(handler):
@@ -18,7 +18,7 @@ async def _patched_generate(monkeypatch, llm: HttpLLM, transport: httpx.MockTran
         kwargs["transport"] = transport
         return real_cls(*args, **kwargs)
 
-    monkeypatch.setattr("app.adapters.llm_http.httpx.AsyncClient", factory)
+    monkeypatch.setattr("app.adapters.llm.http.httpx.AsyncClient", factory)
 
 
 async def test_openai_compat_parses_response(monkeypatch):

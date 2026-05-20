@@ -134,3 +134,41 @@ async def test_document_resolver_marks_missing(monkeypatch):
 def test_retriever_endpoint_required():
     with pytest.raises(ValueError):
         OpenSearchRetrieverTool(endpoint="", index="smr-docs")
+
+
+async def test_retriever_maps_timeout_to_domain_error(monkeypatch):
+    from app.domain.errors import RetrievalTimeoutError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.TimeoutException("simulated timeout", request=request)
+
+    _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
+    tool = OpenSearchRetrieverTool(endpoint="http://os:9200", index="smr-docs")
+    with pytest.raises(RetrievalTimeoutError):
+        await tool.invoke({"query_text": "q", "top_k": 1}, _ctx())
+
+
+async def test_retriever_maps_5xx_to_domain_error(monkeypatch):
+    from app.domain.errors import RetrievalUnavailableError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": "unavailable"})
+
+    _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
+    tool = OpenSearchRetrieverTool(endpoint="http://os:9200", index="smr-docs")
+    with pytest.raises(RetrievalUnavailableError):
+        await tool.invoke({"query_text": "q", "top_k": 1}, _ctx())
+
+
+async def test_document_resolver_maps_request_error(monkeypatch):
+    from app.domain.errors import RetrievalUnavailableError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    _patch_client(monkeypatch, "app.adapters.tools.document_opensearch", handler)
+    tool = OpenSearchDocumentResolverTool(endpoint="http://os:9200", index="smr-docs")
+    with pytest.raises(RetrievalUnavailableError):
+        await tool.invoke(
+            {"citation_ids": ["c1"], "chunk_ids": ["kins-1#p7#1"]}, _ctx()
+        )
