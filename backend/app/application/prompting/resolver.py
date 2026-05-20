@@ -1,72 +1,108 @@
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-import yaml
+from app.domain.errors import PromptProfileNotFoundError
+
+FRAGMENT_KEYS: tuple[str, ...] = ("system", "object", "depth", "cell")
+
+
+@dataclass(frozen=True)
+class FragmentRef:
+    """Single composable prompt fragment.
+
+    `sha256` is the **full 64-char hex** digest of the fragment bytes (not the
+    truncated 16-char rendered hash). Sources MUST validate that the loaded
+    `content` actually hashes to this value — fragment drift is a domain rule
+    violation (spec §4.5, §9).
+    """
+
+    name: str
+    path: str
+    version: str
+    sha256: str
+    content: str
 
 
 @dataclass(frozen=True)
 class PromptProfile:
+    """A fully-resolved prompt profile ready for rendering.
+
+    Unlike v1 where the renderer re-read fragment files, fragments are pre-loaded
+    and hash-validated by the source. The renderer is pure (no I/O).
+    """
+
     profile_id: str
-    version: str
+    profile_version: str
     scenario_object: str
     scenario_depth: str
-    system_path: str
-    object_path: str
-    depth_path: str
-    cell_path: str | None
-    output_schema_path: str
-    model_options: dict[str, Any]
+    fragments: Mapping[str, FragmentRef]      # key ∈ FRAGMENT_KEYS; `cell` optional
+    output_schema: FragmentRef
+    model_options: Mapping[str, Any]
+    source: str                               # "local" | "phoenix" | "hybrid:..."
+
+    def fragment(self, name: str) -> FragmentRef | None:
+        return self.fragments.get(name)
+
+
+def compute_fragment_sha256(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def compute_composition_hash(fragments: Iterable[FragmentRef]) -> str:
+    """Canonical SHA256[:16] over the sorted (name, sha256) pairs.
+
+    Independent of context / query / model options. Two profiles with identical
+    fragment content yield identical composition_hash — the "prompt identity" key
+    used for A/B comparison and drift detection.
+    """
+    items = sorted((f.name, f.sha256) for f in fragments)
+    payload = "\n".join(f"{n}:{h}" for n, h in items).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+class PromptSourcePort(Protocol):
+    """Read-side port for prompt registries (local Git / Phoenix / hybrid)."""
+
+    source_id: str
+
+    def resolve(self, scenario_object: str, scenario_depth: str) -> PromptProfile | None:
+        ...
+
+    def all_profiles(self) -> list[PromptProfile]:
+        ...
 
 
 class PromptResolver:
-    """Loads prompt registry from local Git directory.
+    """Thin orchestrator over a `PromptSourcePort`.
 
-    Phoenix / hybrid sources are deferred to Phase 3+.
+    Fail-fast: unresolved (O, D) raises `PromptProfileNotFoundError` so the
+    runner can emit a first-class refusal instead of silently rendering a
+    dummy prompt (spec §6).
     """
 
-    def __init__(self, prompt_dir: str, label: str = "mvp") -> None:
-        self._dir = Path(prompt_dir)
-        self._label = label
-        self._registry: dict[str, PromptProfile] = {}
-        self._by_scenario: dict[tuple[str, str], str] = {}
-        self._loaded = False
+    def __init__(self, source: PromptSourcePort) -> None:
+        self._source = source
 
-    def _load(self) -> None:
-        registry_file = self._dir / "registry.yaml"
-        if not registry_file.exists():
-            self._loaded = True
-            return
-        data = yaml.safe_load(registry_file.read_text(encoding="utf-8")) or {}
-        profiles = (data.get("prompt_profiles") or {})
-        for profile_id, body in profiles.items():
-            profile = PromptProfile(
-                profile_id=profile_id,
-                version=str(body.get("version", "v1")),
-                scenario_object=body["scenario_object"],
-                scenario_depth=body["scenario_depth"],
-                system_path=body["system"],
-                object_path=body["object"],
-                depth_path=body["depth"],
-                cell_path=body.get("cell") or None,
-                output_schema_path=body.get("output_schema", ""),
-                model_options=body.get("model_options", {}) or {},
+    def resolve(self, scenario_object: str, scenario_depth: str) -> PromptProfile:
+        profile = self._source.resolve(scenario_object, scenario_depth)
+        if profile is None:
+            raise PromptProfileNotFoundError(
+                scenario_object=scenario_object, scenario_depth=scenario_depth
             )
-            self._registry[profile_id] = profile
-            self._by_scenario[(profile.scenario_object, profile.scenario_depth)] = profile_id
-        self._loaded = True
+        return profile
 
-    def resolve(self, scenario_object: str, scenario_depth: str) -> PromptProfile | None:
-        if not self._loaded:
-            self._load()
-        key = (scenario_object, scenario_depth)
-        profile_id = self._by_scenario.get(key)
-        if profile_id is None:
-            return None
-        return self._registry[profile_id]
+    def try_resolve(
+        self, scenario_object: str, scenario_depth: str
+    ) -> PromptProfile | None:
+        return self._source.resolve(scenario_object, scenario_depth)
+
+    def all_profiles(self) -> list[PromptProfile]:
+        return self._source.all_profiles()
 
     @property
-    def prompt_dir(self) -> Path:
-        return self._dir
+    def source_id(self) -> str:
+        return self._source.source_id
