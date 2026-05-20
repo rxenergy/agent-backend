@@ -5,6 +5,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+.serena/
 backend/.local/
 backend/*.egg-info/
 

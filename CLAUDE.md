@@ -20,7 +20,7 @@ Profile differences are env vars only — never branch the image.
 ## Architecture Principles (Non-Negotiable)
 
 1. **Agent workflow = `AgentRunner` variants.** The API / domain / adapter code does not change when you swap workflows. `AGENT_VARIANT` env var selects: `fake_echo_v0` (P0 test) | `sequential_tool_routed_v2` (default, 15-step via ToolExecutor).
-2. **Tools are controlled, not LLM-discovered.** Every external capability — retrieval, document resolution, memory access, verification, artifact write — is invoked through `ToolExecutor` against `tools/registry.yaml`. The LLM does not pick tools; the workflow does.
+2. **Tools are controlled, not LLM-discovered.** Every external capability — retrieval, document resolution, memory access, verification, artifact write — is invoked through `ToolExecutor` against `tools/registry.yaml`. The LLM does not pick tools; the workflow does. Retrieval / document resolution backends are selected via `RETRIEVER_BACKEND` (`opensearch` | `local`) and wired in `backend/app/config/profiles.py`; `tools/registry.yaml` defines policy (timeout / retry / required) only.
 3. **Memory is gated.** Session memory injects only on follow-up turns with matching scenario + ≥50% entity overlap. Approved memory (Phase 5) is the only long-term knowledge that reaches the prompt; candidate/stale memory never does.
 4. **Hexagonal (Ports & Adapters).** `backend/app/{domain,ports,adapters,application,api,config,observability}`. Domain code MUST NOT import external SDKs.
 5. **Reproducibility is a domain rule.** Every response emits an `InteractionEvent` (spec §16) capturing variant, prompt profile/version/hash, context hash, retrieved chunk ids, tool_calls, memory_ids_used, verification result, model options.
@@ -97,6 +97,7 @@ Unit tests do NOT depend on adapters or containers — they exercise domain + ap
 | 2 | PromptResolver/Renderer, ContextPack, MinIO artifact sink | done |
 | 2.5 | Tool Registry/Executor, 15-step workflow, tool_calls in event | done |
 | 3 | Postgres + pgvector, session memory store, multi-turn | done |
+| 3.1 | OpenSearch retrieval interface (Tool port + preflight + error mapping; query/mapping deferred) | done |
 | 3.5 | Verification tool strengthening (Ragas) | future |
 | 4 | Memory candidate / Expert review | future |
 | 5 | Approved memory + pgvector ANN | future |
