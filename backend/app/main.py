@@ -26,7 +26,9 @@ async def lifespan(app: FastAPI):
     get_logger("startup").info(
         "agent_backend_started",
         app_profile=settings.app_profile,
-        agent_variant=settings.agent_variant,
+        agent_variants=sorted(container.runners.keys()),
+        default_variant=settings.default_variant,
+        default_llm=settings.default_llm,
         event_sink=settings.event_sink,
         memory_store=settings.memory_store,
         otel_endpoint=settings.otel_exporter_otlp_endpoint,

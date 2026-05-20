@@ -2,7 +2,24 @@ from __future__ import annotations
 
 from typing import Literal
 
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class LLMPoolEntry(BaseModel):
+    """One HttpLLM endpoint exposed to the /v1/models dropdown.
+
+    `api_key_env` is the **name** of the env var that holds the key — the value
+    itself stays out of settings so secrets aren't logged when settings are dumped.
+    """
+
+    id: str
+    provider: Literal["openai_compat", "anthropic"]
+    endpoint: str
+    model: str
+    api_key_env: str | None = None
+    timeout_s: float = 30.0
+    max_attempts: int = 2
 
 
 class Settings(BaseSettings):
@@ -12,9 +29,11 @@ class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
 
-    agent_variant: str = "sequential_tool_routed_v2"
-    exposed_model_id: str = "agent-search-v1"
     service_version: str = "0.2.0"
+
+    # Agent variant pool + default selection
+    agent_variants_enabled: list[str] = ["sequential_tool_routed_v2", "fake_echo_v0"]
+    default_variant: str = "sequential_tool_routed_v2"
 
     # Classifier (Node 1)
     classifier_backend: Literal["rule", "llm", "hybrid"] = "rule"
@@ -30,12 +49,11 @@ class Settings(BaseSettings):
     multi_turn_summary_enabled: bool = True
     multi_turn_keep_turns: int = 5
 
-    # LLM provider (W1)
-    # provider: fake | openai_compat (vLLM, OpenAI, LM Studio, Ollama) | anthropic
-    llm_provider: Literal["fake", "openai_compat", "anthropic"] = "fake"
-    llm_endpoint: str = ""
-    llm_model: str = ""
-    llm_api_key: str = ""
+    # LLM pool — JSON list, parsed by pydantic-settings.
+    # fake-echo는 항상 풀에 자동 포함되므로 여기 정의하지 않는다.
+    llm_pool: list[LLMPoolEntry] = []
+    default_llm: str = "fake-echo"
+    utility_llm: str = "fake-echo"
     llm_timeout_s: float = 30.0
     llm_max_attempts: int = 2
 

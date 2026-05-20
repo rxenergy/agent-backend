@@ -4,7 +4,7 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.domain.interaction import AgentRequest, ChatTurn
@@ -26,20 +26,57 @@ class ChatCompletionRequest(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
+def _split_model_id(raw: str, *, default_variant: str, default_llm: str) -> tuple[str, str]:
+    """Parse `<variant>@<llm>`. Missing parts fall back to defaults."""
+    if not raw:
+        return default_variant, default_llm
+    variant, sep, llm = raw.partition("@")
+    if not sep:
+        # Treat a bare id as variant only.
+        return (variant or default_variant), default_llm
+    return (variant or default_variant), (llm or default_llm)
+
+
+def _list_model_combinations(container) -> list[dict[str, Any]]:
+    settings = container.settings
+    runners = container.runners
+    llm_ids = list(container.llm_pool.keys())
+    now = int(time.time())
+
+    pairs: list[tuple[str, str]] = []
+    # Default combo first so OpenWebUI auto-selects it.
+    default_pair = (settings.default_variant, settings.default_llm)
+    if (
+        default_pair[0] in runners
+        and default_pair[1] in container.llm_pool
+    ):
+        pairs.append(default_pair)
+
+    for variant_id, runner in runners.items():
+        allowed = getattr(runner, "compatible_llms", None)
+        for llm_id in llm_ids:
+            if allowed is not None and llm_id not in allowed:
+                continue
+            pair = (variant_id, llm_id)
+            if pair == default_pair:
+                continue
+            pairs.append(pair)
+
+    return [
+        {
+            "id": f"{v}@{l}",
+            "object": "model",
+            "created": now,
+            "owned_by": "smr-agent",
+        }
+        for v, l in pairs
+    ]
+
+
 @router.get("/v1/models")
 async def list_models(request: Request) -> dict[str, Any]:
-    settings = request.app.state.container.settings
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": settings.exposed_model_id,
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "smr-agent",
-            }
-        ],
-    }
+    container = request.app.state.container
+    return {"object": "list", "data": _list_model_combinations(container)}
 
 
 def _last_user_query(messages: list[ChatMessage]) -> str:
@@ -53,7 +90,50 @@ def _last_user_query(messages: list[ChatMessage]) -> str:
 async def chat_completions(req: ChatCompletionRequest, request: Request) -> dict[str, Any]:
     container = request.app.state.container
     settings = container.settings
-    runner = container.runner
+
+    variant_id, llm_id = _split_model_id(
+        req.model,
+        default_variant=settings.default_variant,
+        default_llm=settings.default_llm,
+    )
+
+    runner = container.runners.get(variant_id)
+    if runner is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "code": "unknown_variant",
+                    "message": f"agent variant {variant_id!r} is not enabled",
+                    "available": sorted(container.runners.keys()),
+                }
+            },
+        )
+
+    if llm_id not in container.llm_pool:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "code": "unknown_llm",
+                    "message": f"llm {llm_id!r} is not in the pool",
+                    "available": sorted(container.llm_pool.keys()),
+                }
+            },
+        )
+
+    allowed = getattr(runner, "compatible_llms", None)
+    if allowed is not None and llm_id not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "code": "incompatible_llm",
+                    "message": f"variant {variant_id!r} cannot use llm {llm_id!r}",
+                    "compatible_llms": sorted(allowed),
+                }
+            },
+        )
 
     interaction_id = str(uuid.uuid4())
     query_text = _last_user_query(req.messages)
@@ -69,7 +149,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> dict
         interaction_id=interaction_id,
         query_text=query_text,
         chat_history=history,
-        model=req.model,
+        model=llm_id,
         model_options=model_options,
         session_id=request.headers.get("x-session-id"),
         user_id=request.headers.get("x-user-id"),
@@ -77,11 +157,14 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> dict
     )
     response = await runner.run(agent_request)
 
+    resolved_llm = response.llm_id or llm_id
+    composite_id = f"{variant_id}@{resolved_llm}"
+
     return {
         "id": interaction_id,
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": settings.exposed_model_id,
+        "model": composite_id,
         "choices": [
             {
                 "index": 0,
@@ -97,6 +180,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> dict
         "smr_agent": {
             "interaction_id": interaction_id,
             "agent_variant": runner.variant_id,
+            "llm_id": resolved_llm,
+            "model_id": response.model_id,
             "scenario_object": response.scenario_object,
             "scenario_depth": response.scenario_depth,
             "classification_confidence": response.classification_confidence,

@@ -4,6 +4,7 @@ import time
 from dataclasses import replace
 from typing import Any
 
+from app.application.agents.llm_router import LLMRouter, UnknownLLMError
 from app.application.classification.active_cells import is_active
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder, sha256_hex
@@ -38,11 +39,13 @@ class SequentialToolRoutedRunner:
     multi-turn summary follow 기획 doc §Workflow."""
 
     variant_id = "sequential_tool_routed_v2"
+    # None = pool 전체 호환. Router 풀에서 자동으로 등록된 LLM을 모두 사용 가능.
+    compatible_llms: frozenset[str] | None = None
 
     def __init__(
         self,
         *,
-        llm: LLMPort,
+        llm_router: LLMRouter,
         tool_executor: ToolExecutor,
         prompt_resolver: PromptResolver,
         prompt_renderer: PromptRenderer,
@@ -57,7 +60,7 @@ class SequentialToolRoutedRunner:
         verification_retry_on_fail: bool = False,
         summarizer: ConversationSummarizer | None = None,
     ) -> None:
-        self._llm = llm
+        self._llm_router = llm_router
         self._tools = tool_executor
         self._resolver = prompt_resolver
         self._renderer = prompt_renderer
@@ -101,10 +104,15 @@ class SequentialToolRoutedRunner:
                 )
             )
 
+        try:
+            llm_id, llm = self._llm_router.resolve(request.model or None)
+        except UnknownLLMError:
+            llm_id, llm = self._llm_router.resolve(None)
+
         with _TRACER.start_as_current_span("agent.run") as root:
             root.set_attribute("interaction_id", request.interaction_id)
             root.set_attribute("agent.variant", self.variant_id)
-            root.set_attribute("model_id", request.model)
+            root.set_attribute("llm_id", llm_id)
             root.set_attribute("session_id", request.session_id or "")
 
             # === Node 1: intent_classification ===
@@ -317,7 +325,7 @@ class SequentialToolRoutedRunner:
             # === 8. generation (Node 3) ===
             llm_result = await self._generate(request, rendered, started, tool_calls,
                                               scenario_object, scenario_depth,
-                                              classification_confidence)
+                                              classification_confidence, llm=llm)
             if isinstance(llm_result, AgentResponse):
                 return llm_result  # LLM unavailable refusal
 
@@ -354,6 +362,7 @@ class SequentialToolRoutedRunner:
                     chunk_ids=chunk_ids,
                     ctx=ctx,
                     record=record,
+                    llm=llm,
                 )
             )
             root.set_attribute("verification.retry_count", retry_count)
@@ -452,6 +461,8 @@ class SequentialToolRoutedRunner:
                     classification_confidence=classification_confidence,
                     classifier_backend=classification.classifier_backend,
                     entities=entities,
+                    llm_id=llm_id,
+                    model_id=llm_result.model_id,
                 )
 
             with _TRACER.start_as_current_span("event.persist") as s:
@@ -512,10 +523,12 @@ class SequentialToolRoutedRunner:
         scenario_object: str,
         scenario_depth: str,
         classification_confidence: float,
+        *,
+        llm: LLMPort,
     ):
         with _TRACER.start_as_current_span("llm.generation") as s:
             try:
-                llm_result = await self._llm.generate(rendered.text)
+                llm_result = await llm.generate(rendered.text)
             except LLMUnavailableError as exc:
                 s.set_attribute("llm.error", str(exc)[:256])
                 s.set_attribute("llm.status", "unavailable")
@@ -551,6 +564,7 @@ class SequentialToolRoutedRunner:
         chunk_ids: list[str],
         ctx: ToolExecutionContext,
         record,
+        llm: LLMPort,
     ):
         retry_count = 0
 
@@ -592,7 +606,7 @@ class SequentialToolRoutedRunner:
             retry_count = 1
             with _TRACER.start_as_current_span("llm.generation.retry") as s:
                 try:
-                    llm_result = await self._llm.generate(
+                    llm_result = await llm.generate(
                         rendered.text,
                         model_options={"temperature": 0.0},
                     )

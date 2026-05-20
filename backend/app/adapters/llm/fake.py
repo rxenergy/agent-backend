@@ -6,8 +6,12 @@ from app.ports.llm import LLMPort, LLMResult
 
 
 class FakeEchoLLM(LLMPort):
-    def __init__(self, model_id: str = "fake-echo-v0") -> None:
+    def __init__(self, model_id: str = "fake-echo") -> None:
         self._model_id = model_id
+
+    @property
+    def model_id(self) -> str:
+        return self._model_id
 
     async def generate(
         self,

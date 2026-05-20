@@ -51,6 +51,8 @@ class AgentResponse:
     classification_confidence: float = 0.0
     classifier_backend: str | None = None
     entities: dict[str, list[str]] = field(default_factory=dict)
+    llm_id: str | None = None
+    model_id: str | None = None
 
 
 @dataclass(frozen=True)

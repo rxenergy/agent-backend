@@ -14,6 +14,7 @@ class FakeEchoAgentRunner:
     """P0 test variant — single span, no tools."""
 
     variant_id = "fake_echo_v0"
+    compatible_llms: frozenset[str] = frozenset({"fake-echo"})
 
     def __init__(self, recorder: EventRecorder) -> None:
         self._recorder = recorder
