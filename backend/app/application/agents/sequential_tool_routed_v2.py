@@ -8,7 +8,7 @@ from typing import Any
 from app.application.agents.llm_router import LLMRouter, UnknownLLMError
 from app.application.classification.active_cells import is_active
 from app.application.context.pack import ContextBuilder
-from app.application.events.recorder import EventRecorder, sha256_hex
+from app.application.events.recorder import EventRecorder
 from app.application.memory.policies import decide_session_injection
 from app.application.memory.summarizer import ConversationSummarizer
 from app.application.prompting.renderer import PromptRenderer, RenderedPrompt
@@ -16,7 +16,11 @@ from app.application.prompting.resolver import PromptResolver
 from app.application.tool_runtime.errors import RequiredToolFailed
 from app.application.tool_runtime.executor import ToolExecutor
 from app.domain.classification import DEFAULT_DEPTH, DEFAULT_OBJECT, ClassificationResult
-from app.domain.errors import RefusalReason, VerificationStatus
+from app.domain.errors import (
+    PromptProfileNotFoundError,
+    RefusalReason,
+    VerificationStatus,
+)
 from app.domain.interaction import (
     AgentRequest,
     AgentResponse,
@@ -342,25 +346,40 @@ class SequentialToolRoutedRunner:
 
             # === 7. prompt_rendering ===
             with _TRACER.start_as_current_span("agent.prompt_render") as s:
-                profile = self._resolver.resolve(scenario_object, scenario_depth)
-                if profile is None:
-                    rendered = RenderedPrompt(
-                        profile_id="fallback",
-                        version="v0",
-                        text=f"{request.query_text}\n\n[no profile resolved]",
-                        hash=sha256_hex(request.query_text),
-                        fragments={},
+                try:
+                    profile = self._resolver.resolve(scenario_object, scenario_depth)
+                except PromptProfileNotFoundError as exc:
+                    s.set_attribute("prompt.resolved", False)
+                    s.set_attribute("prompt.miss_scenario_object", exc.scenario_object)
+                    s.set_attribute("prompt.miss_scenario_depth", exc.scenario_depth)
+                    return await self._refuse(
+                        request,
+                        started,
+                        tool_calls,
+                        scenario_object,
+                        scenario_depth,
+                        RefusalReason.UNKNOWN_SCENARIO,
+                        classification_confidence,
+                        verification_status=VerificationStatus.SKIPPED,
+                        error_code="prompt_profile_not_found",
                     )
-                else:
-                    context_block = self._context_builder.render_for_prompt(pack)
-                    rendered = self._renderer.render(
-                        profile,
-                        query_text=request.query_text,
-                        context_block=context_block,
-                    )
+                context_block = self._context_builder.render_for_prompt(pack)
+                rendered = self._renderer.render(
+                    profile,
+                    query_text=request.query_text,
+                    context_block=context_block,
+                )
                 s.set_attribute("prompt_profile_id", rendered.profile_id)
-                s.set_attribute("prompt_version", rendered.version)
-                s.set_attribute("rendered_prompt_hash", rendered.hash)
+                s.set_attribute("prompt_version", rendered.profile_version)
+                s.set_attribute("prompt_source", rendered.source)
+                s.set_attribute("rendered_prompt_hash", rendered.rendered_prompt_hash)
+                s.set_attribute("prompt_composition_hash", rendered.composition_hash)
+                for name, sha in rendered.fragment_hashes.items():
+                    s.set_attribute(f"prompt.fragment.{name}.sha", sha[:16])
+                    s.set_attribute(
+                        f"prompt.fragment.{name}.version",
+                        rendered.fragment_versions.get(name, ""),
+                    )
                 await self._sink.write_prompt_render_record(
                     request.interaction_id,
                     self._renderer.to_record(rendered, query_text=request.query_text),
@@ -542,8 +561,11 @@ class SequentialToolRoutedRunner:
                     retrieved_chunk_ids=tuple(chunk_ids),
                     retrieval_confidence=chunks[0].score if chunks else 0.0,
                     prompt_profile_id=rendered.profile_id,
-                    prompt_version=rendered.version,
-                    rendered_prompt_hash=rendered.hash,
+                    prompt_version=rendered.profile_version,
+                    rendered_prompt_hash=rendered.rendered_prompt_hash,
+                    prompt_composition_hash=rendered.composition_hash,
+                    prompt_fragment_versions=dict(rendered.fragment_versions),
+                    prompt_source=rendered.source,
                     context_hash=pack.context_hash,
                     classification_confidence=classification_confidence,
                     citation_completeness=citation_completeness,
