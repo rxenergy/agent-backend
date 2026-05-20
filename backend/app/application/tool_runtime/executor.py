@@ -8,13 +8,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.application.tools.errors import (
+from app.application.tool_runtime.errors import (
     RequiredToolFailed,
     ToolFailure,
     ToolTimeout,
     ToolUnknown,
 )
-from app.application.tools.registry import ToolRegistry, ToolSpec
+from app.application.tool_runtime.registry import ToolRegistry, ToolSpec
 from app.domain.tools import ToolErrorCode, ToolResult, ToolStatus
 from app.observability.otel import get_tracer
 from app.ports.event_sink import EventSinkPort

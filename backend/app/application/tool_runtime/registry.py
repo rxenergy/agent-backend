@@ -5,7 +5,7 @@ from pathlib import Path
 
 import yaml
 
-from app.application.tools.errors import ToolUnknown
+from app.application.tool_runtime.errors import ToolUnknown
 
 
 @dataclass(frozen=True)
