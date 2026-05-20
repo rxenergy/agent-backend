@@ -18,6 +18,7 @@ from app.adapters.tools.verification_local import (
     LocalCitationCheckTool,
     LocalFaithfulnessCheckTool,
 )
+from app.application.agents.llm_router import LLMRouter
 from app.application.agents.sequential_tool_routed_v2 import SequentialToolRoutedRunner
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
@@ -105,8 +106,10 @@ def _make_runner(tmp: Path, *, llm=None) -> tuple[SequentialToolRoutedRunner, Fi
     }
     executor = ToolExecutor(registry=registry, tools=tools, event_sink=sink)
 
+    llm_instance = llm or FakeEchoLLM(model_id="fake-echo")
+    llm_router = LLMRouter(pool={"fake-echo": llm_instance}, default_id="fake-echo")
     runner = SequentialToolRoutedRunner(
-        llm=llm or FakeEchoLLM(),
+        llm_router=llm_router,
         tool_executor=executor,
         prompt_resolver=PromptResolver(str(prompts)),
         prompt_renderer=PromptRenderer(prompt_dir=prompts),

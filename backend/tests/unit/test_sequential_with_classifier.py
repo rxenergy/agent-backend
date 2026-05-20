@@ -19,6 +19,7 @@ from app.adapters.tools.verification_local import (
     LocalCitationCheckTool,
     LocalFaithfulnessCheckTool,
 )
+from app.application.agents.llm_router import LLMRouter
 from app.application.agents.sequential_tool_routed_v2 import SequentialToolRoutedRunner
 from app.application.classification.rule import RuleClassifier
 from app.application.context.pack import ContextBuilder
@@ -139,8 +140,12 @@ def _make_runner(
         "artifact.write_event": WriteEventTool(),
     }
     executor = ToolExecutor(registry=registry, tools=tools, event_sink=sink)
+    llm_router = LLMRouter(
+        pool={"fake-echo": FakeEchoLLM(model_id="fake-echo")},
+        default_id="fake-echo",
+    )
     runner = SequentialToolRoutedRunner(
-        llm=FakeEchoLLM(),
+        llm_router=llm_router,
         tool_executor=executor,
         prompt_resolver=PromptResolver(str(prompts)),
         prompt_renderer=PromptRenderer(prompt_dir=prompts),
