@@ -1,0 +1,56 @@
+# v2 §8.5 — Tool Registry.
+# Each tool is invoked via ToolExecutor. Adapter selection (which concrete class
+# implements a tool name) is decided in backend/app/config/profiles.py, in the
+# build_runtime() branch on settings.retriever_backend. This file defines only
+# the execution policy — timeout_ms / retry / required — and the registry
+# loader does NOT perform variable interpolation.
+
+tools:
+  retriever.search:
+    version: v1
+    adapter: env:RETRIEVER_BACKEND   # opensearch | local — wired in profiles.py
+    timeout_ms: 5000
+    retry: 1
+    required: true
+
+  document.resolve_citation:
+    version: v1
+    adapter: env:RETRIEVER_BACKEND   # opensearch | local — wired in profiles.py
+    timeout_ms: 2000
+    retry: 0
+    required: true
+
+  memory.session_load:
+    version: v1
+    adapter: postgres
+    timeout_ms: 1000
+    retry: 0
+    required: false
+
+  memory.session_update:
+    version: v1
+    adapter: postgres
+    timeout_ms: 1000
+    retry: 0
+    required: false
+
+  memory.approved_search:
+    version: v1
+    adapter: postgres_pgvector
+    timeout_ms: 1000
+    retry: 0
+    required: false
+
+  verification.citation_check:
+    version: v1
+    adapter: local
+    timeout_ms: 1000
+    retry: 0
+    required: true
+
+  verification.faithfulness_check:
+    version: v1
+    adapter: local
+    timeout_ms: 3000
+    retry: 0
+    required: true
