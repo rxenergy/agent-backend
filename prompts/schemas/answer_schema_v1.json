@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AnswerSchema v1",
+  "type": "object",
+  "required": ["answer", "citations"],
+  "properties": {
+    "answer": {"type": "string"},
+    "citations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["citation_id"],
+        "properties": {
+          "citation_id": {"type": "string"},
+          "chunk_id": {"type": "string"},
+          "document_id": {"type": "string"},
+          "page": {"type": "integer"},
+          "regulation_clause": {"type": "string"}
+        }
+      }
+    },
+    "refusal_reason": {"type": ["string", "null"]}
+  }
+}
