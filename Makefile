@@ -3,7 +3,7 @@ SHELL := /bin/sh
 COMPOSE := docker compose --env-file infra/env/local.env --profile local \
   -f infra/compose/compose.yml -f infra/compose/compose.local.yml
 
-.PHONY: help build up-local down logs ps test smoke seed verify-w1 fmt clean migrate psql
+.PHONY: help build up-local down logs ps test smoke seed verify-w1 fmt clean migrate psql prompts-validate
 
 help:
 	@echo "Targets:"
@@ -37,6 +37,9 @@ ps:
 
 test:
 	cd backend && python -m pytest -q
+
+prompts-validate:
+	python3 scripts/validate_prompts.py prompts
 
 smoke:
 	./scripts/smoke.sh

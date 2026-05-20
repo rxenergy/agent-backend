@@ -24,8 +24,10 @@ from app.application.classification.rule import RuleClassifier
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
 from app.application.memory.summarizer import ConversationSummarizer
+from app.application.prompting.local_source import LocalPromptSource
 from app.application.prompting.renderer import PromptRenderer
 from app.application.prompting.resolver import PromptResolver
+from tests.unit._prompts_fixture import build_prompts as _shared_build_prompts
 from app.application.tool_runtime.executor import ToolExecutor
 from app.application.tool_runtime.registry import ToolRegistry
 from app.domain.classification import ClassificationResult
@@ -33,40 +35,7 @@ from app.domain.interaction import AgentRequest
 
 
 def _build_prompts(root: Path) -> None:
-    for d in ("system", "object", "depth", "cell", "schemas"):
-        (root / d).mkdir(parents=True, exist_ok=True)
-    (root / "system" / "sys_v1.md").write_text("SYS")
-    (root / "object" / "o1_v1.md").write_text("O1")
-    (root / "object" / "o4_v1.md").write_text("O4")
-    (root / "depth" / "d2_v1.md").write_text("D2")
-    (root / "cell" / "o1_d2.md").write_text("CELL_O1D2")
-    (root / "schemas" / "answer_v1.json").write_text("{}")
-    common = {
-        "version": "v1",
-        "system": "system/sys_v1.md",
-        "depth": "depth/d2_v1.md",
-        "output_schema": "schemas/answer_v1.json",
-        "model_options": {"temperature": 0.1},
-    }
-    registry = {
-        "prompt_profiles": {
-            "o1_d2_v1": {
-                **common,
-                "scenario_object": "O1",
-                "scenario_depth": "D2",
-                "object": "object/o1_v1.md",
-                "cell": "cell/o1_d2.md",
-            },
-            "o4_d2_v1": {
-                **common,
-                "scenario_object": "O4",
-                "scenario_depth": "D2",
-                "object": "object/o4_v1.md",
-                "cell": None,
-            },
-        }
-    }
-    (root / "registry.yaml").write_text(yaml.safe_dump(registry))
+    _shared_build_prompts(root, scenarios=[("O1", "D2"), ("O4", "D2")])
 
 
 def _build_tool_registry(root: Path) -> Path:
@@ -144,8 +113,8 @@ def _make_runner(
     runner = SequentialToolRoutedRunner(
         llm_router=llm_router,
         tool_executor=executor,
-        prompt_resolver=PromptResolver(str(prompts)),
-        prompt_renderer=PromptRenderer(prompt_dir=prompts),
+        prompt_resolver=PromptResolver(LocalPromptSource(prompts)),
+        prompt_renderer=PromptRenderer(),
         context_builder=ContextBuilder(capture_mode="full"),
         recorder=recorder,
         event_sink=sink,
@@ -177,6 +146,47 @@ async def test_classifier_drives_scenario_and_entities() -> None:
         rec = json.loads(files[0].read_text().splitlines()[0])
         assert rec["scenario_object"] == "O1"
         assert rec["classification_confidence"] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_unresolved_profile_refuses_unknown_scenario() -> None:
+    """Fail-fast: an active (O, D) with no registered prompt profile must refuse
+    before the LLM is called — no silent fallback prompt (spec §6)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # Fixture only registers (O1,D2) and (O4,D2). O2/D3 is active but unmapped.
+        runner, _, _ = _make_runner(
+            Path(tmp), classifier=_FixedClassifier("O2", "D3", 0.9)
+        )
+        req = AgentRequest(interaction_id="i-miss", query_text="질문", session_id="s1")
+        resp = await runner.run(req)
+        assert resp.refusal_reason == "unknown_scenario"
+        assert resp.verification_status == "skipped"
+        assert resp.citations == ()
+
+        events_root = Path(tmp) / "events" / "t" / "interaction_events"
+        files = list(events_root.rglob("*.jsonl"))
+        rec = json.loads(files[0].read_text().splitlines()[0])
+        assert rec["error_code"] == "prompt_profile_not_found"
+
+
+@pytest.mark.asyncio
+async def test_event_carries_prompt_composition_hash() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _, _ = _make_runner(
+            Path(tmp), classifier=_FixedClassifier("O1", "D2", 0.9)
+        )
+        req = AgentRequest(interaction_id="i-hash", query_text="질문", session_id="s1")
+        resp = await runner.run(req)
+        assert resp.refusal_reason is None
+
+        events_root = Path(tmp) / "events" / "t" / "interaction_events"
+        files = list(events_root.rglob("*.jsonl"))
+        rec = json.loads(files[0].read_text().splitlines()[0])
+        assert rec["prompt_composition_hash"]
+        assert rec["rendered_prompt_hash"]
+        assert rec["prompt_composition_hash"] != rec["rendered_prompt_hash"]
+        assert rec["prompt_fragment_versions"]["system"] == "v1"
+        assert rec["prompt_source"] == "local"
 
 
 @pytest.mark.asyncio

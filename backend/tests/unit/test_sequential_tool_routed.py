@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.unit._prompts_fixture import build_prompts
 from app.adapters.event_sink.filesystem import FilesystemEventSink
 from app.adapters.session_store.in_memory import InMemorySessionMemoryStore
 from app.adapters.llm.fake import FakeEchoLLM
@@ -21,6 +22,7 @@ from app.application.agents.llm_router import LLMRouter
 from app.application.agents.sequential_tool_routed_v2 import SequentialToolRoutedRunner
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
+from app.application.prompting.local_source import LocalPromptSource
 from app.application.prompting.renderer import PromptRenderer
 from app.application.prompting.resolver import PromptResolver
 from app.application.tool_runtime.executor import ToolExecutor
@@ -29,32 +31,7 @@ from app.domain.interaction import AgentRequest
 
 
 def _build_prompts(root: Path) -> None:
-    (root / "system").mkdir(parents=True)
-    (root / "object").mkdir()
-    (root / "depth").mkdir()
-    (root / "cell").mkdir()
-    (root / "schemas").mkdir()
-    (root / "system" / "sys_v1.md").write_text("SYS")
-    (root / "object" / "o4_v1.md").write_text("O4")
-    (root / "depth" / "d2_v1.md").write_text("D2")
-    (root / "cell" / "o4_d2_v1.md").write_text("CELL")
-    (root / "schemas" / "answer_v1.json").write_text("{}")
-    registry = {
-        "prompt_profiles": {
-            "o4_d2_v1": {
-                "version": "v1",
-                "scenario_object": "O4",
-                "scenario_depth": "D2",
-                "system": "system/sys_v1.md",
-                "object": "object/o4_v1.md",
-                "depth": "depth/d2_v1.md",
-                "cell": "cell/o4_d2_v1.md",
-                "output_schema": "schemas/answer_v1.json",
-                "model_options": {"temperature": 0.1},
-            }
-        }
-    }
-    (root / "registry.yaml").write_text(yaml.safe_dump(registry))
+    build_prompts(root)
 
 
 def _build_tool_registry(root: Path) -> Path:
@@ -132,8 +109,8 @@ def _make_runner(
     runner = SequentialToolRoutedRunner(
         llm_router=llm_router,
         tool_executor=executor,
-        prompt_resolver=PromptResolver(str(prompts)),
-        prompt_renderer=PromptRenderer(prompt_dir=prompts),
+        prompt_resolver=PromptResolver(LocalPromptSource(prompts)),
+        prompt_renderer=PromptRenderer(),
         context_builder=ContextBuilder(capture_mode="full"),
         recorder=recorder,
         event_sink=sink,
