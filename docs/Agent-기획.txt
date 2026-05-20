@@ -1,0 +1,238 @@
+﻿Agent 기획
+1. Agent의 역할
+Agent SMR 인허가 엔지니어의 자연어 질의를 받아, 도메인 데이터로부터 검증된 답변을 생성하는 오케스트레이션 레이어다.
+Agent 는 다음을 책임진다:
+1. 질의 이해 — 사용자가 무엇을 묻는지 파악, 어떤 시나리오인지 분류
+2. 데이터 접근 — OpenSearch · LLM 을 적절히 호출하여 정보 수집
+3. 답변 생성 — 수집된 정보를 답변으로 합성
+4. 답변 검증 — 출처 인용·환각 검증
+5. 사용자 피드백 처리 — 좋아요/싫어요 · 코멘트
+2. Workflow 설계
+https://rxdev.atlassian.net/wiki/spaces/AR/whiteboard/23068778 
+Node 1 : Intent Classification
+사용자 질의가 시나리오 중 어느 것에 해당하는지 분류
+Input
+• 사용자 자연어 질의
+• (option) 대화 히스토리
+Output
+• Scenario Object (O1·O2·O3·O4)
+• Scenario Depth (D1·D2·D3·D4)
+• Entities (노형명, 규제 ID, RAI 번호, 도메인 키워드 등)
+• Classification Confidence
+처리 방식
+• LLM
+• (Rule-Base)
+실패 처리
+• 객체 분류 실패 시 사용자 명확화 요청(Fallback?)
+• 깊이 분류 실패 시 사용자 명확화 요청(Fallback?)
+• 비활성셀 분류(이번 phase 답변 어려움) → 현재 Phase에서는 답변 제한 안내
+상세는 https://rxdev.atlassian.net/wiki/spaces/AR/pages/edit-v2/22904937#3.-Scenario-Routing 참고
+Node 2 : Retrieval
+객체 기준 검색 → 관련 청크, 메타데이터 수집
+Input
+• Scenario Object
+• Entities
+• 사용자 질의 원본
+Output
+• Search Results (검색 청크 리스트)
+• Retrieval Confidence
+• Retrieval Metadata (검색에 사용된 인덱스, 필터, 쿼리)
+처리 방식
+• ??
+실패 처리
+• 검색 결과 0건 → 관련 정보 없음 응답
+• 검색 신뢰도 낮음 → 사용자 명확화 요청, 검색 쿼리 변형
+Node 3 : Generation
+LLM 호출 → 답변 생성
+Input
+• Scenario Object, Scenario Depth
+• Search Result
+• Entities
+• 사용자 질의 원본
+• (option) 대화 히스토리
+Output
+• Generated Answer (답변 텍스트)
+• Citation (인용 메타 데이터)
+o 문서, 페이지, 구절, revision
+• Generation Metadata
+처리 방식
+• 프롬프트 선택 : Scenario Object X Scenario Depth
+• LLM 호출
+실패 처리
+• LLM 호출 실패 → 재시도
+• Timeout → 사용자 알림 + 재시도 옵션
+• 빈 응답 → 재시도
+Node 4 : Verification
+답변 출처 인용 정확성 + Hallucination 여부 검증
+Input
+• Generated Answer
+• Citations
+• Search Results
+Output
+• Verification Result (Pass / Fail / Partial)
+• Verification Score
+• Verification Detail (어디가 문제인지)
+처리 방식
+• Citation Completeness
+o 답변에 인용된 구절, 페이지, 개정이력, 문서가 실제 인덱스에 존재하는지 확인
+o 임계값 : >= 0.9
+• Faithfulness
+o 답변 내용이 검색 결과로 뒷받침되는지 확인
+o 임계값 : >= 0.85
+실패 처리
+• 1차 실패 → Node 3 Fallback
+• 2차 실패 → 부분 답변 응답 또는 답변 거부
+Node 5 : Response
+검증 통과한 답변을 사용자에게 전달 + 사용 로그 누적
+Input
+• 모든 이전 노드 출력
+Output
+• 사용자에게 답변 전달 (스트리밍)
+• 로그 DB에 기록 누적
+처리 방식
+• 답변 + 인용을 UI 호환 형태로 포맷팅
+• 사용 로그 저장
+o 질의 원본
+o 분류 결과
+o 검색 결과 메타 데이터
+o 답변, 인용
+o 검증 점수
+o 응답 시간
+3. Scenario Routing
+Axis Definition
+Axis 1 : Query Object (질의 대상 객체)
+객체정의O1 : Vendor특정 노형의 기술, 설계, 실험O2 : RegulationNRC 규제/법령 조항O3 : RAI / ReviewNRC가 제기한 RAI, 심사 의견O4 : Relation객체 간 매핑 (노형 ↔︎ 규제, RAI ↔︎ 규제 등)Axis 2 : Query Depth (질의 깊이)
+깊이정의답변 톤D1 : Overview (현안/통계)전체 그림, 패턴, 빈도표, 리스트, 집계D2 : Technical (기술 디테일)설계, 작동, 메커니즘기술 설명D3 : Rationale (배경/근거)왜, 맥락, 결정 배경인과, trade offD4 : Formal (법령/정의)공식 정의, 기준, 요건원문 인용Matrix
+D1 OverviewD2 TechnicalD3 RationaleD4 FormalO1 Vendor"NuScale 인허가 주요 쟁점 분류는?""NuScale 의 PCS 설계 특징은?""NuScale 이 자연순환 채택한 이유는?""NuScale 의 공식 설계 기준은?"O2 Regulation"NRC 규제 주요 카테고리는?""RG 1.157 의 핵심 내용은?""RG 1.157 개정 배경은?""RG 1.157 의 요건 원문은?"O3 RAI"NuScale 에 가장 자주 제기된 RAI 는?""DWO 관련 RAI 들은 무엇을 다뤘나?""NRC 는 왜 이 RAI 를 제기?""RAI #XXX 의 정식 질의문은?"O4 Relation"노형들이 RG 1.157 을 다양하게 만족시킨 방식?""NuScale 이 RG 1.157 을 어떻게 만족?""이 RAI 의 근거 규제는?""이 NuScale 챕터가 인용한 규제는?"Top Priority Cell
+우선순위셀예시⭐️⭐️⭐️O1 X D2"NuScale 의 PCS 설계 특징은?"⭐️⭐️⭐️O4 X D2"NuScale 이 RG 1.157 을 어떻게 만족?"⭐️⭐️O3 X D2"NuScale의 DWO 관련 RAI 들은 무엇을 다뤘나?"⭐️⭐️O3 X D3"NRC는 NuScale에 왜 이 RAI 를 제기?"⭐️⭐️O2 X D4"RG 1.157 의 요건 원문은?"4. Prompt Engineering
+Prompt Architecture
+각 LLM 호출은 3층의 구조를 가진다
+• System Prompt (세스템)
+o 페르소나, 톤, 답변 원칙
+o 공통
+• Cell-Specific Instruction
+o (객체, 깊이) 조합 지시
+o 답변 포맷, 강조점
+• Context Injection
+o 검색 결과 청크
+o 사용자 질의
+o (option) 대화 히스토리
+System Prompt
+(예시)
+당신은 SMR (Small Modular Reactor) 인허가 도메인의 전문 AI 어시스턴트입니다.
+
+[역할]
+- SMR 노형 설계·인허가 엔지니어의 일상 업무를 보조합니다
+- NRC 규제, 노형 문서, RAI 기록을 근거로 정확한 답변을 제공합니다
+
+[답변 원칙]
+1. 모든 주장에 출처를 명시합니다 (문서명, 개정 버전, 페이지, 구절)
+2. 검색된 자료에 없는 내용은 추측하지 않습니다
+3. 일반론보다 구체적 사실·수치·인용을 우선합니다
+4. 불확실한 부분은 명시적으로 표시합니다 ("자료에 명시되지 않음", "추가 확인 필요")
+5. 사용자가 인허가 실무에 즉시 활용할 수 있는 형태로 답변합니다
+
+[톤]
+- 전문적이고 간결합니다
+- 추측·의견 표현 (~인 것 같다, ~로 보인다) 을 피합니다
+- 사실 (~이다, ~합니다) 과 검색 결과 (~로 명시되어 있다) 를 구분합니다
+
+[제약]
+- 검색 결과에 없는 정보는 답변하지 않습니다
+- 사용자의 인허가 의사결정을 대신하지 않습니다 (정보 제공만)
+- 안전·법적 책임이 따르는 판단은 인용 후 사용자 판단으로 위임합니다
+Cell-Specific Instruction (핵심셀)
+ex) O1 X D2 ("NuScale 의 PCS 설계 특징은?")
+[질의 유형] 특정 노형의 기술 디테일 질의
+
+[답변 구조]
+1. 핵심 답변 (1~2 문장)
+   - 사용자 질의에 대한 직접 답
+2. 기술 디테일 (3~5 항목)
+   - 설계 원리
+   - 핵심 파라미터·수치
+   - 작동 메커니즘
+3. 출처
+   - 노형 문서명, Chapter, 페이지, revision
+
+[강조점]
+- 구체적 수치·기준값을 우선 (예: "PCT 한계 1204°C")
+- 일반 PWR 정보가 아닌 해당 노형의 고유 설계 강조
+- 다른 노형과 다른 점이 있으면 명시
+
+[Out of Scope]
+- 규제 적용 방식 (이건 O4 × D2)
+- 설계 결정의 배경·이유 (이건 O1 × D3)
+- 통계·집계 (이건 D1)
+Object-Generic Prompt (비핵심셀)
+O1 Vendor
+사용자 질의는 노형 [노형명] 에 대한 것입니다.
+검색된 노형 문서를 근거로 답변하세요.
+모든 주장에 노형 문서명·Chapter·페이지·revision 을 명시하세요.
+O2 Regulation
+사용자 질의는 규제 [규제 ID] 에 대한 것입니다.
+검색된 규제 문서를 근거로 답변하세요.
+원문 인용을 우선하고, revision 을 명시하세요.
+O3 RAI
+사용자 질의는 RAI 또는 NRC 심사 기록에 대한 것입니다.
+검색된 RAI 문서를 근거로 답변하세요.
+RAI 번호·관련 노형·NRC 의 질의·노형의 응답을 구분해서 답변하세요.
+O4 Relation
+사용자 질의는 객체 간 관계 (노형↔규제, RAI↔규제 등) 에 대한 것입니다.
+양쪽 객체의 검색 결과를 통합해서 답변하세요.
+양쪽 출처를 모두 명시하세요.
+Depth-Generic Prompt (비핵심셀)
+D1 Overview
+[추가 지시]
+- 답변을 표·리스트·통계 형태로 구성하세요
+- 전체 패턴·빈도를 우선하고, 대표 사례를 인용으로 보강하세요
+- 개별 디테일보다 전체 그림을 강조하세요
+D2 Technical
+[추가 지시]
+- 기술 디테일·메커니즘·파라미터를 중심으로 답변하세요
+- 구체적 수치·기준값을 우선하세요
+- 작동 원리·설계 결정을 명확히 설명하세요
+D3 Rationale
+[추가 지시]
+- "왜" 에 답하는 인과·맥락 중심으로 답변하세요
+- 배경·대안·trade-off 가 자료에 있으면 포함하세요
+- 자료에 배경이 없으면 추측하지 말고 "명시 없음" 표시하세요
+D4 Formal
+[추가 지시]
+- 원문 인용을 우선하세요 (블록 인용)
+- 정의·기준·요건의 정확한 표현을 그대로 가져오세요
+- revision 과 페이지를 반드시 명시하세요
+- 의역·요약을 최소화하세요
+Citation Format
+노형 문서
+[NuScale DC Tier 2, Chapter 6.2.3, p. 6-45, Rev. 5]
+규제 문서
+[RG 1.157, Section 4.2, p. 12, Rev. 3 (2017)]
+RAI 문서
+[NuScale RAI #1234, Response p. 8, 2018-05-15]
+Multi-Turn Context Handling (optional)
+Context Injection 정책
+이전 대화가 있을 때 시스템 프롬프트에 추가
+[이전 대화 컨텍스트]
+사용자가 직전에 [노형명/규제 ID/RAI 번호] 에 대해 질문했습니다.
+현재 질의가 이전 질의의 후속이면 컨텍스트를 활용하세요.
+현재 질의가 새로운 주제면 이전 컨텍스트를 무시하세요.
+Context Window
+• 최대 5턴까지 직접 유지
+• 5턴 초과 시 오래된 턴을 요약본으로 압축
+5. Tool Integration
+• 개발자분들께서 채워넣어주십쇼..🙏
+6. State Management
+• 개발자분들께서 채워넣어주십쇼..🙏
+7. Error Handling
+에러 처리 철학
+1. 실패를 환각으로 덮지 않기!!!!!!
+1. LLM이 그럴듯한 답을 만들어 실패를 가리는게 가장 위험
+2. 검색, 검증 실패 시 답변 생성 X
+2. 조용히 실패하지 않는다
+1. 에러 발생 시 사용자에게 명시적으로 알림
+2. 어디서 왜 실패했는지 표시
+3. 점진적 저하
+1. 한 도구, 한 노드 실패해도 전체 다운 안됨
+2. 가능한 부분 답변이라도 제공
+에러발생 시점사용자 응답분류 모호Node 1 신뢰도 < 0.5"어떤 노형·규제에 대한 질문인지 명확히 해주세요" + 옵션 제시검색 결과 없음Node 2 결과 0 건"관련 정보를 찾을 수 없습니다. 질의를 다르게 표현해보세요"답변 신뢰도 낮음Node 4 검증 실패"현재 자료로는 정확한 답변 어려움. 부분 답변 또는 인용만 제공"비활성 셀"현재 단계에서는 이 유형 답변 제한적. Phase 2 (9월) 이후 가능"데이터 한계O2×D3 (개정 배경 없음) 등"자료에 명시 없음. 가능한 정보만 제공"응답 시간 초과전체 n초 초과"응답이 지연되고 있습니다. 재시도?"*노드별 상세 에러 정책 수립 필요
