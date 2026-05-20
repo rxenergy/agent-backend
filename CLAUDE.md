@@ -55,7 +55,7 @@ backend/                 # FastAPI service (hexagonal)
     domain/              # interaction, scenario, errors, tools, memory, retrieval
     ports/               # llm, tool, event_sink, memory_store, vector_store
     adapters/
-      tools/             # retriever_local, document_local, verification_local, memory_session_local, memory_approved_stub, artifact_event
+      tools/             # retriever_local, document_local, verification_local, memory_session_local, memory_approved_stub
       postgres/          # asyncpg pool + session memory store
       event_sink_filesystem, event_sink_minio
       in_memory_session_store, llm_fake

@@ -12,6 +12,8 @@ class CitationCheckInput(BaseModel):
     answer_text: str
     citation_ids: list[str]
     chunk_ids: list[str]
+    referenced_citation_ids: list[str] = []
+    resolvable_citation_ids: list[str] | None = None
 
 
 class FaithfulnessCheckInput(BaseModel):
@@ -30,17 +32,31 @@ class LocalCitationCheckTool:
     ) -> ToolResult:
         if isinstance(tool_input, dict):
             tool_input = CitationCheckInput.model_validate(tool_input)
-        has_citation = len(tool_input.citation_ids) > 0
-        completeness = 1.0 if has_citation else 0.0
+        provided = set(tool_input.citation_ids)
+        referenced = set(tool_input.referenced_citation_ids)
+        resolvable = (
+            set(tool_input.resolvable_citation_ids)
+            if tool_input.resolvable_citation_ids is not None
+            else provided
+        )
+        usable = provided & resolvable
+        matched = referenced & usable
+        missing = referenced - usable
+        # Empty referenced/provided is a *verification outcome* (answer didn't
+        # cite anything), not a tool failure. Report completeness=0.0 so the
+        # runner's threshold branch can decide FAIL/PARTIAL.
+        denom = max(1, len(referenced)) if referenced else 1
+        completeness = len(matched) / denom if referenced else 0.0
         return ToolResult(
             tool_name=self.name,
             tool_version=self.version,
-            status="success" if has_citation else "failed",
+            status="success",
             output={
-                "citation_completeness": completeness,
-                "missing_citation_count": 0 if has_citation else 1,
+                "citation_completeness": round(completeness, 3),
+                "missing_citation_count": len(missing),
+                "matched_citation_ids": sorted(matched),
+                "unresolved_citation_ids": sorted(missing),
             },
-            error_code=None if has_citation else "tool_empty_result",
             latency_ms=0,
             input_hash="",
             trace_id=context.trace_id,

@@ -16,7 +16,6 @@ from app.adapters.llm.fake import FakeEchoLLM
 from app.adapters.llm.http import HttpLLM
 from app.adapters.postgres.client import create_pool
 from app.adapters.postgres.session_memory_store import PostgresSessionMemoryStore
-from app.adapters.tools.artifact_event import WriteEventTool
 from app.adapters.tools.document_local import LocalDocumentResolverTool
 from app.adapters.tools.document_opensearch import OpenSearchDocumentResolverTool
 from app.adapters.tools.memory_approved_stub import ApprovedSearchStubTool
@@ -225,7 +224,6 @@ async def build_container(settings: Settings) -> AppContainer:
             "memory.approved_search": ApprovedSearchStubTool(),
             "verification.citation_check": LocalCitationCheckTool(),
             "verification.faithfulness_check": LocalFaithfulnessCheckTool(),
-            "artifact.write_event": WriteEventTool(),
         }
         executor = ToolExecutor(registry=registry, tools=tools, event_sink=event_sink)
 
@@ -264,6 +262,8 @@ async def build_container(settings: Settings) -> AppContainer:
             verification_faithfulness_threshold=settings.verification_faithfulness_threshold,
             verification_retry_on_fail=settings.verification_retry_on_fail,
             summarizer=summarizer,
+            retriever_top_k=settings.retriever_top_k,
+            retriever_min_score=settings.retriever_min_score,
         )
     else:
         pool = None  # type: ignore[assignment]

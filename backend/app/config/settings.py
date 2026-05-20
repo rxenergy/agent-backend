@@ -59,6 +59,8 @@ class Settings(BaseSettings):
 
     # Retriever backend (W1)
     retriever_backend: Literal["local", "opensearch"] = "local"
+    retriever_top_k: int = 3
+    retriever_min_score: float = 0.0
     opensearch_endpoint: str = "http://opensearch:9200"
     opensearch_index: str = "smr-docs"
     opensearch_username: str = ""

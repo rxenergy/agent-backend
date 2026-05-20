@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import replace
 from typing import Any
@@ -32,6 +33,10 @@ from app.ports.tool import ToolExecutionContext
 
 _TRACER = get_tracer("agent")
 
+# `[cite-N]` marker — runner extracts referenced citation ids from answer_text
+# so verification.citation_check sees what the LLM actually cited.
+_CITE_PATTERN = re.compile(r"\[(cite-\d+)\]")
+
 
 class SequentialToolRoutedRunner:
     """v2 §7.1 — 15-step workflow. Every external capability is invoked via
@@ -59,6 +64,8 @@ class SequentialToolRoutedRunner:
         verification_faithfulness_threshold: float = 0.5,
         verification_retry_on_fail: bool = False,
         summarizer: ConversationSummarizer | None = None,
+        retriever_top_k: int = 3,
+        retriever_min_score: float = 0.0,
     ) -> None:
         self._llm_router = llm_router
         self._tools = tool_executor
@@ -74,10 +81,13 @@ class SequentialToolRoutedRunner:
         self._faith_thr = verification_faithfulness_threshold
         self._retry_on_fail = verification_retry_on_fail
         self._summarizer = summarizer
+        self._top_k = retriever_top_k
+        self._min_score = retriever_min_score
 
     async def run(self, request: AgentRequest) -> AgentResponse:
         started = time.monotonic()
         tool_calls: list[ToolCallRecord] = []
+        tool_result_refs: list[str] = []
 
         # Pre-classification ctx (used only for tool calls that don't depend on O/D).
         ctx = ToolExecutionContext(
@@ -103,6 +113,8 @@ class SequentialToolRoutedRunner:
                     retry_count=r.retry_count,
                 )
             )
+            if r.output_hash:
+                tool_result_refs.append(r.output_hash)
 
         try:
             llm_id, llm = self._llm_router.resolve(request.model or None)
@@ -220,7 +232,7 @@ class SequentialToolRoutedRunner:
                     "retriever.search",
                     {
                         "query_text": request.query_text,
-                        "top_k": 3,
+                        "top_k": self._top_k,
                         "scenario_object": scenario_object,
                         "scenario_depth": scenario_depth,
                         "entities": entities,
@@ -253,7 +265,19 @@ class SequentialToolRoutedRunner:
                     response_date=c.get("response_date"),
                 )
                 for c in raw_chunks
+                if c.get("score", 0.0) >= self._min_score
             ]
+            if not chunks:
+                return await self._refuse(
+                    request,
+                    started,
+                    tool_calls,
+                    scenario_object,
+                    scenario_depth,
+                    RefusalReason.RETRIEVAL_NO_RESULT,
+                    classification_confidence,
+                    error_code="tool_empty_result",
+                )
 
             # === 5. tool.memory.approved_search (Phase 5에서 활성화) ===
             approved = await self._tools.invoke(
@@ -267,6 +291,28 @@ class SequentialToolRoutedRunner:
                 ctx,
             )
             record(approved)
+            memory_retrieval_scores: dict[str, float] = {}
+            approved_refs: list[MemoryRef] = []
+            for hit in (approved.output or {}).get("hits", []) or []:
+                mid = hit.get("memory_id")
+                if not mid:
+                    continue
+                score = float(hit.get("score", 0.0))
+                memory_retrieval_scores[mid] = score
+                memory_ids_used.append(mid)
+                memory_types_used.append("approved")
+                memory_review_statuses[mid] = MemoryReviewStatus.APPROVED.value
+                memory_staleness_statuses[mid] = StalenessStatus.FRESH.value
+                approved_refs.append(
+                    MemoryRef(
+                        memory_id=mid,
+                        memory_type="approved",
+                        review_status=MemoryReviewStatus.APPROVED.value,
+                        staleness_status=StalenessStatus.FRESH.value,
+                    )
+                )
+            if approved_refs:
+                memory_refs = memory_refs + tuple(approved_refs)
 
             # === Track E: summary compression (Node 5 책임이지만 prompt에 prepend하기 위해 여기서 갱신) ===
             if self._summarizer is not None:
@@ -290,6 +336,7 @@ class SequentialToolRoutedRunner:
                     entities=entities,
                     chunks=chunks,
                     memory_refs=memory_refs,
+                    tool_result_refs=tuple(tool_result_refs),
                 )
                 s.set_attribute("context_hash", pack.context_hash)
 
@@ -352,6 +399,35 @@ class SequentialToolRoutedRunner:
                 )
             record(resolve)
 
+            # Overlay resolve output onto candidate metadata (Node 9 — feed
+            # authoritative doc info to verification + response).
+            resolved_by_cid: dict[str, dict[str, Any]] = {
+                r.get("citation_id"): r
+                for r in (resolve.output or {}).get("resolved", []) or []
+                if r.get("citation_id")
+            }
+            final_candidates = tuple(
+                replace(
+                    c,
+                    document_id=(resolved_by_cid.get(c.citation_id) or {}).get(
+                        "document_id"
+                    )
+                    or c.document_id,
+                    page=(resolved_by_cid.get(c.citation_id) or {}).get("page")
+                    or c.page,
+                    section=(resolved_by_cid.get(c.citation_id) or {}).get("section")
+                    or c.section,
+                    revision=(resolved_by_cid.get(c.citation_id) or {}).get("revision")
+                    or c.revision,
+                )
+                for c in pack.citation_candidates
+            )
+            resolvable_citation_ids = [
+                cid
+                for cid, r in resolved_by_cid.items()
+                if r.get("resolvable", False)
+            ]
+
             # === 10–11. verification (Node 4) + 1차 실패 fallback ===
             citation_completeness, faithfulness, verification_status, llm_result, retry_count = (
                 await self._verify_with_fallback(
@@ -360,6 +436,7 @@ class SequentialToolRoutedRunner:
                     llm_result=llm_result,
                     citation_ids=citation_ids,
                     chunk_ids=chunk_ids,
+                    resolvable_citation_ids=resolvable_citation_ids,
                     ctx=ctx,
                     record=record,
                     llm=llm,
@@ -391,17 +468,9 @@ class SequentialToolRoutedRunner:
             )
             record(session_update)
 
-            # === 14. tool.artifact.write_event ===
-            persist_tool = await self._tools.invoke(
-                "artifact.write_event",
-                {
-                    "interaction_id": request.interaction_id,
-                    "event_kind": "interaction",
-                    "payload": {"variant": self.variant_id},
-                },
-                ctx,
-            )
-            record(persist_tool)
+            # === 14. event.persist (Node 14 — recorder is the sole artifact
+            # write path; v2 spec §15 단일 sink). artifact.write_event tool 제거.
+            # 실제 persist는 아래 `event.persist` span에서 수행됨.
 
             # === 15. response_formatting (Node 5) ===
             with _TRACER.start_as_current_span("agent.response_format"):
@@ -428,7 +497,7 @@ class SequentialToolRoutedRunner:
                             response_date=c.response_date,
                             formatted=c.formatted,
                         )
-                        for c in pack.citation_candidates
+                        for c in final_candidates
                     )
                 else:
                     refusal = None
@@ -446,7 +515,7 @@ class SequentialToolRoutedRunner:
                             response_date=c.response_date,
                             formatted=c.formatted,
                         )
-                        for c in pack.citation_candidates
+                        for c in final_candidates
                     )
                 response = AgentResponse(
                     interaction_id=request.interaction_id,
@@ -485,6 +554,7 @@ class SequentialToolRoutedRunner:
                     memory_types_used=tuple(memory_types_used),
                     memory_review_statuses=memory_review_statuses,
                     memory_staleness_statuses=memory_staleness_statuses,
+                    memory_retrieval_scores=memory_retrieval_scores,
                 )
                 await self._recorder.persist(event)
                 s.set_attribute("interaction_id", request.interaction_id)
@@ -562,6 +632,7 @@ class SequentialToolRoutedRunner:
         llm_result,
         citation_ids: list[str],
         chunk_ids: list[str],
+        resolvable_citation_ids: list[str],
         ctx: ToolExecutionContext,
         record,
         llm: LLMPort,
@@ -569,6 +640,7 @@ class SequentialToolRoutedRunner:
         retry_count = 0
 
         async def _run_checks(answer_text: str):
+            referenced = sorted(set(_CITE_PATTERN.findall(answer_text)))
             try:
                 cit = await self._tools.invoke(
                     "verification.citation_check",
@@ -576,6 +648,8 @@ class SequentialToolRoutedRunner:
                         "answer_text": answer_text,
                         "citation_ids": citation_ids,
                         "chunk_ids": chunk_ids,
+                        "referenced_citation_ids": referenced,
+                        "resolvable_citation_ids": resolvable_citation_ids,
                     },
                     ctx,
                 )
