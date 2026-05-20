@@ -84,7 +84,31 @@ class _UnavailableLLM:
         raise LLMUnavailableError("upstream 503: overloaded")
 
 
-def _make_runner(tmp: Path, *, llm=None) -> tuple[SequentialToolRoutedRunner, FilesystemEventSink, InMemorySessionMemoryStore]:
+class _CountingLLM:
+    """LLMPort double that records call count — used to verify retry path."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.model_id = "counting"
+
+    async def generate(self, prompt, *, model_options=None):
+        from app.ports.llm import LLMResult
+        self.calls += 1
+        return LLMResult(
+            text="답변 [c1]",
+            token_usage={"prompt_tokens": 1, "completion_tokens": 1},
+            model_id=self.model_id,
+        )
+
+
+def _make_runner(
+    tmp: Path,
+    *,
+    llm=None,
+    verification_retry_on_fail: bool = False,
+    verification_citation_threshold: float = 0.5,
+    verification_faithfulness_threshold: float = 0.5,
+) -> tuple[SequentialToolRoutedRunner, FilesystemEventSink, InMemorySessionMemoryStore]:
     prompts = tmp / "prompts"
     _build_prompts(prompts)
     tools_yaml = _build_tool_registry(tmp)
@@ -117,6 +141,9 @@ def _make_runner(tmp: Path, *, llm=None) -> tuple[SequentialToolRoutedRunner, Fi
         recorder=recorder,
         event_sink=sink,
         app_profile="local",
+        verification_citation_threshold=verification_citation_threshold,
+        verification_faithfulness_threshold=verification_faithfulness_threshold,
+        verification_retry_on_fail=verification_retry_on_fail,
     )
     return runner, sink, session_store
 
@@ -156,6 +183,26 @@ async def test_llm_unavailable_returns_refusal() -> None:
         assert resp.refusal_reason == "llm_unavailable"
         assert resp.verification_status == "fail"
         assert resp.citations == ()
+
+
+@pytest.mark.asyncio
+async def test_verification_retry_invokes_llm_again() -> None:
+    """Retry path must use the resolved LLM, not a non-existent attribute.
+    Regression for `self._current_llm` AttributeError when
+    verification_retry_on_fail=True."""
+    with tempfile.TemporaryDirectory() as tmp:
+        llm = _CountingLLM()
+        runner, _, _ = _make_runner(
+            Path(tmp),
+            llm=llm,
+            verification_retry_on_fail=True,
+            verification_citation_threshold=1.1,  # unattainable → forces retry
+        )
+        req = AgentRequest(interaction_id="i-retry", query_text="질문", session_id="s1")
+        resp = await runner.run(req)
+        # Either FAIL or PARTIAL — never crashes with AttributeError.
+        assert resp.verification_status in ("fail", "partial")
+        assert llm.calls == 2  # initial + 1 retry
 
 
 @pytest.mark.asyncio

@@ -30,6 +30,7 @@ from app.adapters.tools.verification_local import (
 from app.application.agents.fake_echo_v0 import FakeEchoAgentRunner
 from app.application.agents.llm_router import LLMRouter
 from app.application.agents.sequential_tool_routed_v2 import SequentialToolRoutedRunner
+from app.ports.agent_runner import AgentRunner
 from app.application.classification.hybrid import HybridClassifier
 from app.application.classification.llm import LLMClassifier
 from app.application.classification.rule import RuleClassifier
@@ -49,7 +50,7 @@ from app.ports.memory_store import SessionMemoryStore
 @dataclass
 class AppContainer:
     settings: Settings
-    runners: dict[str, Any] = field(default_factory=dict)
+    runners: dict[str, AgentRunner] = field(default_factory=dict)
     llm_pool: dict[str, LLMPort] = field(default_factory=dict)
     event_sink: EventSinkPort | None = None
     pg_pool: asyncpg.Pool | None = None
@@ -141,9 +142,13 @@ def _build_event_sink(settings: Settings) -> EventSinkPort:
     )
 
 
+KNOWN_VARIANTS: frozenset[str] = frozenset(
+    {FakeEchoAgentRunner.variant_id, SequentialToolRoutedRunner.variant_id}
+)
+
+
 def _validate_variants(enabled: list[str]) -> None:
-    known = {"fake_echo_v0", "sequential_tool_routed_v2"}
-    unknown = set(enabled) - known
+    unknown = set(enabled) - KNOWN_VARIANTS
     if unknown:
         raise ValueError(f"Unknown agent variants enabled: {sorted(unknown)}")
 
@@ -171,12 +176,12 @@ async def build_container(settings: Settings) -> AppContainer:
     llm_router = LLMRouter(pool=llm_pool, default_id=settings.default_llm)
     utility_llm = llm_pool[settings.utility_llm]
 
-    runners: dict[str, Any] = {}
+    runners: dict[str, AgentRunner] = {}
 
-    if "fake_echo_v0" in settings.agent_variants_enabled:
-        runners["fake_echo_v0"] = FakeEchoAgentRunner(recorder=recorder)
+    if FakeEchoAgentRunner.variant_id in settings.agent_variants_enabled:
+        runners[FakeEchoAgentRunner.variant_id] = FakeEchoAgentRunner(recorder=recorder)
 
-    if "sequential_tool_routed_v2" in settings.agent_variants_enabled:
+    if SequentialToolRoutedRunner.variant_id in settings.agent_variants_enabled:
         # Postgres pool for session memory
         pool: asyncpg.Pool | None = None
         session_store: SessionMemoryStore
@@ -244,7 +249,7 @@ async def build_container(settings: Settings) -> AppContainer:
             keep_turns=settings.multi_turn_keep_turns,
         )
 
-        runners["sequential_tool_routed_v2"] = SequentialToolRoutedRunner(
+        runners[SequentialToolRoutedRunner.variant_id] = SequentialToolRoutedRunner(
             llm_router=llm_router,
             tool_executor=executor,
             prompt_resolver=PromptResolver(str(prompt_dir), label=settings.prompt_label),
