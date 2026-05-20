@@ -36,8 +36,14 @@ from app.application.classification.rule import RuleClassifier
 from app.application.memory.summarizer import ConversationSummarizer
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
+from app.application.prompting.hybrid_source import HybridPromptSource
+from app.application.prompting.local_source import LocalPromptSource
+from app.application.prompting.phoenix_source import (
+    PhoenixPromptSource,
+    build_phoenix_client,
+)
 from app.application.prompting.renderer import PromptRenderer
-from app.application.prompting.resolver import PromptResolver
+from app.application.prompting.resolver import PromptResolver, PromptSourcePort
 from app.application.tool_runtime.executor import ToolExecutor
 from app.application.tool_runtime.registry import ToolRegistry
 from app.config.settings import LLMPoolEntry, Settings
@@ -146,6 +152,48 @@ KNOWN_VARIANTS: frozenset[str] = frozenset(
 )
 
 
+def _build_prompt_resolver(settings: Settings, prompt_dir: Path) -> PromptResolver:
+    """Wire the configured prompt source (local | phoenix | hybrid) into a resolver.
+
+    Mirrors the `retriever_backend` factory pattern: env-driven dispatch, no
+    branching inside the agent runner. Phoenix client import is lazy so the
+    `arize-phoenix-client` extra stays optional for local development.
+    """
+    log = structlog.get_logger("prompting.boot")
+    label = settings.prompt_label
+    local = LocalPromptSource(prompt_dir, label=label)
+
+    if settings.prompt_source == "local":
+        log.info("prompt_source_selected", source="local", dir=str(prompt_dir))
+        return PromptResolver(local)
+
+    if settings.prompt_source == "phoenix":
+        client = build_phoenix_client(settings.phoenix_endpoint)
+        log.info("prompt_source_selected", source="phoenix", endpoint=settings.phoenix_endpoint)
+        return PromptResolver(PhoenixPromptSource(client, label=label))
+
+    # hybrid: Phoenix primary, Local fallback.
+    primary: PromptSourcePort
+    try:
+        primary = PhoenixPromptSource(
+            build_phoenix_client(settings.phoenix_endpoint), label=label
+        )
+    except ImportError as exc:
+        log.warning(
+            "prompt_source_phoenix_unavailable",
+            error=str(exc),
+            fallback="local",
+        )
+        return PromptResolver(local)
+    log.info(
+        "prompt_source_selected",
+        source="hybrid",
+        primary="phoenix",
+        fallback="local",
+    )
+    return PromptResolver(HybridPromptSource(primary=primary, fallback=local))
+
+
 def _validate_variants(enabled: list[str]) -> None:
     unknown = set(enabled) - KNOWN_VARIANTS
     if unknown:
@@ -247,11 +295,13 @@ async def build_container(settings: Settings) -> AppContainer:
             keep_turns=settings.multi_turn_keep_turns,
         )
 
+        prompt_resolver = _build_prompt_resolver(settings, prompt_dir)
+
         runners[SequentialToolRoutedRunner.variant_id] = SequentialToolRoutedRunner(
             llm_router=llm_router,
             tool_executor=executor,
-            prompt_resolver=PromptResolver(str(prompt_dir), label=settings.prompt_label),
-            prompt_renderer=PromptRenderer(prompt_dir=prompt_dir),
+            prompt_resolver=prompt_resolver,
+            prompt_renderer=PromptRenderer(),
             context_builder=ContextBuilder(capture_mode=settings.context_capture_mode),
             recorder=recorder,
             event_sink=event_sink,

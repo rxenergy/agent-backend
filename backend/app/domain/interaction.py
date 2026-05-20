@@ -92,6 +92,9 @@ class InteractionEvent:
     prompt_profile_id: str | None
     prompt_version: str | None
     rendered_prompt_hash: str | None
+    prompt_composition_hash: str | None
+    prompt_fragment_versions: dict[str, str]
+    prompt_source: str | None
 
     context_hash: str | None
     retrieval_doc_count: int
