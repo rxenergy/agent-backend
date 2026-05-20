@@ -10,7 +10,6 @@ import yaml
 from app.adapters.event_sink.filesystem import FilesystemEventSink
 from app.adapters.session_store.in_memory import InMemorySessionMemoryStore
 from app.adapters.llm.fake import FakeEchoLLM
-from app.adapters.tools.artifact_event import WriteEventTool
 from app.adapters.tools.document_local import LocalDocumentResolverTool
 from app.adapters.tools.memory_approved_stub import ApprovedSearchStubTool
 from app.adapters.tools.memory_session_local import SessionLoadTool, SessionUpdateTool
@@ -82,7 +81,6 @@ def _build_tool_registry(root: Path) -> Path:
                 "memory.approved_search": False,
                 "verification.citation_check": True,
                 "verification.faithfulness_check": True,
-                "artifact.write_event": True,
             }.items()
         }
     }
@@ -137,7 +135,6 @@ def _make_runner(
         "memory.approved_search": ApprovedSearchStubTool(),
         "verification.citation_check": LocalCitationCheckTool(),
         "verification.faithfulness_check": LocalFaithfulnessCheckTool(),
-        "artifact.write_event": WriteEventTool(),
     }
     executor = ToolExecutor(registry=registry, tools=tools, event_sink=sink)
     llm_router = LLMRouter(

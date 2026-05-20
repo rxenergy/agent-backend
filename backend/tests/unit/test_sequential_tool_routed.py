@@ -9,7 +9,6 @@ import yaml
 from app.adapters.event_sink.filesystem import FilesystemEventSink
 from app.adapters.session_store.in_memory import InMemorySessionMemoryStore
 from app.adapters.llm.fake import FakeEchoLLM
-from app.adapters.tools.artifact_event import WriteEventTool
 from app.adapters.tools.document_local import LocalDocumentResolverTool
 from app.adapters.tools.memory_approved_stub import ApprovedSearchStubTool
 from app.adapters.tools.memory_session_local import SessionLoadTool, SessionUpdateTool
@@ -68,7 +67,6 @@ def _build_tool_registry(root: Path) -> Path:
             "memory.approved_search": {"version": "v1", "adapter": "postgres_pgvector", "timeout_ms": 1000, "retry": 0, "required": False},
             "verification.citation_check": {"version": "v1", "adapter": "local", "timeout_ms": 1000, "retry": 0, "required": True},
             "verification.faithfulness_check": {"version": "v1", "adapter": "local", "timeout_ms": 3000, "retry": 0, "required": True},
-            "artifact.write_event": {"version": "v1", "adapter": "object_store", "timeout_ms": 1000, "retry": 1, "required": True},
         }
     }
     p = root / "tool_registry.yaml"
@@ -126,7 +124,6 @@ def _make_runner(
         "memory.approved_search": ApprovedSearchStubTool(),
         "verification.citation_check": LocalCitationCheckTool(),
         "verification.faithfulness_check": LocalFaithfulnessCheckTool(),
-        "artifact.write_event": WriteEventTool(),
     }
     executor = ToolExecutor(registry=registry, tools=tools, event_sink=sink)
 
@@ -156,10 +153,14 @@ async def test_full_workflow_records_tool_calls() -> None:
         resp = await runner.run(req)
 
         assert resp.refusal_reason is None
+        assert resp.verification_status == "pass"
         assert len(resp.citations) >= 1
+        # document.resolve_citation overlay must have populated page metadata.
+        assert resp.citations[0].page is not None
 
-        # event jsonl contains 7 tool_calls (session_load, retrieve, approved, doc_resolve,
-        # citation_check, faithfulness, session_update, write_event = 8 total)
+        # 7 tool_calls: session_load, retrieve, approved, doc_resolve,
+        # citation_check, faithfulness, session_update. artifact persist는
+        # EventRecorder 단일 경로 (v2 §15) — tool 호출 없음.
         events_root = Path(tmp) / "events" / "t" / "interaction_events"
         files = list(events_root.rglob("*.jsonl"))
         assert files
@@ -167,7 +168,7 @@ async def test_full_workflow_records_tool_calls() -> None:
         line = files[0].read_text(encoding="utf-8").strip().splitlines()[0]
         rec = json.loads(line)
         assert rec["agent_variant"] == "sequential_tool_routed_v2"
-        assert len(rec["tool_calls"]) == 8
+        assert len(rec["tool_calls"]) == 7
         assert rec["context_hash"]
         assert rec["rendered_prompt_hash"]
 
@@ -214,3 +215,126 @@ async def test_multi_turn_persists_session_memory() -> None:
         assert mem is not None
         assert mem.session_id == "s1"
         assert len(mem.recent_turns) >= 1
+
+
+class _EmptyRetriever:
+    """LocalRetriever 더블 — 빈 chunks 반환."""
+
+    name = "retriever.search"
+    version = "v1"
+
+    async def invoke(self, tool_input, context):
+        from app.domain.tools import ToolResult
+        return ToolResult(
+            tool_name=self.name,
+            tool_version=self.version,
+            status="success",
+            output={"chunks": []},
+            latency_ms=0,
+            input_hash="",
+            trace_id=context.trace_id,
+        )
+
+
+class _ApprovedHitsTool:
+    """approved_search 더블 — 두 개 hit 반환."""
+
+    name = "memory.approved_search"
+    version = "v1"
+
+    async def invoke(self, tool_input, context):
+        from app.domain.tools import ToolResult
+        return ToolResult(
+            tool_name=self.name,
+            tool_version=self.version,
+            status="success",
+            output={
+                "hits": [
+                    {"memory_id": "mem-a", "score": 0.91},
+                    {"memory_id": "mem-b", "score": 0.83},
+                ]
+            },
+            latency_ms=0,
+            input_hash="",
+            trace_id=context.trace_id,
+        )
+
+
+def _swap_tool(runner, name, tool):
+    """Test helper — replace a single registered tool on the executor."""
+    runner._tools._tools[name] = tool  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_empty_retrieval_refuses() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _, _ = _make_runner(Path(tmp))
+        _swap_tool(runner, "retriever.search", _EmptyRetriever())
+        resp = await runner.run(
+            AgentRequest(interaction_id="i-empty", query_text="x", session_id="s1")
+        )
+        assert resp.refusal_reason == "retrieval_no_result"
+        assert resp.citations == ()
+
+
+@pytest.mark.asyncio
+async def test_approved_memory_hits_merged_into_event() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _, _ = _make_runner(Path(tmp))
+        _swap_tool(runner, "memory.approved_search", _ApprovedHitsTool())
+        resp = await runner.run(
+            AgentRequest(interaction_id="i-mem", query_text="질문", session_id="s1")
+        )
+        assert resp.refusal_reason is None
+        import json
+        files = list((Path(tmp) / "events" / "t" / "interaction_events").rglob("*.jsonl"))
+        rec = json.loads(files[0].read_text().splitlines()[0])
+        assert "mem-a" in rec["memory_ids_used"]
+        assert "mem-b" in rec["memory_ids_used"]
+        assert rec["memory_retrieval_scores"]["mem-a"] == 0.91
+
+
+@pytest.mark.asyncio
+async def test_tool_result_refs_in_context_snapshot() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _, _ = _make_runner(Path(tmp))
+        resp = await runner.run(
+            AgentRequest(interaction_id="i-ctx", query_text="질문", session_id="s1")
+        )
+        assert resp.refusal_reason is None
+        snaps = list(
+            (Path(tmp) / "events" / "t" / "context_snapshots").rglob("*.json")
+        )
+        assert snaps
+        import json
+        snap = json.loads(snaps[0].read_text())
+        # session_load + retriever + approved 의 output_hash 누적 → 3개 이상.
+        assert len(snap["tool_result_refs"]) >= 3
+
+
+@pytest.mark.asyncio
+async def test_citation_completeness_zero_when_answer_has_no_marker() -> None:
+    """LLM이 [cite-N] 마커를 안 쓰면 completeness=0 → verification fail/partial."""
+
+    class _NoMarkerLLM:
+        model_id = "no-marker"
+
+        async def generate(self, prompt, *, model_options=None):
+            from app.ports.llm import LLMResult
+            return LLMResult(
+                text="근거 없이 짧게 답한다",
+                token_usage={"prompt_tokens": 1, "completion_tokens": 1},
+                model_id=self.model_id,
+            )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _, _ = _make_runner(
+            Path(tmp),
+            llm=_NoMarkerLLM(),
+            verification_citation_threshold=0.5,
+            verification_faithfulness_threshold=0.5,
+        )
+        resp = await runner.run(
+            AgentRequest(interaction_id="i-nocite", query_text="질문", session_id="s1")
+        )
+        assert resp.verification_status in ("fail", "partial")
