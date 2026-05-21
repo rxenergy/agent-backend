@@ -6,11 +6,7 @@ from typing import Any
 
 import yaml
 
-from app.application.prompting.resolver import (
-    FRAGMENT_KEYS,
-    FragmentRef,
-    PromptProfile,
-)
+from app.domain.prompting import FRAGMENT_KEYS, FragmentRef, PromptProfile
 
 
 class PromptRegistryError(Exception):

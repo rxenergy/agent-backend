@@ -87,6 +87,15 @@ class Settings(BaseSettings):
 
     # Tool registry
     tool_registry_path: str = "/app/tools/registry.yaml"
+
+    # Variant registry (ADR-0006)
+    variant_registry_path: str = "/app/variants/registry.yaml"
+
+    # Preflight policy (ADR-0007).
+    # `warn` — log warnings and continue (default for `local`).
+    # `strict` — abort container boot on any failure (default for `aws-mvp`/`onprem`).
+    # When unset, `build_container` derives a default from `app_profile`.
+    preflight_mode: Literal["warn", "strict", "auto"] = "auto"
     tool_trace_enabled: bool = True
     tool_timeout_default_ms: int = 3000
     tool_retry_default: int = 0

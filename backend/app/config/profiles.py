@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 import asyncpg
-import httpx
 import structlog
 
 from app.adapters.event_sink.filesystem import FilesystemEventSink
@@ -20,15 +19,19 @@ from app.adapters.tools.document_local import LocalDocumentResolverTool
 from app.adapters.tools.document_opensearch import OpenSearchDocumentResolverTool
 from app.adapters.tools.memory_approved_stub import ApprovedSearchStubTool
 from app.adapters.tools.memory_session_local import SessionLoadTool, SessionUpdateTool
+from app.adapters.tools.opensearch_preflight import OpenSearchPreflight
 from app.adapters.tools.retriever_local import LocalRetrieverTool
 from app.adapters.tools.retriever_opensearch import OpenSearchRetrieverTool
+from app.application.preflight.port import PreflightCheck
+from app.application.preflight.runner import PreflightRunner
 from app.adapters.tools.verification_local import (
     LocalCitationCheckTool,
     LocalFaithfulnessCheckTool,
 )
-from app.application.agents.fake_echo_v0 import FakeEchoAgentRunner
+# Side-effect import: triggers `@register_variant(...)` for every shipped variant.
+import app.application.agents  # noqa: F401
 from app.application.agents.llm_router import LLMRouter
-from app.application.agents.sequential_tool_routed_v2 import SequentialToolRoutedRunner
+from app.application.agents.registry import AgentDeps, VariantRegistry
 from app.ports.agent_runner import AgentRunner
 from app.application.classification.hybrid import HybridClassifier
 from app.application.classification.llm import LLMClassifier
@@ -43,10 +46,13 @@ from app.application.prompting.phoenix_source import (
     build_phoenix_client,
 )
 from app.application.prompting.renderer import PromptRenderer
-from app.application.prompting.resolver import PromptResolver, PromptSourcePort
+from app.application.prompting.resolver import PromptResolver
+from app.ports.prompt_source import PromptSourcePort
+from app.application.agents.variant_spec import VariantSpecRegistry
 from app.application.tool_runtime.executor import ToolExecutor
 from app.application.tool_runtime.registry import ToolRegistry
 from app.config.settings import LLMPoolEntry, Settings
+from app.domain.agents import VariantSpec
 from app.ports.event_sink import EventSinkPort
 from app.ports.llm import LLMPort
 from app.ports.memory_store import SessionMemoryStore
@@ -57,6 +63,7 @@ class AppContainer:
     settings: Settings
     runners: dict[str, AgentRunner] = field(default_factory=dict)
     llm_pool: dict[str, LLMPort] = field(default_factory=dict)
+    variant_specs: dict[str, VariantSpec] = field(default_factory=dict)
     event_sink: EventSinkPort | None = None
     pg_pool: asyncpg.Pool | None = None
 
@@ -83,49 +90,15 @@ def _build_llm_pool(settings: Settings) -> dict[str, LLMPort]:
     return pool
 
 
-async def _opensearch_preflight(endpoint: str, index: str) -> None:
-    """Best-effort reachability + index existence check.
+def _resolve_preflight_severity(settings: Settings) -> "str":
+    """ADR-0007: derive severity from profile when `preflight_mode=auto`.
 
-    Logs structured warnings and swallows errors — Agent boot continues regardless
-    so local development isn't blocked when OpenSearch or the seed is missing.
+    - `local` → `warn` (dev boot must survive missing seed / cluster).
+    - `aws-mvp`, `onprem` → `strict` (operational boot must fail-fast).
     """
-    log = structlog.get_logger("opensearch.preflight")
-    base = endpoint.rstrip("/")
-    try:
-        async with httpx.AsyncClient(timeout=5.0, verify=False) as client:
-            health = await client.get(f"{base}/_cluster/health")
-            if health.status_code >= 400:
-                log.warning(
-                    "opensearch_health_unreachable",
-                    endpoint=base,
-                    status=health.status_code,
-                )
-                return
-            head = await client.request("HEAD", f"{base}/{index}")
-            if head.status_code == 404:
-                log.warning(
-                    "opensearch_index_missing",
-                    endpoint=base,
-                    index=index,
-                    hint="run `make seed` to create and populate the index",
-                )
-                return
-            if head.status_code >= 400:
-                log.warning(
-                    "opensearch_index_check_failed",
-                    endpoint=base,
-                    index=index,
-                    status=head.status_code,
-                )
-                return
-        log.info("opensearch_preflight_ok", endpoint=base, index=index)
-    except httpx.RequestError as exc:
-        log.warning(
-            "opensearch_preflight_unreachable",
-            endpoint=base,
-            index=index,
-            error=str(exc),
-        )
+    if settings.preflight_mode != "auto":
+        return settings.preflight_mode
+    return "warn" if settings.app_profile == "local" else "strict"
 
 
 def _build_event_sink(settings: Settings) -> EventSinkPort:
@@ -145,11 +118,6 @@ def _build_event_sink(settings: Settings) -> EventSinkPort:
         secret_key=secret_key,
         region=settings.aws_region,
     )
-
-
-KNOWN_VARIANTS: frozenset[str] = frozenset(
-    {FakeEchoAgentRunner.variant_id, SequentialToolRoutedRunner.variant_id}
-)
 
 
 def _build_prompt_resolver(settings: Settings, prompt_dir: Path) -> PromptResolver:
@@ -195,9 +163,18 @@ def _build_prompt_resolver(settings: Settings, prompt_dir: Path) -> PromptResolv
 
 
 def _validate_variants(enabled: list[str]) -> None:
-    unknown = set(enabled) - KNOWN_VARIANTS
+    """Validate against `VariantRegistry.known()` (ADR-0004).
+
+    Membership is derived from `@register_variant(...)` decorators, populated
+    when `app.application.agents` is imported at module top.
+    """
+    known = VariantRegistry.known()
+    unknown = set(enabled) - known
     if unknown:
-        raise ValueError(f"Unknown agent variants enabled: {sorted(unknown)}")
+        raise ValueError(
+            f"Unknown agent variants enabled: {sorted(unknown)}; "
+            f"registered={sorted(known)}"
+        )
 
 
 async def build_container(settings: Settings) -> AppContainer:
@@ -206,6 +183,14 @@ async def build_container(settings: Settings) -> AppContainer:
         raise ValueError(
             f"default_variant={settings.default_variant!r} not in agent_variants_enabled"
         )
+
+    # ADR-0006: variant capability metadata is loaded from YAML before any
+    # runner is constructed so `runner.spec` is the single typed source for
+    # variant_id / compatible_llms / required_tools / capability_tags.
+    spec_registry = VariantSpecRegistry.from_yaml(settings.variant_registry_path)
+    variant_specs: dict[str, VariantSpec] = {
+        vid: spec_registry.get(vid) for vid in settings.agent_variants_enabled
+    }
 
     event_sink = _build_event_sink(settings)
     recorder = EventRecorder(event_sink, app_profile=settings.app_profile)
@@ -223,14 +208,23 @@ async def build_container(settings: Settings) -> AppContainer:
     llm_router = LLMRouter(pool=llm_pool, default_id=settings.default_llm)
     utility_llm = llm_pool[settings.utility_llm]
 
-    runners: dict[str, AgentRunner] = {}
+    # Heavy deps (postgres pool / tool executor / prompt resolver / classifier /
+    # summarizer) are constructed only when at least one enabled variant
+    # declares non-empty `required_tools` (YAML). This keeps `fake_echo_v0`-only
+    # boots free of postgres / opensearch dependencies.
+    needs_tool_stack = any(
+        spec.required_tools for spec in variant_specs.values()
+    )
 
-    if FakeEchoAgentRunner.variant_id in settings.agent_variants_enabled:
-        runners[FakeEchoAgentRunner.variant_id] = FakeEchoAgentRunner(recorder=recorder)
+    pool: asyncpg.Pool | None = None
+    tool_executor: ToolExecutor | None = None
+    prompt_resolver: PromptResolver | None = None
+    prompt_renderer: PromptRenderer | None = None
+    context_builder: ContextBuilder | None = None
+    classifier: Any = None
+    summarizer: ConversationSummarizer | None = None
 
-    if SequentialToolRoutedRunner.variant_id in settings.agent_variants_enabled:
-        # Postgres pool for session memory
-        pool: asyncpg.Pool | None = None
+    if needs_tool_stack:
         session_store: SessionMemoryStore
         if settings.memory_store == "postgres":
             pool = await create_pool(settings.state_db_url)
@@ -241,9 +235,18 @@ async def build_container(settings: Settings) -> AppContainer:
         registry = ToolRegistry.from_yaml(settings.tool_registry_path)
 
         if settings.retriever_backend == "opensearch":
-            await _opensearch_preflight(
-                settings.opensearch_endpoint, settings.opensearch_index
-            )
+            preflight_severity = _resolve_preflight_severity(settings)
+            preflight_checks: list[PreflightCheck] = [
+                OpenSearchPreflight(
+                    endpoint=settings.opensearch_endpoint,
+                    index=settings.opensearch_index,
+                    severity=preflight_severity,
+                    verify_certs=settings.opensearch_verify_certs,
+                )
+            ]
+            # `strict` raises `PreflightFailedError` and aborts container boot
+            # (12-Factor §IV / K8s startup-probe semantics).
+            await PreflightRunner(preflight_checks).run_all()
             retriever_tool = OpenSearchRetrieverTool(
                 endpoint=settings.opensearch_endpoint,
                 index=settings.opensearch_index,
@@ -273,11 +276,8 @@ async def build_container(settings: Settings) -> AppContainer:
             "verification.citation_check": LocalCitationCheckTool(),
             "verification.faithfulness_check": LocalFaithfulnessCheckTool(),
         }
-        executor = ToolExecutor(registry=registry, tools=tools, event_sink=event_sink)
+        tool_executor = ToolExecutor(registry=registry, tools=tools, event_sink=event_sink)
 
-        prompt_dir = Path(settings.prompt_local_dir)
-
-        classifier: Any
         if settings.classifier_backend == "rule":
             classifier = RuleClassifier()
         elif settings.classifier_backend == "llm":
@@ -295,29 +295,37 @@ async def build_container(settings: Settings) -> AppContainer:
             keep_turns=settings.multi_turn_keep_turns,
         )
 
-        prompt_resolver = _build_prompt_resolver(settings, prompt_dir)
+        prompt_resolver = _build_prompt_resolver(settings, Path(settings.prompt_local_dir))
+        prompt_renderer = PromptRenderer()
+        context_builder = ContextBuilder(capture_mode=settings.context_capture_mode)
 
-        runners[SequentialToolRoutedRunner.variant_id] = SequentialToolRoutedRunner(
-            llm_router=llm_router,
-            tool_executor=executor,
-            prompt_resolver=prompt_resolver,
-            prompt_renderer=PromptRenderer(),
-            context_builder=ContextBuilder(capture_mode=settings.context_capture_mode),
-            recorder=recorder,
-            event_sink=event_sink,
-            app_profile=settings.app_profile,
-            classifier=classifier,
-            classification_threshold=settings.classification_threshold,
-            verification_citation_threshold=settings.verification_citation_threshold,
-            verification_faithfulness_threshold=settings.verification_faithfulness_threshold,
-            verification_retry_on_fail=settings.verification_retry_on_fail,
-            summarizer=summarizer,
-            retriever_top_k=settings.retriever_top_k,
-            retriever_min_score=settings.retriever_min_score,
-            active_cells_mode=settings.active_cells_mode,
-        )
-    else:
-        pool = None  # type: ignore[assignment]
+    # ADR-0004: dispatch to each enabled variant's registered factory.
+    deps = AgentDeps(
+        recorder=recorder,
+        event_sink=event_sink,
+        app_profile=settings.app_profile,
+        llm_router=llm_router,
+        utility_llm=utility_llm,
+        tool_executor=tool_executor,
+        prompt_resolver=prompt_resolver,
+        prompt_renderer=prompt_renderer,
+        context_builder=context_builder,
+        classifier=classifier,
+        summarizer=summarizer,
+        tunables={
+            "classification_threshold": settings.classification_threshold,
+            "verification_citation_threshold": settings.verification_citation_threshold,
+            "verification_faithfulness_threshold": settings.verification_faithfulness_threshold,
+            "verification_retry_on_fail": settings.verification_retry_on_fail,
+            "retriever_top_k": settings.retriever_top_k,
+            "retriever_min_score": settings.retriever_min_score,
+            "active_cells_mode": settings.active_cells_mode,
+        },
+    )
+    runners: dict[str, AgentRunner] = {
+        vid: VariantRegistry.build(vid, variant_specs[vid], deps)
+        for vid in settings.agent_variants_enabled
+    }
 
     log = structlog.get_logger("agent.boot")
     log.info(
@@ -332,6 +340,7 @@ async def build_container(settings: Settings) -> AppContainer:
     return AppContainer(
         settings=settings,
         runners=runners,
+        variant_specs=variant_specs,
         llm_pool=llm_pool,
         event_sink=event_sink,
         pg_pool=pool,

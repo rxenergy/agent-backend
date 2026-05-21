@@ -4,10 +4,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any
 
-from app.application.prompting.resolver import (
-    PromptProfile,
-    compute_composition_hash,
-)
+from app.domain.prompting import PromptProfile, compute_composition_hash
 
 
 @dataclass(frozen=True)

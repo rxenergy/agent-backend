@@ -5,11 +5,7 @@ from typing import Any, Protocol
 
 import structlog
 
-from app.application.prompting.resolver import (
-    FRAGMENT_KEYS,
-    FragmentRef,
-    PromptProfile,
-)
+from app.domain.prompting import FRAGMENT_KEYS, FragmentRef, PromptProfile
 
 
 _log = structlog.get_logger("prompting.phoenix")

@@ -4,7 +4,8 @@ from dataclasses import replace
 
 import structlog
 
-from app.application.prompting.resolver import PromptProfile, PromptSourcePort
+from app.domain.prompting import PromptProfile
+from app.ports.prompt_source import PromptSourcePort
 
 _log = structlog.get_logger("prompting.hybrid")
 
