@@ -32,6 +32,7 @@ from app.domain.interaction import (
 )
 from app.domain.memory import MemoryRef, MemoryReviewStatus, StalenessStatus
 from app.domain.retrieval import RetrieverSearchOutput
+from app.observability import openinference as oi
 from app.observability.otel import get_tracer
 from app.ports.event_sink import EventSinkPort
 from app.ports.llm import LLMPort, LLMUnavailableError
@@ -132,6 +133,8 @@ class SequentialToolRoutedRunner:
             root.set_attribute("agent.variant", self.spec.variant_id)
             root.set_attribute("llm_id", llm_id)
             root.set_attribute("session_id", request.session_id or "")
+            oi.set_kind(root, oi.KIND_AGENT)
+            oi.set_io(root, input_value=request.query_text)
 
             # === Node 1: intent_classification ===
             with _TRACER.start_as_current_span("agent.intent_classification") as s:
@@ -146,6 +149,18 @@ class SequentialToolRoutedRunner:
                 s.set_attribute("classifier_backend", classification.classifier_backend)
                 if entities:
                     s.set_attribute("entity_kinds", ",".join(sorted(entities.keys())))
+                oi.set_kind(s, oi.KIND_CHAIN)
+                oi.set_io(
+                    s,
+                    input_value=request.query_text,
+                    output_value={
+                        "scenario_object": scenario_object,
+                        "scenario_depth": scenario_depth,
+                        "confidence": classification_confidence,
+                        "entities": entities,
+                        "classifier_backend": classification.classifier_backend,
+                    },
+                )
 
             # Refuse early on low-confidence or inactive cells.
             if (
@@ -331,6 +346,33 @@ class SequentialToolRoutedRunner:
                     tool_result_refs=tuple(tool_result_refs),
                 )
                 s.set_attribute("context_hash", pack.context_hash)
+                oi.set_kind(s, oi.KIND_RETRIEVER)
+                oi.set_retrieval_documents(
+                    s,
+                    [
+                        {
+                            "id": c.chunk_id,
+                            "score": c.score,
+                            "content": getattr(c, "text", None) or getattr(c, "content", ""),
+                            "metadata": {
+                                "document_id": getattr(c, "document_id", None),
+                                "page": getattr(c, "page", None),
+                                "section": getattr(c, "section", None),
+                                "doc_type": getattr(c, "doc_type", None),
+                            },
+                        }
+                        for c in chunks
+                    ],
+                )
+                oi.set_io(
+                    s,
+                    input_value=request.query_text,
+                    output_value={
+                        "context_hash": pack.context_hash,
+                        "num_chunks": len(chunks),
+                        "num_memory_refs": len(memory_refs),
+                    },
+                )
 
             # === 7. prompt_rendering ===
             with _TRACER.start_as_current_span("agent.prompt_render") as s:
@@ -368,6 +410,17 @@ class SequentialToolRoutedRunner:
                         f"prompt.fragment.{name}.version",
                         rendered.fragment_versions.get(name, ""),
                     )
+                oi.set_kind(s, oi.KIND_CHAIN)
+                oi.set_io(
+                    s,
+                    input_value={
+                        "query_text": request.query_text,
+                        "context_block_len": len(context_block),
+                        "profile_id": rendered.profile_id,
+                        "profile_version": rendered.profile_version,
+                    },
+                    output_value=rendered.text,
+                )
                 await self._sink.write_prompt_render_record(
                     request.interaction_id,
                     self._renderer.to_record(rendered, query_text=request.query_text),
@@ -480,7 +533,7 @@ class SequentialToolRoutedRunner:
             # 실제 persist는 아래 `event.persist` span에서 수행됨.
 
             # === 15. response_formatting (Node 5) ===
-            with _TRACER.start_as_current_span("agent.response_format"):
+            with _TRACER.start_as_current_span("agent.response_format") as _rfmt:
                 if verification_status == VerificationStatus.FAIL.value:
                     refusal = RefusalReason.VERIFICATION_FAILED.value
                     answer_text = _refusal_message(RefusalReason.VERIFICATION_FAILED)
@@ -540,6 +593,18 @@ class SequentialToolRoutedRunner:
                     llm_id=llm_id,
                     model_id=llm_result.model_id,
                 )
+                oi.set_kind(_rfmt, oi.KIND_CHAIN)
+                oi.set_io(
+                    _rfmt,
+                    input_value={
+                        "verification_status": verification_status,
+                        "refusal": refusal,
+                    },
+                    output_value={
+                        "answer_text": answer_text,
+                        "num_citations": len(citations),
+                    },
+                )
 
             with _TRACER.start_as_current_span("event.persist") as s:
                 event = self._recorder.build(
@@ -568,9 +633,25 @@ class SequentialToolRoutedRunner:
                 )
                 await self._recorder.persist(event)
                 s.set_attribute("interaction_id", request.interaction_id)
+                # Deterministic artifact paths (see adapters/event_sink/*). UI
+                # tooling can resolve these against MinIO/filesystem root.
+                day = time.strftime("%Y-%m-%d", time.gmtime(started))
+                s.set_attribute(
+                    "artifact.interaction_events.key",
+                    f"interaction_events/{day}/events.jsonl",
+                )
+                s.set_attribute(
+                    "artifact.context_snapshot.key",
+                    f"context_snapshots/{day}/{request.interaction_id}.json",
+                )
+                s.set_attribute(
+                    "artifact.prompt_render_record.key",
+                    f"prompt_render_records/{day}/{request.interaction_id}.json",
+                )
 
             root.set_attribute("verification_status", verification_status)
             root.set_attribute("latency_ms", response.latency_ms)
+            oi.set_io(root, output_value=response.answer_text)
 
         return response
 
@@ -622,6 +703,15 @@ class SequentialToolRoutedRunner:
             )
             s.set_attribute(
                 "completion_tokens", llm_result.token_usage.get("completion_tokens", 0)
+            )
+            oi.set_kind(s, oi.KIND_LLM)
+            oi.set_llm(
+                s,
+                model_name=llm_result.model_id,
+                prompt=rendered.text,
+                completion=llm_result.text,
+                prompt_tokens=int(llm_result.token_usage.get("prompt_tokens", 0)),
+                completion_tokens=int(llm_result.token_usage.get("completion_tokens", 0)),
             )
             return llm_result
 
@@ -691,6 +781,15 @@ class SequentialToolRoutedRunner:
                 except LLMUnavailableError:
                     s.set_attribute("llm.status", "unavailable")
                 else:
+                    oi.set_kind(s, oi.KIND_LLM)
+                    oi.set_llm(
+                        s,
+                        model_name=llm_result.model_id,
+                        prompt=rendered.text,
+                        completion=llm_result.text,
+                        prompt_tokens=int(llm_result.token_usage.get("prompt_tokens", 0)),
+                        completion_tokens=int(llm_result.token_usage.get("completion_tokens", 0)),
+                    )
                     citation_completeness, faithfulness = await _run_checks(
                         llm_result.text
                     )

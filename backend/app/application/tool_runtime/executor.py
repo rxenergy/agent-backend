@@ -16,6 +16,7 @@ from app.application.tool_runtime.errors import (
 )
 from app.application.tool_runtime.registry import ToolRegistry, ToolSpec
 from app.domain.tools import ToolErrorCode, ToolResult, ToolStatus
+from app.observability import openinference as oi
 from app.observability.otel import get_tracer
 from app.ports.event_sink import EventSinkPort
 from app.ports.tool import Tool, ToolExecutionContext
@@ -67,6 +68,13 @@ class ToolExecutor:
             span.set_attribute("tool.required", spec.required)
             span.set_attribute("tool.input_hash", input_hash)
             span.set_attribute("interaction_id", context.interaction_id)
+            oi.set_kind(span, oi.KIND_TOOL)
+            _params = (
+                tool_input.model_dump(mode="json")
+                if isinstance(tool_input, BaseModel)
+                else tool_input
+            )
+            oi.set_tool(span, name=name, parameters=_params)
 
             attempts = max(1, 1 + spec.retry)
             for attempt in range(attempts):
@@ -95,6 +103,7 @@ class ToolExecutor:
                     span.set_attribute("tool.output_hash", output_hash)
                     if final.error_code:
                         span.set_attribute("tool.error_code", final.error_code)
+                    oi.set_io(span, output_value=final.output or {})
                     await self._record(context.interaction_id, final)
                     if final.status == "failed":
                         if spec.required:
