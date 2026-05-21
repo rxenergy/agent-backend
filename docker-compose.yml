@@ -1,14 +1,13 @@
-# Root compose — FastAPI(e5 + fermi) only.
+# Root compose — FastAPI(e5 + fermi) + OpenSearch 단일 스택.
 #
-# OpenSearch는 사용자가 이미 별도로 docker/opensearch/docker-compose.yml로 띄워 둔
-# `opensearch-single-gpu` 컨테이너를 그대로 재사용한다. 그 네트워크
-# (`nrc-bench-single-gpu_default`)에는 `opensearch` 별칭이 잡혀 있어
-# `http://opensearch:9200` 으로 도달할 수 있다.
-#
-# OpenSearch 자체가 떠있지 않다면 먼저 다음 명령으로 띄워야 한다:
-#   docker compose -f docker/opensearch/docker-compose.yml up -d
+# include 디렉티브로 docker/opensearch/docker-compose.yml 의 OpenSearch 서비스를
+# 같은 프로젝트로 끌어와 `docker compose up` 한 번으로 둘 다 띄운다.
+# API 는 OpenSearch healthcheck 통과 후 시작된다.
 
 name: agent-backend
+
+include:
+  - path: docker/opensearch/docker-compose.yml
 
 services:
   api:
@@ -33,8 +32,9 @@ services:
     volumes:
       - ./app:/workspace/app
       - ./models:/workspace/models:ro
-    networks:
-      - opensearch-net
+    depends_on:
+      opensearch:
+        condition: service_healthy
     restart: unless-stopped
     deploy:
       resources:
@@ -43,8 +43,3 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-
-networks:
-  opensearch-net:
-    name: nrc-bench-single-gpu_default
-    external: true
