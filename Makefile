@@ -3,7 +3,7 @@ SHELL := /bin/sh
 COMPOSE := docker compose --env-file infra/env/local.env --profile local \
   -f infra/compose/compose.yml -f infra/compose/compose.local.yml
 
-.PHONY: help build up-local down logs ps test smoke seed verify-w1 fmt clean migrate psql prompts-validate
+.PHONY: help build up-local down logs ps test test-integration smoke seed verify-w1 fmt clean migrate psql prompts-validate
 
 help:
 	@echo "Targets:"
@@ -36,7 +36,15 @@ ps:
 	$(COMPOSE) ps
 
 test:
-	cd backend && python -m pytest -q
+	cd backend && python -m pytest -q -m "not integration"
+
+# Live integration tests against a running OpenSearch (and optional Anthropic API).
+# Requires `make up-local` (for OpenSearch on localhost:9200) and, for the
+# anthropic_live marker, ANTHROPIC_API_KEY in the environment. Tests are skipped
+# automatically when their required env vars are absent.
+test-integration:
+	cd backend && OPENSEARCH_TEST_ENDPOINT=$${OPENSEARCH_TEST_ENDPOINT:-http://localhost:9200} \
+	  python -m pytest -q -m integration tests/integration
 
 prompts-validate:
 	python3 scripts/validate_prompts.py prompts

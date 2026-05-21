@@ -42,6 +42,10 @@ include = ["app*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+  "integration: live external dependency (OpenSearch container, etc.). Opt-in via OPENSEARCH_TEST_ENDPOINT.",
+  "anthropic_live: live Anthropic API call. Opt-in via ANTHROPIC_API_KEY.",
+]
 
 [tool.ruff]
 line-length = 100
