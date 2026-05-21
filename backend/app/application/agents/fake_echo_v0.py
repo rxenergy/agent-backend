@@ -2,27 +2,29 @@ from __future__ import annotations
 
 import time
 
+from app.application.agents.registry import AgentDeps, register_variant
 from app.application.events.recorder import EventRecorder
+from app.domain.agents import VariantSpec
 from app.domain.errors import VerificationStatus
 from app.domain.interaction import AgentRequest, AgentResponse, Citation
 from app.observability.otel import get_tracer
 
 _TRACER = get_tracer("agent")
 
+FAKE_ECHO_VARIANT_ID = "fake_echo_v0"
+
 
 class FakeEchoAgentRunner:
     """P0 test variant — single span, no tools."""
 
-    variant_id = "fake_echo_v0"
-    compatible_llms: frozenset[str] = frozenset({"fake-echo"})
-
-    def __init__(self, recorder: EventRecorder) -> None:
+    def __init__(self, recorder: EventRecorder, spec: VariantSpec) -> None:
         self._recorder = recorder
+        self.spec = spec
 
     async def run(self, request: AgentRequest) -> AgentResponse:
         started = time.monotonic()
         with _TRACER.start_as_current_span("agent.run") as span:
-            span.set_attribute("agent.variant", self.variant_id)
+            span.set_attribute("agent.variant", self.spec.variant_id)
             span.set_attribute("interaction_id", request.interaction_id)
             answer = f"[echo] {request.query_text}"
             citations = (
@@ -52,8 +54,13 @@ class FakeEchoAgentRunner:
         event = self._recorder.build(
             request=request,
             response=response,
-            agent_variant=self.variant_id,
+            agent_variant=self.spec.variant_id,
             started_at=started,
         )
         await self._recorder.persist(event)
         return response
+
+
+@register_variant(FAKE_ECHO_VARIANT_ID)
+def _build_fake_echo(spec: VariantSpec, deps: AgentDeps) -> FakeEchoAgentRunner:
+    return FakeEchoAgentRunner(recorder=deps.recorder, spec=spec)

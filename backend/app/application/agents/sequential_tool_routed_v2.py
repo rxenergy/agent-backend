@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from app.application.agents.llm_router import LLMRouter, UnknownLLMError
+from app.application.agents.registry import AgentDeps, register_variant
 from app.application.classification.active_cells import is_active
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
@@ -15,6 +16,7 @@ from app.application.prompting.renderer import PromptRenderer, RenderedPrompt
 from app.application.prompting.resolver import PromptResolver
 from app.application.tool_runtime.errors import RequiredToolFailed
 from app.application.tool_runtime.executor import ToolExecutor
+from app.domain.agents import VariantSpec
 from app.domain.classification import DEFAULT_DEPTH, DEFAULT_OBJECT, ClassificationResult
 from app.domain.errors import (
     PromptProfileNotFoundError,
@@ -47,13 +49,10 @@ class SequentialToolRoutedRunner:
     ToolExecutor. Node 1 classification + Node 4 verification fallback + Node 5
     multi-turn summary follow 기획 doc §Workflow."""
 
-    variant_id = "sequential_tool_routed_v2"
-    # None = pool 전체 호환. Router 풀에서 자동으로 등록된 LLM을 모두 사용 가능.
-    compatible_llms: frozenset[str] | None = None
-
     def __init__(
         self,
         *,
+        spec: VariantSpec,
         llm_router: LLMRouter,
         tool_executor: ToolExecutor,
         prompt_resolver: PromptResolver,
@@ -72,6 +71,7 @@ class SequentialToolRoutedRunner:
         retriever_min_score: float = 0.0,
         active_cells_mode: str = "all",
     ) -> None:
+        self.spec = spec
         self._llm_router = llm_router
         self._tools = tool_executor
         self._resolver = prompt_resolver
@@ -100,7 +100,7 @@ class SequentialToolRoutedRunner:
             interaction_id=request.interaction_id,
             trace_id="",
             app_profile=self._app_profile,
-            agent_variant=self.variant_id,
+            agent_variant=self.spec.variant_id,
             session_id=request.session_id,
             user_id=request.user_id,
             project_id=request.project_id,
@@ -129,7 +129,7 @@ class SequentialToolRoutedRunner:
 
         with _TRACER.start_as_current_span("agent.run") as root:
             root.set_attribute("interaction_id", request.interaction_id)
-            root.set_attribute("agent.variant", self.variant_id)
+            root.set_attribute("agent.variant", self.spec.variant_id)
             root.set_attribute("llm_id", llm_id)
             root.set_attribute("session_id", request.session_id or "")
 
@@ -545,7 +545,7 @@ class SequentialToolRoutedRunner:
                 event = self._recorder.build(
                     request=request,
                     response=response,
-                    agent_variant=self.variant_id,
+                    agent_variant=self.spec.variant_id,
                     retrieved_chunk_ids=tuple(chunk_ids),
                     retrieval_confidence=chunks[0].score if chunks else 0.0,
                     prompt_profile_id=rendered.profile_id,
@@ -578,18 +578,12 @@ class SequentialToolRoutedRunner:
     # Node 1 — classification
     # ----------------------------------------------------------------------
     async def _classify(self, request: AgentRequest) -> ClassificationResult:
-        if self._classifier is None:
-            # Legacy behavior: hardcoded O4/D2 (used by unit tests that don't inject a classifier).
-            return ClassificationResult(
-                scenario_object=DEFAULT_OBJECT,
-                scenario_depth=DEFAULT_DEPTH,
-                entities={},
-                confidence=0.5,
-                object_confidence=0.5,
-                depth_confidence=0.5,
-                classifier_backend="hardcoded",
-            )
-        return await self._classifier.classify(request.query_text, request.chat_history)
+        # ADR-0003: Node 1 logic lives in `sequential/nodes/classify.py`.
+        # This thin shim keeps the conductor's call sites unchanged while
+        # node extraction proceeds in follow-up PRs.
+        from app.application.agents.sequential.nodes.classify import classify
+
+        return await classify(request, self._classifier)
 
     # ----------------------------------------------------------------------
     # Node 3 — generation
@@ -755,7 +749,7 @@ class SequentialToolRoutedRunner:
         event = self._recorder.build(
             request=request,
             response=response,
-            agent_variant=self.variant_id,
+            agent_variant=self.spec.variant_id,
             started_at=started,
             tool_calls=tuple(tool_calls),
             classification_confidence=classification_confidence,
@@ -787,3 +781,33 @@ def _refusal_message(reason: RefusalReason) -> str:
     if reason is RefusalReason.REFUSAL:
         return "정책상 답변을 제공할 수 없는 요청입니다."
     return "근거가 부족하여 답변을 제공할 수 없습니다."
+
+
+SEQUENTIAL_TOOL_ROUTED_VARIANT_ID = "sequential_tool_routed_v2"
+
+
+@register_variant(SEQUENTIAL_TOOL_ROUTED_VARIANT_ID)
+def _build_sequential_tool_routed(
+    spec: VariantSpec, deps: AgentDeps
+) -> "SequentialToolRoutedRunner":
+    t = deps.tunables
+    return SequentialToolRoutedRunner(
+        spec=spec,
+        llm_router=deps.llm_router,
+        tool_executor=deps.tool_executor,
+        prompt_resolver=deps.prompt_resolver,
+        prompt_renderer=deps.prompt_renderer,
+        context_builder=deps.context_builder,
+        recorder=deps.recorder,
+        event_sink=deps.event_sink,
+        app_profile=deps.app_profile,
+        classifier=deps.classifier,
+        classification_threshold=t.get("classification_threshold", 0.0),
+        verification_citation_threshold=t.get("verification_citation_threshold", 0.5),
+        verification_faithfulness_threshold=t.get("verification_faithfulness_threshold", 0.5),
+        verification_retry_on_fail=t.get("verification_retry_on_fail", False),
+        summarizer=deps.summarizer,
+        retriever_top_k=t.get("retriever_top_k", 3),
+        retriever_min_score=t.get("retriever_min_score", 0.0),
+        active_cells_mode=t.get("active_cells_mode", "all"),
+    )

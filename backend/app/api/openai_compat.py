@@ -60,9 +60,9 @@ def _list_model_combinations(container) -> list[dict[str, Any]]:
         pairs.append(default_pair)
 
     for variant_id, runner in runners.items():
-        allowed = getattr(runner, "compatible_llms", None)
+        spec = runner.spec
         for llm_id in llm_ids:
-            if allowed is not None and llm_id not in allowed:
+            if not spec.accepts_llm(llm_id):
                 continue
             pair = (variant_id, llm_id)
             if pair == default_pair:
@@ -129,15 +129,14 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> dict
             },
         )
 
-    allowed = getattr(runner, "compatible_llms", None)
-    if allowed is not None and llm_id not in allowed:
+    if not runner.spec.accepts_llm(llm_id):
         raise HTTPException(
             status_code=400,
             detail={
                 "error": {
                     "code": "incompatible_llm",
                     "message": f"variant {variant_id!r} cannot use llm {llm_id!r}",
-                    "compatible_llms": sorted(allowed),
+                    "compatible_llms": sorted(runner.spec.compatible_llms),
                 }
             },
         )
@@ -168,7 +167,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> dict
     composite_id = f"{variant_id}@{resolved_llm}"
     smr_meta = _smr_agent_metadata(
         interaction_id=interaction_id,
-        runner_variant=runner.variant_id,
+        runner_variant=runner.spec.variant_id,
         resolved_llm=resolved_llm,
         response=response,
     )
