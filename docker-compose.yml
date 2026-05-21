@@ -1,0 +1,50 @@
+# Root compose — FastAPI(e5 + fermi) only.
+#
+# OpenSearch는 사용자가 이미 별도로 docker/opensearch/docker-compose.yml로 띄워 둔
+# `opensearch-single-gpu` 컨테이너를 그대로 재사용한다. 그 네트워크
+# (`nrc-bench-single-gpu_default`)에는 `opensearch` 별칭이 잡혀 있어
+# `http://opensearch:9200` 으로 도달할 수 있다.
+#
+# OpenSearch 자체가 떠있지 않다면 먼저 다음 명령으로 띄워야 한다:
+#   docker compose -f docker/opensearch/docker-compose.yml up -d
+
+name: agent-backend
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    image: agent-backend-api
+    container_name: agent-backend-api
+    shm_size: "16gb"
+    ports:
+      - "8080:8000"
+    environment:
+      OPENSEARCH_URL: http://opensearch:9200
+      INDEX_NAME: nrc-all-v3
+      DEVICE: cuda
+      # 온프레미스: 호스트에서 huggingface-cli 로 ./models 에 받아둔 가중치를 사용.
+      E5_MODEL_ID: /workspace/models/intfloat/multilingual-e5-large
+      FERMI_MODEL_ID: /workspace/models/atomic-canyon/fermi-1024
+      # HF 허브 호출을 차단해 의도치 않은 외부 통신을 막는다.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      - ./app:/workspace/app
+      - ./models:/workspace/models:ro
+    networks:
+      - opensearch-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+networks:
+  opensearch-net:
+    name: nrc-bench-single-gpu_default
+    external: true
