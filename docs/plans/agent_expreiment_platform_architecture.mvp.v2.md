@@ -294,7 +294,7 @@ agent-api
 11. tool.verification.faithfulness_check
 12. memory_candidate_extract
 13. tool.memory.session_update
-14. tool.artifact.write_event
+14. event.persist (recorder)
 15. response_formatting
 ```
 
@@ -326,8 +326,9 @@ agent-api
 | Memory Tool       | session / approved memory 조회 | `memory.session_load`, `memory.approved_search` |
 | Verification Tool | citation, faithfulness 검증    | `verification.citation_check`                   |
 | Dataset Tool      | 실패 사례, 평가 후보 생성              | `dataset.candidate_create`                      |
-| Artifact Tool     | event, snapshot 저장           | `artifact.write_event`                          |
 | Utility Tool      | 날짜, 단위, deterministic 처리     | `date_normalize`, `unit_convert`                |
+
+Artifact persistence (event / snapshot / prompt render / tool result) 는 별도 Tool 이 아닌 `EventRecorder` → `EventSinkPort` 단일 경로로 처리한다 (v2 §15).
 
 ---
 
@@ -343,7 +344,6 @@ agent-api
 | `verification.citation_check`     | citation completeness 검증                  |      Yes |
 | `verification.faithfulness_check` | 답변 근거성 검증                                 |      Yes |
 | `dataset.candidate_create`        | 실패 사례를 평가 데이터 후보로 저장                      |       No |
-| `artifact.write_event`            | interaction/context/tool/eval artifact 저장 |      Yes |
 
 ---
 
@@ -403,7 +403,6 @@ tools/
   memory/
   verification/
   dataset/
-  artifact/
 ```
 
 ```yaml
@@ -436,13 +435,6 @@ tools:
     adapter: local
     timeout_ms: 1000
     retry: 0
-    required: true
-
-  artifact.write_event:
-    version: v1
-    adapter: object_store
-    timeout_ms: 1000
-    retry: 1
     required: true
 ```
 
@@ -727,7 +719,7 @@ http.post /v1/chat/completions
    ├─ tool.verification.faithfulness_check
    ├─ memory.candidate_extract
    ├─ tool.memory.session_update
-   ├─ tool.artifact.write_event
+   ├─ event.persist
    └─ agent.response_format
 ```
 
@@ -1253,7 +1245,6 @@ repo/
     memory/
     verification/
     dataset/
-    artifact/
 
   datasets/
     smoke/
