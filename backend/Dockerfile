@@ -23,7 +23,7 @@ COPY --from=deps /install /usr/local
 
 WORKDIR /app
 COPY app ./app
-RUN mkdir -p /var/lib/agent/events /app/tools && chown -R app:app /var/lib/agent /app
+RUN mkdir -p /var/lib/agent/events /app/tools /app/variants && chown -R app:app /var/lib/agent /app
 
 USER app
 EXPOSE 8000

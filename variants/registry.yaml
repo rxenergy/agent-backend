@@ -1,0 +1,37 @@
+# Agent variant capability registry (ADR-0006).
+#
+# Source of truth for variant↔llm compatibility, required tools, and
+# capability tags. Code MUST NOT hard-code these — `api/openai_compat.py`,
+# `config/profiles.py`, and the future `VariantRegistry` (ADR-0004) all
+# read from here through `VariantSpecRegistry.from_yaml(...)`.
+#
+# Schema: backend/app/domain/agents.py :: VariantSpec
+#
+# compatible_llms:
+#   - ["*"]            → pool-wide (all llms configured in `LLM_POOL`)
+#   - [id1, id2, ...]  → explicit allow-list against the llm pool ids
+#
+# required_tools entries MUST exist in tools/registry.yaml when the variant
+# is enabled. `artifact.write_event` is intentionally absent — artifact
+# persistence is handled by EventRecorder → EventSinkPort (spec v2 §8.2).
+
+variants:
+
+  fake_echo_v0:
+    compatible_llms: [fake-echo]
+    required_tools: []
+    required_scenarios: []
+    capability_tags: [smoke, p0]
+
+  sequential_tool_routed_v2:
+    compatible_llms: ["*"]
+    required_tools:
+      - retriever.search
+      - document.resolve_citation
+      - memory.session_load
+      - memory.session_update
+      - memory.approved_search
+      - verification.citation_check
+      - verification.faithfulness_check
+    required_scenarios: [O1, O2, O3, O4]
+    capability_tags: [retrieval, verification, memory, classification]
