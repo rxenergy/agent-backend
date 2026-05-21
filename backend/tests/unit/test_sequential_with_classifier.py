@@ -27,7 +27,10 @@ from app.application.memory.summarizer import ConversationSummarizer
 from app.application.prompting.local_source import LocalPromptSource
 from app.application.prompting.renderer import PromptRenderer
 from app.application.prompting.resolver import PromptResolver
+from app.domain.agents import VariantSpec
 from tests.unit._prompts_fixture import build_prompts as _shared_build_prompts
+
+_TEST_SPEC = VariantSpec(variant_id="sequential_tool_routed_v2")
 from app.application.tool_runtime.executor import ToolExecutor
 from app.application.tool_runtime.registry import ToolRegistry
 from app.domain.classification import ClassificationResult
@@ -111,6 +114,7 @@ def _make_runner(
         default_id="fake-echo",
     )
     runner = SequentialToolRoutedRunner(
+        spec=_TEST_SPEC,
         llm_router=llm_router,
         tool_executor=executor,
         prompt_resolver=PromptResolver(LocalPromptSource(prompts)),

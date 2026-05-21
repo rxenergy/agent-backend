@@ -15,6 +15,9 @@ from app.application.agents.fake_echo_v0 import FakeEchoAgentRunner
 from app.application.events.recorder import EventRecorder
 from app.config.profiles import AppContainer
 from app.config.settings import Settings
+from app.domain.agents import VariantSpec
+
+_FAKE_SPEC = VariantSpec(variant_id="fake_echo_v0", compatible_llms=("fake-echo",))
 
 
 def _make_app(runners: dict, llm_pool: dict, settings: Settings) -> FastAPI:
@@ -35,7 +38,7 @@ def fake_app():
     with tempfile.TemporaryDirectory() as tmp:
         sink = FilesystemEventSink(root=str(Path(tmp) / "events"), prefix="t")
         recorder = EventRecorder(sink, app_profile="local")
-        runners = {"fake_echo_v0": FakeEchoAgentRunner(recorder=recorder)}
+        runners = {"fake_echo_v0": FakeEchoAgentRunner(recorder=recorder, spec=_FAKE_SPEC)}
         llm_pool = {"fake-echo": FakeEchoLLM(model_id="fake-echo")}
         settings = Settings(
             agent_variants_enabled=["fake_echo_v0"],
@@ -137,7 +140,7 @@ def test_models_endpoint_filters_incompatible_combos():
     with tempfile.TemporaryDirectory() as tmp:
         sink = FilesystemEventSink(root=str(Path(tmp) / "events"), prefix="t")
         recorder = EventRecorder(sink, app_profile="local")
-        runners = {"fake_echo_v0": FakeEchoAgentRunner(recorder=recorder)}
+        runners = {"fake_echo_v0": FakeEchoAgentRunner(recorder=recorder, spec=_FAKE_SPEC)}
         llm_pool = {
             "fake-echo": FakeEchoLLM(model_id="fake-echo"),
             "claude-haiku-4-5": FakeEchoLLM(model_id="claude-haiku-4-5"),

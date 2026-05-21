@@ -7,10 +7,8 @@ import pytest
 
 from app.application.prompting.local_source import LocalPromptSource
 from app.application.prompting.renderer import PromptRenderer
-from app.application.prompting.resolver import (
-    PromptResolver,
-    compute_composition_hash,
-)
+from app.application.prompting.resolver import PromptResolver
+from app.domain.prompting import compute_composition_hash
 from app.domain.errors import PromptProfileNotFoundError
 from tests.unit._prompts_fixture import build_prompts
 

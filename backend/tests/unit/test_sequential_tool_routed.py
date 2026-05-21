@@ -27,7 +27,10 @@ from app.application.prompting.renderer import PromptRenderer
 from app.application.prompting.resolver import PromptResolver
 from app.application.tool_runtime.executor import ToolExecutor
 from app.application.tool_runtime.registry import ToolRegistry
+from app.domain.agents import VariantSpec
 from app.domain.interaction import AgentRequest
+
+_TEST_SPEC = VariantSpec(variant_id="sequential_tool_routed_v2")
 
 
 def _build_prompts(root: Path) -> None:
@@ -107,6 +110,7 @@ def _make_runner(
     llm_instance = llm or FakeEchoLLM(model_id="fake-echo")
     llm_router = LLMRouter(pool={"fake-echo": llm_instance}, default_id="fake-echo")
     runner = SequentialToolRoutedRunner(
+        spec=_TEST_SPEC,
         llm_router=llm_router,
         tool_executor=executor,
         prompt_resolver=PromptResolver(LocalPromptSource(prompts)),
