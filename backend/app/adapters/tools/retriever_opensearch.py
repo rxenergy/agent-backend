@@ -3,19 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from pydantic import BaseModel
 
 from app.domain.errors import RetrievalTimeoutError, RetrievalUnavailableError
+from app.domain.retrieval import (
+    RetrievedChunk,
+    RetrieverSearchInput,
+    RetrieverSearchOutput,
+)
 from app.domain.tools import ToolResult
 from app.ports.tool import ToolExecutionContext
-
-
-class RetrieverSearchInput(BaseModel):
-    query_text: str
-    top_k: int = 3
-    scenario_object: str | None = None
-    scenario_depth: str | None = None
-    entities: dict[str, list[str]] = {}
 
 
 class OpenSearchRetrieverTool:
@@ -34,7 +30,7 @@ class OpenSearchRetrieverTool:
     """
 
     name = "retriever.search"
-    version = "v1-opensearch"
+    version = "v1"
 
     def __init__(
         self,
@@ -91,12 +87,13 @@ class OpenSearchRetrieverTool:
 
         hits = (data.get("hits") or {}).get("hits") or []
         chunks = [self._hit_to_chunk(hit) for hit in hits[: max(1, tool_input.top_k)]]
+        output = RetrieverSearchOutput(chunks=chunks)
 
         return ToolResult(
             tool_name=self.name,
             tool_version=self.version,
             status="success",
-            output={"chunks": chunks},
+            output=output.model_dump(mode="json"),
             latency_ms=0,
             input_hash="",
             trace_id=context.trace_id,
@@ -133,17 +130,17 @@ class OpenSearchRetrieverTool:
         }
 
     @staticmethod
-    def _hit_to_chunk(hit: dict[str, Any]) -> dict[str, Any]:
+    def _hit_to_chunk(hit: dict[str, Any]) -> RetrievedChunk:
         src = hit.get("_source", {}) or {}
         text = src.get("text", "") or ""
-        return {
-            "chunk_id": src.get("chunk_id") or hit.get("_id"),
-            "document_id": src.get("document_id"),
-            "score": float(hit.get("_score", 0.0)),
-            "page": src.get("page"),
-            "section": src.get("section"),
-            "snippet": text[:512],
-            "doc_type": src.get("doc_type"),
-            "revision": src.get("revision"),
-            "response_date": src.get("response_date"),
-        }
+        return RetrievedChunk(
+            chunk_id=src.get("chunk_id") or hit.get("_id"),
+            document_id=src.get("document_id"),
+            score=float(hit.get("_score", 0.0)),
+            page=src.get("page"),
+            section=src.get("section"),
+            snippet=text[:512],
+            doc_type=src.get("doc_type"),
+            revision=src.get("revision"),
+            response_date=src.get("response_date"),
+        )

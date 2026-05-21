@@ -29,7 +29,7 @@ from app.domain.interaction import (
     ToolCallRecord,
 )
 from app.domain.memory import MemoryRef, MemoryReviewStatus, StalenessStatus
-from app.domain.retrieval import RetrievedChunk
+from app.domain.retrieval import RetrieverSearchOutput
 from app.observability.otel import get_tracer
 from app.ports.event_sink import EventSinkPort
 from app.ports.llm import LLMPort, LLMUnavailableError
@@ -255,22 +255,8 @@ class SequentialToolRoutedRunner:
                     error_code=e.code.value,
                 )
             record(retrieval)
-            raw_chunks = (retrieval.output or {}).get("chunks", [])
-            chunks = [
-                RetrievedChunk(
-                    chunk_id=c["chunk_id"],
-                    document_id=c["document_id"],
-                    score=c["score"],
-                    page=c.get("page"),
-                    section=c.get("section"),
-                    snippet=c.get("snippet"),
-                    doc_type=c.get("doc_type"),
-                    revision=c.get("revision"),
-                    response_date=c.get("response_date"),
-                )
-                for c in raw_chunks
-                if c.get("score", 0.0) >= self._min_score
-            ]
+            retrieval_output = RetrieverSearchOutput.model_validate(retrieval.output or {})
+            chunks = [c for c in retrieval_output.chunks if c.score >= self._min_score]
             if not chunks:
                 return await self._refuse(
                     request,
