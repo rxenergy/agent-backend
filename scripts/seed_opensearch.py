@@ -43,6 +43,9 @@ INDEX_MAPPING = {
             "page": {"type": "integer"},
             "section": {"type": "keyword"},
             "scenario_object": {"type": "keyword"},
+            "doc_type": {"type": "keyword"},
+            "revision": {"type": "keyword"},
+            "response_date": {"type": "keyword"},
             "text": {"type": "text"},
         }
     },
