@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import json
 import time
 import uuid
-from typing import Any
+from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.domain.interaction import AgentRequest, ChatTurn
 
 router = APIRouter()
+
+# Chunk size for SSE delta streaming. The agent workflow runs synchronously
+# (tools + LLM all complete before streaming starts), so this only controls how
+# the final answer_text is split into OpenAI-style delta frames for client UX.
+_STREAM_CHUNK_CHARS = 24
 
 
 class ChatMessage(BaseModel):
@@ -159,6 +166,25 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> dict
 
     resolved_llm = response.llm_id or llm_id
     composite_id = f"{variant_id}@{resolved_llm}"
+    smr_meta = _smr_agent_metadata(
+        interaction_id=interaction_id,
+        runner_variant=runner.variant_id,
+        resolved_llm=resolved_llm,
+        response=response,
+    )
+
+    if req.stream:
+        return StreamingResponse(
+            _sse_stream(
+                interaction_id=interaction_id,
+                composite_id=composite_id,
+                answer_text=response.answer_text,
+                finish_reason=response.refusal_reason or "stop",
+                smr_meta=smr_meta,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     return {
         "id": interaction_id,
@@ -177,33 +203,87 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> dict
             "completion_tokens": response.token_usage.get("completion_tokens", 0),
             "total_tokens": sum(response.token_usage.values()),
         },
-        "smr_agent": {
-            "interaction_id": interaction_id,
-            "agent_variant": runner.variant_id,
-            "llm_id": resolved_llm,
-            "model_id": response.model_id,
-            "scenario_object": response.scenario_object,
-            "scenario_depth": response.scenario_depth,
-            "classification_confidence": response.classification_confidence,
-            "classifier_backend": response.classifier_backend,
-            "entities": response.entities,
-            "verification_status": response.verification_status,
-            "refusal_reason": response.refusal_reason,
-            "citations": [
-                {
-                    "citation_id": c.citation_id,
-                    "chunk_id": c.chunk_id,
-                    "document_id": c.document_id,
-                    "page": c.page,
-                    "section": c.section,
-                    "score": c.score,
-                    "doc_type": c.doc_type,
-                    "revision": c.revision,
-                    "response_date": c.response_date,
-                    "regulation_clause": c.regulation_clause,
-                    "formatted": c.formatted,
-                }
-                for c in response.citations
-            ],
-        },
+        "smr_agent": smr_meta,
     }
+
+
+def _smr_agent_metadata(
+    *,
+    interaction_id: str,
+    runner_variant: str,
+    resolved_llm: str,
+    response,
+) -> dict[str, Any]:
+    return {
+        "interaction_id": interaction_id,
+        "agent_variant": runner_variant,
+        "llm_id": resolved_llm,
+        "model_id": response.model_id,
+        "scenario_object": response.scenario_object,
+        "scenario_depth": response.scenario_depth,
+        "classification_confidence": response.classification_confidence,
+        "classifier_backend": response.classifier_backend,
+        "entities": response.entities,
+        "verification_status": response.verification_status,
+        "refusal_reason": response.refusal_reason,
+        "citations": [
+            {
+                "citation_id": c.citation_id,
+                "chunk_id": c.chunk_id,
+                "document_id": c.document_id,
+                "page": c.page,
+                "section": c.section,
+                "score": c.score,
+                "doc_type": c.doc_type,
+                "revision": c.revision,
+                "response_date": c.response_date,
+                "regulation_clause": c.regulation_clause,
+                "formatted": c.formatted,
+            }
+            for c in response.citations
+        ],
+    }
+
+
+async def _sse_stream(
+    *,
+    interaction_id: str,
+    composite_id: str,
+    answer_text: str,
+    finish_reason: str,
+    smr_meta: dict[str, Any],
+) -> AsyncIterator[bytes]:
+    """Emit OpenAI-compatible chat.completion.chunk SSE frames.
+
+    The agent workflow has already completed (tools + LLM + verification), so
+    streaming here is purely a UX wrapper: split the final answer_text into
+    small deltas so OpenWebUI renders progressively. The trailing chunk carries
+    finish_reason and the smr_agent metadata (custom field — OpenWebUI ignores
+    unknown fields, our own client uses it for citations panel).
+    """
+    created = int(time.time())
+
+    def _frame(delta: dict[str, Any], *, finish: str | None = None,
+               smr: dict[str, Any] | None = None) -> bytes:
+        choice: dict[str, Any] = {"index": 0, "delta": delta, "finish_reason": finish}
+        payload: dict[str, Any] = {
+            "id": interaction_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": composite_id,
+            "choices": [choice],
+        }
+        if smr is not None:
+            payload["smr_agent"] = smr
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+    # Opening frame: role only (OpenAI convention).
+    yield _frame({"role": "assistant"})
+
+    text = answer_text or ""
+    for i in range(0, len(text), _STREAM_CHUNK_CHARS):
+        yield _frame({"content": text[i : i + _STREAM_CHUNK_CHARS]})
+
+    # Closing frame with finish_reason + smr_agent metadata.
+    yield _frame({}, finish=finish_reason, smr=smr_meta)
+    yield b"data: [DONE]\n\n"

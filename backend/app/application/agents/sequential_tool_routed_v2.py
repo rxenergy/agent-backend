@@ -70,6 +70,7 @@ class SequentialToolRoutedRunner:
         summarizer: ConversationSummarizer | None = None,
         retriever_top_k: int = 3,
         retriever_min_score: float = 0.0,
+        active_cells_mode: str = "all",
     ) -> None:
         self._llm_router = llm_router
         self._tools = tool_executor
@@ -87,6 +88,7 @@ class SequentialToolRoutedRunner:
         self._summarizer = summarizer
         self._top_k = retriever_top_k
         self._min_score = retriever_min_score
+        self._active_cells_mode = active_cells_mode
 
     async def run(self, request: AgentRequest) -> AgentResponse:
         started = time.monotonic()
@@ -161,7 +163,7 @@ class SequentialToolRoutedRunner:
                     verification_status=VerificationStatus.SKIPPED,
                     error_code="classification_low_confidence",
                 )
-            if not is_active(scenario_object, scenario_depth):
+            if not is_active(scenario_object, scenario_depth, mode=self._active_cells_mode):
                 return await self._refuse(
                     request,
                     started,
@@ -481,7 +483,7 @@ class SequentialToolRoutedRunner:
             with _TRACER.start_as_current_span("agent.response_format"):
                 if verification_status == VerificationStatus.FAIL.value:
                     refusal = RefusalReason.VERIFICATION_FAILED.value
-                    answer_text = "근거가 부족하여 답변을 제공할 수 없습니다."
+                    answer_text = _refusal_message(RefusalReason.VERIFICATION_FAILED)
                     citations: tuple[Citation, ...] = ()
                 elif verification_status == VerificationStatus.PARTIAL.value:
                     refusal = RefusalReason.PARTIAL_ANSWER.value
@@ -764,10 +766,24 @@ class SequentialToolRoutedRunner:
 
 
 def _refusal_message(reason: RefusalReason) -> str:
+    # 기획 doc §7 에러 처리 표 매핑.
     if reason is RefusalReason.CLARIFICATION_REQUIRED:
-        return "질문을 조금 더 구체화해 주세요. 분류 신뢰도가 낮습니다."
+        return (
+            "어떤 노형·규제에 대한 질문인지 명확히 해주세요. "
+            "예: 노형명(NuScale, i-SMR), 규제 ID(RG 1.157, KINS-RG-...), RAI 번호."
+        )
+    if reason is RefusalReason.RETRIEVAL_NO_RESULT:
+        return "관련 정보를 찾을 수 없습니다. 질의를 다른 표현으로 시도해 주세요."
+    if reason is RefusalReason.VERIFICATION_FAILED:
+        return "현재 자료로는 정확한 답변이 어렵습니다. 인용 가능한 근거가 부족합니다."
     if reason is RefusalReason.UNSUPPORTED_SCENARIO:
-        return "현재 단계에서는 답변할 수 없는 시나리오입니다."
+        return "현재 단계에서는 이 유형의 답변이 제한적입니다. 후속 Phase에서 지원될 예정입니다."
+    if reason is RefusalReason.UNKNOWN_SCENARIO:
+        return "지원되지 않는 (시나리오, 깊이) 조합입니다. 다른 형태로 질문해 주세요."
+    if reason is RefusalReason.DATA_LIMITATION:
+        return "자료에 명시되어 있지 않은 부분이 포함되어 있습니다. 가능한 정보만 제공합니다."
     if reason is RefusalReason.LLM_UNAVAILABLE:
-        return "모델 응답을 가져올 수 없습니다. 잠시 후 다시 시도해 주세요."
+        return "응답이 지연되거나 모델을 가져올 수 없습니다. 잠시 후 다시 시도해 주세요."
+    if reason is RefusalReason.REFUSAL:
+        return "정책상 답변을 제공할 수 없는 요청입니다."
     return "근거가 부족하여 답변을 제공할 수 없습니다."

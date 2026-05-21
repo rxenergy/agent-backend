@@ -314,6 +314,7 @@ async def build_container(settings: Settings) -> AppContainer:
             summarizer=summarizer,
             retriever_top_k=settings.retriever_top_k,
             retriever_min_score=settings.retriever_min_score,
+            active_cells_mode=settings.active_cells_mode,
         )
     else:
         pool = None  # type: ignore[assignment]

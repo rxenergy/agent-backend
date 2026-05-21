@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     classification_threshold: float = 0.35
     classifier_escalate_below: float = 0.35
 
+    # Active cell policy (기획 doc §3 / §7)
+    # "all"          — 16 cells active (verification로 품질 게이팅)
+    # "top_priority" — 기획 §3 Top Priority 5 셀만 active
+    active_cells_mode: Literal["all", "top_priority"] = "all"
+
     # Verification thresholds (Node 4, 기획 doc §Node4)
     verification_citation_threshold: float = 0.9
     verification_faithfulness_threshold: float = 0.85
