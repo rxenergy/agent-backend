@@ -313,9 +313,11 @@ async def _sse_stream_from_runner(
     )
 
     final_yielded = False
+    tokens_streamed = False
     try:
         async for event in runner.run_stream(agent_request):
             if event.kind == "token":
+                tokens_streamed = True
                 yield _frame(
                     interaction_id=interaction_id,
                     composite_id=composite_id,
@@ -347,16 +349,16 @@ async def _sse_stream_from_runner(
                     resolved_llm=resolved_llm,
                     response=response,
                 )
-                # If no tokens streamed (e.g. early refusal, fake_echo
-                # variant), surface the full answer_text in the terminal
-                # frame so the client still receives the body.
-                if response.answer_text:
+                # If no tokens streamed (early refusal, variants without
+                # token-level streaming like fake_echo_v0, or post-verify
+                # refusal-message overwrite), emit the full answer_text as
+                # a single content chunk so OpenWebUI still renders a body.
+                if response.answer_text and not tokens_streamed:
                     yield _frame(
                         interaction_id=interaction_id,
                         composite_id=composite_id,
                         created=created,
-                        delta={"content": ""},
-                        smr=None,
+                        delta={"content": response.answer_text},
                     )
                 yield _frame(
                     interaction_id=interaction_id,

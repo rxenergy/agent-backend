@@ -3,7 +3,7 @@ SHELL := /bin/sh
 COMPOSE := docker compose --env-file infra/env/local.env --profile local \
   -f infra/compose/compose.yml -f infra/compose/compose.local.yml
 
-.PHONY: help build up-local down logs ps test test-integration smoke seed seed-encode opensearch-init verify-w1 fmt clean migrate psql prompts-validate
+.PHONY: help build up-local down logs ps test test-integration smoke smoke-stream seed seed-encode opensearch-init verify-w1 fmt clean migrate psql prompts-validate
 
 help:
 	@echo "Targets:"
@@ -14,6 +14,7 @@ help:
 	@echo "  ps         Show stack status"
 	@echo "  test       Run backend unit tests"
 	@echo "  smoke      POST a sample query to /v1/chat/completions"
+	@echo "  smoke-stream  Stream a sample query (SSE) and pretty-print each frame"
 	@echo "  fmt        Run ruff format on backend"
 	@echo "  clean      Tear down stack and remove volumes"
 
@@ -51,6 +52,9 @@ prompts-validate:
 
 smoke:
 	./scripts/smoke.sh
+
+smoke-stream:
+	./scripts/smoke-stream.sh
 
 opensearch-init:
 	OPENSEARCH_ENDPOINT=http://localhost:9200 \
