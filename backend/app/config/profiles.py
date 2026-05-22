@@ -241,26 +241,76 @@ async def build_container(settings: Settings) -> AppContainer:
                     endpoint=settings.opensearch_endpoint,
                     index=settings.opensearch_index,
                     severity=preflight_severity,
+                    search_pipeline=settings.opensearch_search_pipeline or None,
                     verify_certs=settings.opensearch_verify_certs,
                 )
             ]
             # `strict` raises `PreflightFailedError` and aborts container boot
             # (12-Factor §IV / K8s startup-probe semantics).
             await PreflightRunner(preflight_checks).run_all()
-            retriever_tool = OpenSearchRetrieverTool(
-                endpoint=settings.opensearch_endpoint,
-                index=settings.opensearch_index,
-                username=settings.opensearch_username or None,
-                password=settings.opensearch_password or None,
-                verify_certs=settings.opensearch_verify_certs,
-            )
-            document_tool = OpenSearchDocumentResolverTool(
-                endpoint=settings.opensearch_endpoint,
-                index=settings.opensearch_index,
-                username=settings.opensearch_username or None,
-                password=settings.opensearch_password or None,
-                verify_certs=settings.opensearch_verify_certs,
-            )
+
+            # Heavy ML deps (torch/sentence-transformers/transformers) load only
+            # on this branch. Failure to load is governed by the same severity
+            # as the rest of preflight: `warn` keeps boot alive, `strict` aborts.
+            from app.adapters.embeddings.e5 import E5Encoder
+            from app.adapters.embeddings.fermi import FermiEncoder
+
+            boot_log = structlog.get_logger("retriever.boot")
+            try:
+                dense_encoder = E5Encoder(
+                    model_id=settings.embedding_e5_model,
+                    device=settings.embedding_device,
+                    max_seq_len=settings.embedding_e5_max_seq_len,
+                )
+                sparse_encoder = FermiEncoder(
+                    model_id=settings.embedding_fermi_model,
+                    device=settings.embedding_device,
+                    max_seq_len=settings.embedding_fermi_max_seq_len,
+                    top_n=settings.embedding_fermi_top_n,
+                )
+                dense_encoder.warmup()
+                sparse_encoder.warmup()
+                boot_log.info(
+                    "embedding_models_loaded",
+                    e5=settings.embedding_e5_model,
+                    fermi=settings.embedding_fermi_model,
+                    device=settings.embedding_device,
+                    dense_dim=dense_encoder.dim,
+                )
+            except Exception as exc:
+                if preflight_severity == "strict":
+                    raise
+                boot_log.warning(
+                    "embedding_models_load_failed",
+                    error=str(exc),
+                    hint="hybrid retrieval disabled; container boots with local retriever fallback",
+                )
+                retriever_tool = LocalRetrieverTool()
+                document_tool = LocalDocumentResolverTool()
+                dense_encoder = None  # type: ignore[assignment]
+
+            if dense_encoder is not None:
+                retriever_tool = OpenSearchRetrieverTool(
+                    endpoint=settings.opensearch_endpoint,
+                    index=settings.opensearch_index,
+                    dense_encoder=dense_encoder,
+                    sparse_encoder=sparse_encoder,
+                    search_pipeline=settings.opensearch_search_pipeline or None,
+                    dense_field=settings.opensearch_dense_field,
+                    sparse_field=settings.opensearch_sparse_field,
+                    text_field=settings.opensearch_text_field,
+                    k_dense=settings.retriever_k_dense,
+                    username=settings.opensearch_username or None,
+                    password=settings.opensearch_password or None,
+                    verify_certs=settings.opensearch_verify_certs,
+                )
+                document_tool = OpenSearchDocumentResolverTool(
+                    endpoint=settings.opensearch_endpoint,
+                    index=settings.opensearch_index,
+                    username=settings.opensearch_username or None,
+                    password=settings.opensearch_password or None,
+                    verify_certs=settings.opensearch_verify_certs,
+                )
         else:
             retriever_tool = LocalRetrieverTool()
             document_tool = LocalDocumentResolverTool()

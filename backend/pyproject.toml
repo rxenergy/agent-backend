@@ -30,6 +30,11 @@ dev = [
 phoenix = [
   "arize-phoenix-client>=1.0",
 ]
+embeddings = [
+  "torch>=2.2",
+  "sentence-transformers>=3.0",
+  "transformers>=4.40",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

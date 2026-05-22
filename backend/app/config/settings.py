@@ -66,11 +66,24 @@ class Settings(BaseSettings):
     retriever_backend: Literal["local", "opensearch"] = "local"
     retriever_top_k: int = 3
     retriever_min_score: float = 0.0
+    retriever_k_dense: int = 50
     opensearch_endpoint: str = "http://opensearch:9200"
-    opensearch_index: str = "smr-docs"
+    opensearch_index: str = "nrc-all-v3"
+    opensearch_search_pipeline: str = "nrc-hybrid-search"
+    opensearch_dense_field: str = "dense_e5"
+    opensearch_sparse_field: str = "sparse_fermi"
+    opensearch_text_field: str = "text"
     opensearch_username: str = ""
     opensearch_password: str = ""
     opensearch_verify_certs: bool = False
+
+    # Embedding models (hybrid retrieval; loaded only when retriever_backend=opensearch)
+    embedding_e5_model: str = "intfloat/multilingual-e5-large"
+    embedding_fermi_model: str = "atomic-canyon/fermi-1024"
+    embedding_device: str = "cpu"
+    embedding_e5_max_seq_len: int = 512
+    embedding_fermi_max_seq_len: int = 1024
+    embedding_fermi_top_n: int = 200
 
     # Observability
     otel_enabled: bool = True
