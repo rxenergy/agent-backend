@@ -142,9 +142,13 @@ class OpenSearchRetrieverTool:
     def _hit_to_chunk(hit: dict[str, Any]) -> RetrievedChunk:
         src = hit.get("_source", {}) or {}
         text = src.get("text", "") or ""
+        # Fallback: 색인 문서에 document_id가 누락된 경우 _id 사용. 데이터 측 보정 전 임시 조치.
+        # ISSUE: ingest 파이프라인의 document_id 누락 이슈 참조.
+        document_id = src.get("document_id") or hit.get("_id") or "unknown"
+        chunk_id = src.get("chunk_id") or hit.get("_id") or document_id
         return RetrievedChunk(
-            chunk_id=src.get("chunk_id") or hit.get("_id"),
-            document_id=src.get("document_id"),
+            chunk_id=chunk_id,
+            document_id=document_id,
             score=float(hit.get("_score", 0.0)),
             page=src.get("page"),
             section=src.get("section"),
