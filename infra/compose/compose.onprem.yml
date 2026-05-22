@@ -1,0 +1,107 @@
+# On-premise profile overlay (v2, spec §17 — onprem).
+#
+# 대상 환경: VM/베어메탈 + NVIDIA GPU (DGX Spark / GB10 / Grace Blackwell 등).
+# 외부 네트워크가 없는 폐쇄망을 가정한다. 따라서:
+#   - LLM 은 호스트 GPU 의 vLLM(gemma-4-26b-a4b-it) 단일 — 외부 API 호출 없음
+#   - 모델 가중치(./models)와 HuggingFace 캐시는 사전에 호스트에 적재
+#   - 아티팩트 스토어는 MinIO (S3 외부 미사용)
+#
+# 사전 준비:
+#   1) docker/vllm/README.md 절차로 `vllm-node:latest` 이미지를 호스트 docker
+#      데몬에 적재. (eugr/spark-vllm-docker 빌드 산출물)
+#   2) huggingface-cli 로 모델을 ./models/gemma4 에 받아둔다.
+#   3) (선택) ./models/hf-cache 에 e5 / fermi 임베더를 미리 받아 hf_cache 볼륨에
+#      반영하거나, EMBEDDING_DEVICE 를 onprem.env 에서 cpu 로 두고 backend 가
+#      최초 부팅 시 받게 한다. 폐쇄망이면 사전 적재가 필수.
+#
+# Usage:
+#   docker compose \
+#     --env-file ../env/onprem.env \
+#     --profile onprem \
+#     -f compose.yml -f compose.onprem.yml up -d
+
+services:
+  agent-api:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    image: agent-backend:${BACKEND_TAG:-onprem}
+    environment:
+      APP_PROFILE: onprem
+      # 외부 네트워크 없음 — HF 캐시는 호스트 측에서 사전 동기화된 hf_cache 볼륨을 사용한다.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    depends_on:
+      otel-collector:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      vllm:
+        condition: service_healthy
+
+  open-webui:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      args:
+        OPENWEBUI_VERSION: ${OPENWEBUI_VERSION:-v0.9.5}
+    image: agent-saas/frontend:${BACKEND_TAG:-onprem}
+    environment:
+      WEBUI_SESSION_COOKIE_SECURE: "false"
+      WEBUI_URL: http://localhost:${OPEN_WEBUI_PORT:-3100}
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # vLLM — onprem profile only. docker/vllm/docker-compose.yml 과 동일한
+  # 런타임 파라미터를 사용하되, compose 본체에 합류시켜 agent-api 와 같은
+  # 네트워크/라이프사이클에서 동작시킨다.
+  # ─────────────────────────────────────────────────────────────────────────
+  vllm:
+    image: ${VLLM_IMAGE:-vllm-node:latest}
+    container_name: agent-backend-vllm
+    profiles: ["onprem"]
+    restart: unless-stopped
+    ipc: host
+    shm_size: "16gb"
+    ports:
+      # 호스트에서 직접 디버깅용으로 8001 로 노출. 컨테이너 간 통신은 vllm:8000.
+      - "8001:8000"
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      # 프로젝트 루트의 ./models 디렉토리를 read-only 마운트.
+      # docker/vllm/docker-compose.yml 과 동일한 컨테이너 경로(/workspace/models).
+      - ../../models:/workspace/models:ro
+    command:
+      - vllm
+      - serve
+      - ${VLLM_MODEL_DIR:-/workspace/models/gemma4}
+      - --host=0.0.0.0
+      - --port=8000
+      - --served-model-name=${VLLM_SERVED_MODEL_NAME:-gemma-4-26b-a4b-it}
+      - --max-model-len=${VLLM_MAX_MODEL_LEN:-16384}
+      - --max-num-batched-tokens=${VLLM_MAX_NUM_BATCHED_TOKENS:-4096}
+      - --gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.4}
+      - --load-format=safetensors
+      - --enforce-eager
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/models >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 180s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # OpenSearch — base compose 의 정의를 그대로 사용 (docker/opensearch 와 동등 설정).
+  # GPU 와 메모리 경합이 있으므로 운영 시 OPENSEARCH_JAVA_OPTS / mem_limit 을
+  # 환경에 맞춰 조정한다. 본 overlay 는 추가 override 없음.
