@@ -60,7 +60,7 @@ services:
   # 네트워크/라이프사이클에서 동작시킨다.
   # ─────────────────────────────────────────────────────────────────────────
   vllm:
-    image: ${VLLM_IMAGE:-vllm-openai:latest}
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
     container_name: agent-backend-vllm
     profiles: ["onprem"]
     restart: unless-stopped
@@ -84,7 +84,7 @@ services:
       - --served-model-name=${VLLM_SERVED_MODEL_NAME:-gemma-4-26b-a4b-it}
       - --max-model-len=${VLLM_MAX_MODEL_LEN:-8192}
       - --max-num-batched-tokens=${VLLM_MAX_NUM_BATCHED_TOKENS:-4096}
-      - --gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.90}
+      - --gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.70}
       - --load-format=safetensors
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/models >/dev/null"]
