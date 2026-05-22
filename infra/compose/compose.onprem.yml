@@ -60,7 +60,7 @@ services:
   # 네트워크/라이프사이클에서 동작시킨다.
   # ─────────────────────────────────────────────────────────────────────────
   vllm:
-    image: ${VLLM_IMAGE:-vllm-node:latest}
+    image: ${VLLM_IMAGE:-vllm-openai:latest}
     container_name: agent-backend-vllm
     profiles: ["onprem"]
     restart: unless-stopped
@@ -70,24 +70,22 @@ services:
       # 호스트에서 직접 디버깅용으로 8001 로 노출. 컨테이너 간 통신은 vllm:8000.
       - "8001:8000"
     environment:
-      HF_HUB_OFFLINE: "1"
-      TRANSFORMERS_OFFLINE: "1"
+      HF_HUB_OFFLINE=1
+      TRANSFORMERS_OFFLINE=1
     volumes:
       # 프로젝트 루트의 ./models 디렉토리를 read-only 마운트.
       # docker/vllm/docker-compose.yml 과 동일한 컨테이너 경로(/workspace/models).
       - ../../models:/workspace/models:ro
     command:
-      - vllm
-      - serve
+      # vllm/vllm-openai 이미지는 내부 엔트리포인트가 잡혀있어 serve부터 적거나 전체를 적어줍니다.
       - ${VLLM_MODEL_DIR:-/workspace/models/gemma4}
       - --host=0.0.0.0
       - --port=8000
       - --served-model-name=${VLLM_SERVED_MODEL_NAME:-gemma-4-26b-a4b-it}
-      - --max-model-len=${VLLM_MAX_MODEL_LEN:-16384}
+      - --max-model-len=${VLLM_MAX_MODEL_LEN:-8192}
       - --max-num-batched-tokens=${VLLM_MAX_NUM_BATCHED_TOKENS:-4096}
-      - --gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.4}
+      - --gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.90}
       - --load-format=safetensors
-      - --enforce-eager
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/models >/dev/null"]
       interval: 30s
