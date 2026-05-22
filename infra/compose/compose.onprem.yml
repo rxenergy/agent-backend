@@ -70,8 +70,8 @@ services:
       # 호스트에서 직접 디버깅용으로 8001 로 노출. 컨테이너 간 통신은 vllm:8000.
       - "8001:8000"
     environment:
-      HF_HUB_OFFLINE=1
-      TRANSFORMERS_OFFLINE=1
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     volumes:
       # 프로젝트 루트의 ./models 디렉토리를 read-only 마운트.
       # docker/vllm/docker-compose.yml 과 동일한 컨테이너 경로(/workspace/models).
