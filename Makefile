@@ -7,7 +7,7 @@ COMPOSE_ONPREM := docker compose --env-file infra/env/onprem.env --profile onpre
   -f infra/compose/compose.yml -f infra/compose/compose.onprem.yml
 
 .PHONY: help build up-local down logs ps test test-integration smoke smoke-stream seed seed-encode opensearch-init verify-w1 fmt clean migrate psql prompts-validate \
-  build-onprem up-onprem down-onprem logs-onprem ps-onprem clean-onprem
+  build-onprem up-onprem down-onprem logs-onprem ps-onprem clean-onprem _guard-local-only
 
 help:
 	@echo "Targets:"
@@ -68,23 +68,39 @@ smoke:
 smoke-stream:
 	./scripts/smoke-stream.sh
 
-opensearch-init:
+# 인덱스 (재)생성 / 시드 타깃은 모두 `--recreate` 경로를 통과하므로 local 개발
+# 환경에서만 실행해야 한다. onprem 스택은 사전에 적재된 opensearch_data 볼륨을
+# 그대로 사용한다는 전제이며, 시드/초기화는 자동으로 일어나지 않는다.
+#
+# _guard-local-only: onprem 컨테이너(`agent-backend-vllm`)가 떠 있으면 차단.
+# (호스트의 9200 포트가 onprem opensearch 로 매핑되어 있을 위험을 회피)
+_guard-local-only:
+	@if docker ps --format '{{.Names}}' 2>/dev/null | grep -qE '^agent-backend-vllm$$'; then \
+	  echo >&2 "[guard] onprem 스택이 실행 중입니다 (agent-backend-vllm 감지)."; \
+	  echo >&2 "        seed / opensearch-init 타깃은 local 전용입니다. 먼저 'make down-onprem' 후 재시도하세요."; \
+	  exit 1; \
+	fi
+
+opensearch-init: _guard-local-only
 	OPENSEARCH_ENDPOINT=http://localhost:9200 \
 	OPENSEARCH_INDEX=nrc-all-v3 \
 	OPENSEARCH_SEARCH_PIPELINE=nrc-hybrid-search \
 	sh infra/opensearch/init.sh
 
 # BM25-only seed (no embeddings). Use `make seed-encode` for full hybrid.
-seed:
+# Local profile 전용 — onprem 스택의 색인을 손대지 않는다.
+seed: _guard-local-only
 	OPENSEARCH_ENDPOINT=http://localhost:9200 \
 	OPENSEARCH_INDEX=nrc-all-v3 \
 	SEED_FILE=datasets/seed_docs/smr_seed.jsonl \
 	python3 scripts/seed_opensearch.py --recreate
 
-# Full hybrid seed — runs inside the agent-api container so the host doesn't
-# need torch. Requires `make build` to have included the [embeddings] extra.
-# Models download to /var/cache/huggingface (hf_cache volume) on first run.
-seed-encode:
+# Full hybrid seed — runs inside the **local** agent-api container so the host
+# doesn't need torch. Requires `make build` to have included the [embeddings]
+# extra. Models download to /var/cache/huggingface (hf_cache volume) on first run.
+# Local profile 전용 — $(COMPOSE) 가 local profile 에 고정되어 있어 onprem
+# 컨테이너에는 닿지 않으며, 추가로 _guard-local-only 가 호스트 9200 보호.
+seed-encode: _guard-local-only
 	$(COMPOSE) exec -T \
 	  -e OPENSEARCH_ENDPOINT=http://opensearch:9200 \
 	  -e OPENSEARCH_INDEX=nrc-all-v3 \
