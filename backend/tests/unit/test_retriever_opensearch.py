@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -28,13 +30,42 @@ def _patch_client(monkeypatch, module: str, handler):
     monkeypatch.setattr(f"{module}.httpx.AsyncClient", factory)
 
 
+class _FakeDense:
+    dim = 4
+
+    def encode_query(self, text: str) -> list[float]:
+        return [0.1, 0.2, 0.3, 0.4]
+
+    def warmup(self) -> None:  # pragma: no cover
+        pass
+
+
+class _FakeSparse:
+    def encode_query(self, text: str) -> dict[str, float]:
+        return {"loca": 1.5}
+
+    def warmup(self) -> None:  # pragma: no cover
+        pass
+
+
+def _retriever(**overrides) -> OpenSearchRetrieverTool:
+    kwargs = dict(
+        endpoint="http://os:9200",
+        index="nrc-all-v3",
+        dense_encoder=_FakeDense(),
+        sparse_encoder=_FakeSparse(),
+        search_pipeline="nrc-hybrid-search",
+    )
+    kwargs.update(overrides)
+    return OpenSearchRetrieverTool(**kwargs)
+
+
 async def test_retriever_maps_hits_to_chunks(monkeypatch):
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
-        body = request.read().decode("utf-8")
-        captured["body"] = body
+        captured["body"] = json.loads(request.read().decode("utf-8"))
         return httpx.Response(
             200,
             json={
@@ -68,19 +99,24 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
         )
 
     _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
-    tool = OpenSearchRetrieverTool(endpoint="http://os:9200", index="smr-docs")
+    tool = _retriever()
     result = await tool.invoke(
-        {"query_text": "LOCA 잔열 제거", "top_k": 2, "scenario_object": "regulation"}, _ctx()
+        {"query_text": "LOCA 잔열 제거", "top_k": 2, "scenario_object": "regulation"},
+        _ctx(),
     )
     assert result.status == "success"
     chunks = result.output["chunks"]
     assert len(chunks) == 2
     assert chunks[0]["chunk_id"] == "kins-1#p7#1"
-    assert chunks[0]["document_id"] == "kins-1"
-    assert chunks[0]["page"] == 7
     assert chunks[0]["score"] == pytest.approx(4.2)
-    assert "/smr-docs/_search" in captured["url"]
-    assert "scenario_object" in captured["body"]
+    assert "/nrc-all-v3/_search" in captured["url"]
+    assert "search_pipeline=nrc-hybrid-search" in captured["url"]
+    # Hybrid DSL: three sub-queries; scenario_object filter on the BM25 sub-query
+    subs = captured["body"]["query"]["hybrid"]["queries"]
+    assert len(subs) == 3
+    assert subs[0]["bool"]["filter"] == [{"term": {"scenario_object": "regulation"}}]
+    assert subs[1]["knn"]["dense_e5"]["vector"] == [0.1, 0.2, 0.3, 0.4]
+    assert subs[2]["bool"]["should"][0]["rank_feature"]["field"] == "sparse_fermi.loca"
 
 
 async def test_retriever_empty_results(monkeypatch):
@@ -88,7 +124,7 @@ async def test_retriever_empty_results(monkeypatch):
         return httpx.Response(200, json={"hits": {"hits": []}})
 
     _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
-    tool = OpenSearchRetrieverTool(endpoint="http://os:9200", index="smr-docs")
+    tool = _retriever()
     result = await tool.invoke({"query_text": "no match", "top_k": 3}, _ctx())
     assert result.status == "success"
     assert result.output["chunks"] == []
@@ -115,7 +151,7 @@ async def test_document_resolver_marks_missing(monkeypatch):
         )
 
     _patch_client(monkeypatch, "app.adapters.tools.document_opensearch", handler)
-    tool = OpenSearchDocumentResolverTool(endpoint="http://os:9200", index="smr-docs")
+    tool = OpenSearchDocumentResolverTool(endpoint="http://os:9200", index="nrc-all-v3")
     result = await tool.invoke(
         {
             "citation_ids": ["c1", "c2"],
@@ -133,7 +169,12 @@ async def test_document_resolver_marks_missing(monkeypatch):
 
 def test_retriever_endpoint_required():
     with pytest.raises(ValueError):
-        OpenSearchRetrieverTool(endpoint="", index="smr-docs")
+        OpenSearchRetrieverTool(
+            endpoint="",
+            index="nrc-all-v3",
+            dense_encoder=_FakeDense(),
+            sparse_encoder=_FakeSparse(),
+        )
 
 
 async def test_retriever_maps_timeout_to_domain_error(monkeypatch):
@@ -143,7 +184,7 @@ async def test_retriever_maps_timeout_to_domain_error(monkeypatch):
         raise httpx.TimeoutException("simulated timeout", request=request)
 
     _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
-    tool = OpenSearchRetrieverTool(endpoint="http://os:9200", index="smr-docs")
+    tool = _retriever()
     with pytest.raises(RetrievalTimeoutError):
         await tool.invoke({"query_text": "q", "top_k": 1}, _ctx())
 
@@ -155,7 +196,7 @@ async def test_retriever_maps_5xx_to_domain_error(monkeypatch):
         return httpx.Response(503, json={"error": "unavailable"})
 
     _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
-    tool = OpenSearchRetrieverTool(endpoint="http://os:9200", index="smr-docs")
+    tool = _retriever()
     with pytest.raises(RetrievalUnavailableError):
         await tool.invoke({"query_text": "q", "top_k": 1}, _ctx())
 
@@ -167,7 +208,7 @@ async def test_document_resolver_maps_request_error(monkeypatch):
         raise httpx.ConnectError("connection refused", request=request)
 
     _patch_client(monkeypatch, "app.adapters.tools.document_opensearch", handler)
-    tool = OpenSearchDocumentResolverTool(endpoint="http://os:9200", index="smr-docs")
+    tool = OpenSearchDocumentResolverTool(endpoint="http://os:9200", index="nrc-all-v3")
     with pytest.raises(RetrievalUnavailableError):
         await tool.invoke(
             {"citation_ids": ["c1"], "chunk_ids": ["kins-1#p7#1"]}, _ctx()
