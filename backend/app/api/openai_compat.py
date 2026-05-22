@@ -33,13 +33,28 @@ class ChatCompletionRequest(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
-def _split_model_id(raw: str, *, default_variant: str, default_llm: str) -> tuple[str, str]:
-    """Parse `<variant>@<llm>`. Missing parts fall back to defaults."""
+def _split_model_id(
+    raw: str,
+    *,
+    default_variant: str,
+    default_llm: str,
+    known_llms: frozenset[str] = frozenset(),
+    known_variants: frozenset[str] = frozenset(),
+) -> tuple[str, str]:
+    """Parse `<variant>@<llm>`. Missing parts fall back to defaults.
+
+    A bare id (no `@`) is normally treated as a variant. As a convenience for
+    OpenAI-compatible clients that only carry a single model field (e.g.
+    OpenWebUI with bare LLM ids registered for side-by-side comparison), a bare
+    id that matches a known LLM but not a known variant is interpreted as
+    `(default_variant, raw)`.
+    """
     if not raw:
         return default_variant, default_llm
     variant, sep, llm = raw.partition("@")
     if not sep:
-        # Treat a bare id as variant only.
+        if raw not in known_variants and raw in known_llms:
+            return default_variant, raw
         return (variant or default_variant), default_llm
     return (variant or default_variant), (llm or default_llm)
 
@@ -102,6 +117,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> dict
         req.model,
         default_variant=settings.default_variant,
         default_llm=settings.default_llm,
+        known_llms=frozenset(container.llm_pool.keys()),
+        known_variants=frozenset(container.runners.keys()),
     )
 
     runner = container.runners.get(variant_id)

@@ -70,6 +70,33 @@ def test_split_model_id_bare_variant_uses_default_llm():
     ) == ("fake_echo_v0", "fake")
 
 
+def test_split_model_id_bare_llm_falls_back_to_default_variant():
+    """Bare id matching a known LLM (not a variant) pairs with default_variant.
+
+    Convenience for OpenAI-compatible clients (e.g. OpenWebUI) that send
+    bare LLM ids for side-by-side comparison.
+    """
+    assert _split_model_id(
+        "claude-opus-4-7",
+        default_variant="seq",
+        default_llm="fake",
+        known_llms=frozenset({"claude-opus-4-7", "fake"}),
+        known_variants=frozenset({"seq", "fake_echo_v0"}),
+    ) == ("seq", "claude-opus-4-7")
+
+
+def test_split_model_id_bare_unknown_still_treated_as_variant():
+    """A bare id that's neither a known LLM nor variant flows through as variant
+    (preserving the explicit 400 unknown_variant signal)."""
+    assert _split_model_id(
+        "claude-haiku-4-6",
+        default_variant="seq",
+        default_llm="fake",
+        known_llms=frozenset({"fake"}),
+        known_variants=frozenset({"seq"}),
+    ) == ("claude-haiku-4-6", "fake")
+
+
 def test_models_endpoint_lists_cartesian_with_default_first(fake_app):
     client = TestClient(fake_app)
     resp = client.get("/v1/models")
@@ -122,6 +149,19 @@ def test_chat_completions_unknown_llm_returns_400(fake_app):
     )
     assert resp.status_code == 400
     assert resp.json()["detail"]["error"]["code"] == "unknown_llm"
+
+
+def test_chat_completions_bare_llm_pairs_with_default_variant(fake_app):
+    """A bare known-LLM id (no `@`) is treated as `(default_variant, <id>)`."""
+    client = TestClient(fake_app)
+    resp = client.post(
+        "/v1/chat/completions",
+        json={"model": "fake-echo", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["model"] == "fake_echo_v0@fake-echo"
+    assert body["smr_agent"]["agent_variant"] == "fake_echo_v0"
 
 
 def test_chat_completions_empty_model_uses_defaults(fake_app):
