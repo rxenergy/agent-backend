@@ -26,11 +26,14 @@ services:
         condition: service_healthy
       opensearch:
         condition: service_healthy
+    environment:
+      HF_HOME: /var/cache/huggingface
     volumes:
       - ../../prompts:/app/prompts:ro
       - ../../tools:/app/tools:ro
       - ../../variants:/app/variants:ro
       - agent_events:/var/lib/agent/events
+      - hf_cache:/var/cache/huggingface
     healthcheck:
       test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8000/health\",timeout=2).status==200 else 1)'"]
       interval: 10s
@@ -258,6 +261,7 @@ services:
 
 volumes:
   agent_events:
+  hf_cache:
   phoenix_data:
   tempo_data:
   prometheus_data:
