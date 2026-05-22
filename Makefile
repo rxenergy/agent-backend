@@ -65,12 +65,16 @@ seed:
 	SEED_FILE=datasets/seed_docs/smr_seed.jsonl \
 	python3 scripts/seed_opensearch.py --recreate
 
-# Full hybrid seed: requires `pip install -e backend/[embeddings]` on the host.
+# Full hybrid seed — runs inside the agent-api container so the host doesn't
+# need torch. Requires `make build` to have included the [embeddings] extra.
+# Models download to /var/cache/huggingface (hf_cache volume) on first run.
 seed-encode:
-	OPENSEARCH_ENDPOINT=http://localhost:9200 \
-	OPENSEARCH_INDEX=nrc-all-v3 \
-	SEED_FILE=datasets/seed_docs/smr_seed.jsonl \
-	python3 scripts/seed_opensearch.py --recreate --encode
+	$(COMPOSE) exec -T \
+	  -e OPENSEARCH_ENDPOINT=http://opensearch:9200 \
+	  -e OPENSEARCH_INDEX=nrc-all-v3 \
+	  -e SEED_FILE=/app/datasets/seed_docs/smr_seed.jsonl \
+	  -e OPENSEARCH_MAPPING_FILE=/app/infra/opensearch/mappings/nrc-all-v3.json \
+	  agent-api python /app/scripts/seed_opensearch.py --recreate --encode
 
 verify-w1:
 	./scripts/verify-w1.sh
