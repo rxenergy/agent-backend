@@ -403,26 +403,6 @@ class HttpLLM(LLMPort):
         )
 
 
-async def _wrap_generate_as_stream(
-    llm: LLMPort,
-    prompt: str,
-    *,
-    model_options: dict[str, Any] | None = None,
-) -> AsyncIterator[LLMTokenDelta]:
-    """Default streaming shim — emit one content delta + one terminal delta
-    by calling the blocking `generate()`. Adapters without native streaming
-    (Anthropic Phase 1, FakeEcho) reuse this so callers can program against
-    a single API."""
-    result = await llm.generate(prompt, model_options=model_options)
-    if result.text:
-        yield LLMTokenDelta(content=result.text)
-    yield LLMTokenDelta(
-        finish_reason="stop",
-        token_usage=dict(result.token_usage),
-        model_id=result.model_id,
-    )
-
-
 _ADAPTIVE_THINKING_MODELS = ("claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6")
 
 
