@@ -28,9 +28,15 @@ services:
     image: agent-backend:${BACKEND_TAG:-onprem}
     environment:
       APP_PROFILE: onprem
-      # 외부 네트워크 없음 — HF 캐시는 호스트 측에서 사전 동기화된 hf_cache 볼륨을 사용한다.
+      # 외부 네트워크 없음 — 임베더 가중치는 호스트의 ./models 디렉토리(평면 구조)
+      # 를 직접 마운트해 사용한다. EMBEDDING_*_MODEL 환경변수가 컨테이너 내
+      # 절대 경로(/app/models/...) 를 가리키므로 HF 캐시 레이아웃 변환 불필요.
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      # 호스트의 ./models 를 read-only 로 마운트. vLLM 컨테이너와 동일 경로지만,
+      # agent-api 에는 임베더(e5, fermi)용으로 별도 노출한다.
+      - ../../models:/app/models:ro
     depends_on:
       otel-collector:
         condition: service_started
@@ -111,3 +117,12 @@ services:
   #     가드가 onprem 스택 가동 중 실행을 차단한다.
   #   - 새 인덱스를 옮겨와야 한다면 snapshot/restore 또는 opensearch_data 볼륨
   #     스냅샷 교체로 진행한다.
+
+volumes:
+  # onprem 전용: 사전 적재된 외부 볼륨을 마운트한다.
+  # base compose.yml 의 `opensearch_data:` (자동 생성) 선언을 덮어쓰며,
+  # 실제 호스트 볼륨 `opensearch-data-single-gpu` (nrc-all-v3 색인 보유)
+  # 를 가리키도록 매핑한다. local 프로파일은 영향 없음.
+  opensearch_data:
+    external: true
+    name: opensearch-data-single-gpu
