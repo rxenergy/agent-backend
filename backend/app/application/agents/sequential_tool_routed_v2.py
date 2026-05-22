@@ -1,10 +1,24 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import re
 import time
 from dataclasses import replace
-from typing import Any
+from typing import Any, AsyncIterator
 
+from app.application.agents.events import (
+    AgentEvent,
+    EventEmitter,
+    bind_emitter,
+    current_emitter,
+    emit_reasoning,
+    emit_step,
+    emit_step_nowait,
+    emit_token,
+    emit_tool_nowait,
+    unbind_emitter,
+)
 from app.application.agents.llm_router import LLMRouter, UnknownLLMError
 from app.application.agents.registry import AgentDeps, register_variant
 from app.application.classification.active_cells import is_active
@@ -35,7 +49,7 @@ from app.domain.retrieval import RetrieverSearchOutput
 from app.observability import openinference as oi
 from app.observability.otel import get_tracer
 from app.ports.event_sink import EventSinkPort
-from app.ports.llm import LLMPort, LLMUnavailableError
+from app.ports.llm import LLMPort, LLMResult, LLMTokenDelta, LLMUnavailableError
 from app.ports.tool import ToolExecutionContext
 
 _TRACER = get_tracer("agent")
@@ -91,6 +105,62 @@ class SequentialToolRoutedRunner:
         self._min_score = retriever_min_score
         self._active_cells_mode = active_cells_mode
 
+    async def run_stream(
+        self, request: AgentRequest
+    ) -> AsyncIterator[AgentEvent]:
+        """Async-iterator counterpart to `run()` — yields progress events
+        (step / tool / token / reasoning) as the 15-step workflow advances,
+        and a terminal `final` event carrying the same `AgentResponse` that
+        `run()` would return. SSE layer consumes this directly.
+
+        Implementation note: `run()` itself is wrapped in an asyncio task,
+        with an EventEmitter installed on the current context (propagated
+        into the task by asyncio's contextvar copy semantics). The emitter
+        is queue-backed, so `record()` and the per-node helpers can publish
+        synchronously without `await`.
+        """
+        emitter = EventEmitter(active=True)
+        token = bind_emitter(emitter)
+        response: AgentResponse | None = None
+        run_error: BaseException | None = None
+
+        async def _drive() -> None:
+            nonlocal response
+            try:
+                response = await self.run(request)
+            finally:
+                await emitter.close()
+
+        task = asyncio.create_task(_drive())
+        try:
+            async for ev in emitter.drain():
+                yield ev
+            try:
+                await task
+            except BaseException as exc:  # noqa: BLE001
+                run_error = exc
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(BaseException):
+                    await task
+            unbind_emitter(token)
+
+        if run_error is not None:
+            yield AgentEvent(
+                kind="error",
+                payload={"message": str(run_error),
+                         "type": type(run_error).__name__},
+                ts=time.monotonic(),
+            )
+            return
+        if response is not None:
+            yield AgentEvent(
+                kind="final",
+                payload={"response": response},
+                ts=time.monotonic(),
+            )
+
     async def run(self, request: AgentRequest) -> AgentResponse:
         started = time.monotonic()
         tool_calls: list[ToolCallRecord] = []
@@ -122,6 +192,15 @@ class SequentialToolRoutedRunner:
             )
             if r.output_hash:
                 tool_result_refs.append(r.output_hash)
+            # Sidechannel emit for SSE — no-op when no emitter is bound.
+            emit_tool_nowait(
+                r.tool_name,
+                r.status,
+                version=r.tool_version,
+                latency_ms=r.latency_ms,
+                error_code=r.error_code,
+                retry_count=r.retry_count,
+            )
 
         try:
             llm_id, llm = self._llm_router.resolve(request.model or None)
@@ -137,6 +216,7 @@ class SequentialToolRoutedRunner:
             oi.set_io(root, input_value=request.query_text)
 
             # === Node 1: intent_classification ===
+            await emit_step("intent_classification", "started")
             with _TRACER.start_as_current_span("agent.intent_classification") as s:
                 classification = await self._classify(request)
                 scenario_object = classification.scenario_object
@@ -161,6 +241,13 @@ class SequentialToolRoutedRunner:
                         "classifier_backend": classification.classifier_backend,
                     },
                 )
+            await emit_step(
+                "intent_classification",
+                "ok",
+                scenario_object=scenario_object,
+                scenario_depth=scenario_depth,
+                confidence=classification_confidence,
+            )
 
             # Refuse early on low-confidence or inactive cells.
             if (
@@ -248,6 +335,7 @@ class SequentialToolRoutedRunner:
                 )
 
             # === 4. tool.retriever.search (Node 2) ===
+            await emit_step("retrieval", "started")
             try:
                 retrieval = await self._tools.invoke(
                     "retriever.search",
@@ -285,6 +373,8 @@ class SequentialToolRoutedRunner:
                     classification_confidence,
                     error_code="tool_empty_result",
                 )
+
+            await emit_step("retrieval", "ok", num_chunks=len(chunks))
 
             # === 5. tool.memory.approved_search (Phase 5에서 활성화) ===
             approved = await self._tools.invoke(
@@ -332,6 +422,7 @@ class SequentialToolRoutedRunner:
                 root.set_attribute("summary.reason", summ.reason)
 
             # === 6. context_building ===
+            await emit_step("context_build", "started")
             with _TRACER.start_as_current_span("agent.context_build") as s:
                 pack = self._context_builder.build(
                     interaction_id=request.interaction_id,
@@ -374,7 +465,10 @@ class SequentialToolRoutedRunner:
                     },
                 )
 
+            await emit_step("context_build", "ok", context_hash=pack.context_hash)
+
             # === 7. prompt_rendering ===
+            await emit_step("prompt_render", "started")
             with _TRACER.start_as_current_span("agent.prompt_render") as s:
                 try:
                     profile = self._resolver.resolve(scenario_object, scenario_depth)
@@ -429,12 +523,21 @@ class SequentialToolRoutedRunner:
                     request.interaction_id, self._context_builder.to_snapshot(pack)
                 )
 
+            await emit_step("prompt_render", "ok",
+                            profile_id=rendered.profile_id,
+                            profile_version=rendered.profile_version)
+
             # === 8. generation (Node 3) ===
+            await emit_step("generation", "started", llm_id=llm_id)
             llm_result = await self._generate(request, rendered, started, tool_calls,
                                               scenario_object, scenario_depth,
                                               classification_confidence, llm=llm)
             if isinstance(llm_result, AgentResponse):
                 return llm_result  # LLM unavailable refusal
+            await emit_step(
+                "generation", "ok",
+                completion_tokens=llm_result.token_usage.get("completion_tokens", 0),
+            )
 
             citation_ids = [c.citation_id for c in pack.citation_candidates]
             chunk_ids = [c.chunk_id for c in chunks]
@@ -489,6 +592,7 @@ class SequentialToolRoutedRunner:
             ]
 
             # === 10–11. verification (Node 4) + 1차 실패 fallback ===
+            await emit_step("verification", "started")
             citation_completeness, faithfulness, verification_status, llm_result, retry_count = (
                 await self._verify_with_fallback(
                     request=request,
@@ -503,6 +607,13 @@ class SequentialToolRoutedRunner:
                 )
             )
             root.set_attribute("verification.retry_count", retry_count)
+            await emit_step(
+                "verification", "ok",
+                verification_status=verification_status,
+                citation_completeness=citation_completeness,
+                faithfulness=faithfulness,
+                retry_count=retry_count,
+            )
 
             # === 12. memory_candidate_extract (Phase 4) ===
             with _TRACER.start_as_current_span("memory.candidate_extract"):
@@ -682,8 +793,12 @@ class SequentialToolRoutedRunner:
         llm: LLMPort,
     ):
         with _TRACER.start_as_current_span("llm.generation") as s:
+            em = current_emitter()
             try:
-                llm_result = await llm.generate(rendered.text)
+                if em.active:
+                    llm_result = await self._generate_stream(llm, rendered.text, span=s)
+                else:
+                    llm_result = await llm.generate(rendered.text)
             except LLMUnavailableError as exc:
                 s.set_attribute("llm.error", str(exc)[:256])
                 s.set_attribute("llm.status", "unavailable")
@@ -714,6 +829,49 @@ class SequentialToolRoutedRunner:
                 completion_tokens=int(llm_result.token_usage.get("completion_tokens", 0)),
             )
             return llm_result
+
+    async def _generate_stream(
+        self, llm: LLMPort, prompt: str, *, span
+    ) -> LLMResult:
+        """Drive the LLM in streaming mode while emitting token / reasoning
+        events. Returns a synthesised `LLMResult` so the rest of the
+        workflow (verification, citation extraction, response formatting)
+        is unchanged."""
+        text_buf: list[str] = []
+        reasoning_buf: list[str] = []
+        token_usage: dict[str, int] = {}
+        model_id: str | None = None
+        started_at = time.monotonic()
+        first_token_at: float | None = None
+
+        async for delta in llm.generate_stream(prompt):
+            if delta.content:
+                if first_token_at is None:
+                    first_token_at = time.monotonic()
+                text_buf.append(delta.content)
+                await emit_token(delta.content)
+            if delta.reasoning:
+                reasoning_buf.append(delta.reasoning)
+                await emit_reasoning(delta.reasoning)
+            if delta.token_usage:
+                token_usage = dict(delta.token_usage)
+            if delta.model_id:
+                model_id = delta.model_id
+
+        if first_token_at is not None:
+            # Captured as OTel attribute for stream-latency dashboards.
+            span.set_attribute(
+                "llm.first_token_ms",
+                int((first_token_at - started_at) * 1000),
+            )
+        return LLMResult(
+            text="".join(text_buf),
+            token_usage=token_usage or {
+                "prompt_tokens": 0,
+                "completion_tokens": len("".join(text_buf)),
+            },
+            model_id=model_id or getattr(llm, "model_id", "unknown"),
+        )
 
     # ----------------------------------------------------------------------
     # Node 4 — verification with retry fallback

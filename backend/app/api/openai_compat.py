@@ -9,14 +9,10 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.application.agents.events import AgentEvent
 from app.domain.interaction import AgentRequest, ChatTurn
 
 router = APIRouter()
-
-# Chunk size for SSE delta streaming. The agent workflow runs synchronously
-# (tools + LLM all complete before streaming starts), so this only controls how
-# the final answer_text is split into OpenAI-style delta frames for client UX.
-_STREAM_CHUNK_CHARS = 24
 
 
 class ChatMessage(BaseModel):
@@ -109,7 +105,7 @@ def _last_user_query(messages: list[ChatMessage]) -> str:
 
 
 @router.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest, request: Request) -> dict[str, Any]:
+async def chat_completions(req: ChatCompletionRequest, request: Request):
     container = request.app.state.container
     settings = container.settings
 
@@ -178,8 +174,21 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> dict
         user_id=request.headers.get("x-user-id"),
         project_id=request.headers.get("x-project-id"),
     )
-    response = await runner.run(agent_request)
 
+    if req.stream:
+        return StreamingResponse(
+            _sse_stream_from_runner(
+                runner=runner,
+                agent_request=agent_request,
+                interaction_id=interaction_id,
+                variant_id=variant_id,
+                fallback_llm=llm_id,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    response = await runner.run(agent_request)
     resolved_llm = response.llm_id or llm_id
     composite_id = f"{variant_id}@{resolved_llm}"
     smr_meta = _smr_agent_metadata(
@@ -188,19 +197,6 @@ async def chat_completions(req: ChatCompletionRequest, request: Request) -> dict
         resolved_llm=resolved_llm,
         response=response,
     )
-
-    if req.stream:
-        return StreamingResponse(
-            _sse_stream(
-                interaction_id=interaction_id,
-                composite_id=composite_id,
-                answer_text=response.answer_text,
-                finish_reason=response.refusal_reason or "stop",
-                smr_meta=smr_meta,
-            ),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
 
     return {
         "id": interaction_id,
@@ -261,45 +257,151 @@ def _smr_agent_metadata(
     }
 
 
-async def _sse_stream(
+def _frame(
     *,
     interaction_id: str,
     composite_id: str,
-    answer_text: str,
-    finish_reason: str,
-    smr_meta: dict[str, Any],
-) -> AsyncIterator[bytes]:
-    """Emit OpenAI-compatible chat.completion.chunk SSE frames.
+    created: int,
+    delta: dict[str, Any],
+    finish: str | None = None,
+    smr: dict[str, Any] | None = None,
+    usage: dict[str, int] | None = None,
+) -> bytes:
+    choice: dict[str, Any] = {"index": 0, "delta": delta, "finish_reason": finish}
+    payload: dict[str, Any] = {
+        "id": interaction_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": composite_id,
+        "choices": [choice],
+    }
+    if usage is not None:
+        payload["usage"] = usage
+    if smr is not None:
+        payload["smr_agent"] = smr
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
 
-    The agent workflow has already completed (tools + LLM + verification), so
-    streaming here is purely a UX wrapper: split the final answer_text into
-    small deltas so OpenWebUI renders progressively. The trailing chunk carries
-    finish_reason and the smr_agent metadata (custom field — OpenWebUI ignores
-    unknown fields, our own client uses it for citations panel).
+
+async def _sse_stream_from_runner(
+    *,
+    runner,
+    agent_request: AgentRequest,
+    interaction_id: str,
+    variant_id: str,
+    fallback_llm: str,
+) -> AsyncIterator[bytes]:
+    """Translate `runner.run_stream()` events into OpenAI chat.completion.chunk
+    SSE frames.
+
+    Mapping:
+      • token       → `delta.content`
+      • reasoning   → `delta.reasoning_content` (DeepSeek / OpenWebUI convention)
+      • step / tool → empty delta + `smr_agent.event` sidechannel
+      • final       → terminal frame with `finish_reason`, `usage`, and full
+                       `smr_agent` metadata (citations, verification, etc.)
+      • error       → terminal frame with `finish_reason="error"`
     """
+    composite_id = f"{variant_id}@{fallback_llm}"
     created = int(time.time())
 
-    def _frame(delta: dict[str, Any], *, finish: str | None = None,
-               smr: dict[str, Any] | None = None) -> bytes:
-        choice: dict[str, Any] = {"index": 0, "delta": delta, "finish_reason": finish}
-        payload: dict[str, Any] = {
-            "id": interaction_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": composite_id,
-            "choices": [choice],
-        }
-        if smr is not None:
-            payload["smr_agent"] = smr
-        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
-
     # Opening frame: role only (OpenAI convention).
-    yield _frame({"role": "assistant"})
+    yield _frame(
+        interaction_id=interaction_id,
+        composite_id=composite_id,
+        created=created,
+        delta={"role": "assistant"},
+    )
 
-    text = answer_text or ""
-    for i in range(0, len(text), _STREAM_CHUNK_CHARS):
-        yield _frame({"content": text[i : i + _STREAM_CHUNK_CHARS]})
+    final_yielded = False
+    try:
+        async for event in runner.run_stream(agent_request):
+            if event.kind == "token":
+                yield _frame(
+                    interaction_id=interaction_id,
+                    composite_id=composite_id,
+                    created=created,
+                    delta={"content": event.payload.get("content", "")},
+                )
+            elif event.kind == "reasoning":
+                yield _frame(
+                    interaction_id=interaction_id,
+                    composite_id=composite_id,
+                    created=created,
+                    delta={"reasoning_content": event.payload.get("content", "")},
+                )
+            elif event.kind in ("step", "tool"):
+                yield _frame(
+                    interaction_id=interaction_id,
+                    composite_id=composite_id,
+                    created=created,
+                    delta={},
+                    smr=_event_to_smr(event),
+                )
+            elif event.kind == "final":
+                response = event.payload["response"]
+                resolved_llm = response.llm_id or fallback_llm
+                composite_id = f"{runner.spec.variant_id}@{resolved_llm}"
+                smr_meta = _smr_agent_metadata(
+                    interaction_id=interaction_id,
+                    runner_variant=runner.spec.variant_id,
+                    resolved_llm=resolved_llm,
+                    response=response,
+                )
+                # If no tokens streamed (e.g. early refusal, fake_echo
+                # variant), surface the full answer_text in the terminal
+                # frame so the client still receives the body.
+                if response.answer_text:
+                    yield _frame(
+                        interaction_id=interaction_id,
+                        composite_id=composite_id,
+                        created=created,
+                        delta={"content": ""},
+                        smr=None,
+                    )
+                yield _frame(
+                    interaction_id=interaction_id,
+                    composite_id=composite_id,
+                    created=created,
+                    delta={},
+                    finish=response.refusal_reason or "stop",
+                    smr={**smr_meta, "answer_text": response.answer_text},
+                    usage={
+                        "prompt_tokens": response.token_usage.get("prompt_tokens", 0),
+                        "completion_tokens": response.token_usage.get("completion_tokens", 0),
+                        "total_tokens": sum(response.token_usage.values()),
+                    },
+                )
+                final_yielded = True
+            elif event.kind == "error":
+                yield _frame(
+                    interaction_id=interaction_id,
+                    composite_id=composite_id,
+                    created=created,
+                    delta={},
+                    finish="error",
+                    smr={"error": event.payload},
+                )
+                final_yielded = True
+    except Exception as exc:  # noqa: BLE001 — terminal frame, then re-raise is not useful here
+        if not final_yielded:
+            yield _frame(
+                interaction_id=interaction_id,
+                composite_id=composite_id,
+                created=created,
+                delta={},
+                finish="error",
+                smr={"error": {"message": str(exc), "type": type(exc).__name__}},
+            )
 
-    # Closing frame with finish_reason + smr_agent metadata.
-    yield _frame({}, finish=finish_reason, smr=smr_meta)
     yield b"data: [DONE]\n\n"
+
+
+def _event_to_smr(event: AgentEvent) -> dict[str, Any]:
+    return {
+        "event": {
+            "kind": event.kind,
+            "name": event.name,
+            "status": event.status,
+            **event.payload,
+        }
+    }

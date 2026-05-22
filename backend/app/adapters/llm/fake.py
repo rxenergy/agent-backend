@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, AsyncIterator
 
-from app.ports.llm import LLMPort, LLMResult
+from app.ports.llm import LLMPort, LLMResult, LLMTokenDelta
 
 
 class FakeEchoLLM(LLMPort):
@@ -24,4 +24,19 @@ class FakeEchoLLM(LLMPort):
             text=text,
             token_usage={"prompt_tokens": len(prompt), "completion_tokens": len(text)},
             model_id=self._model_id,
+        )
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        *,
+        model_options: dict[str, Any] | None = None,
+    ) -> AsyncIterator[LLMTokenDelta]:
+        result = await self.generate(prompt, model_options=model_options)
+        if result.text:
+            yield LLMTokenDelta(content=result.text)
+        yield LLMTokenDelta(
+            finish_reason="stop",
+            token_usage=dict(result.token_usage),
+            model_id=result.model_id,
         )

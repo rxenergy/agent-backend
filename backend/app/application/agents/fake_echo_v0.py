@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import time
+from typing import AsyncIterator
 
+from app.application.agents.events import AgentEvent
 from app.application.agents.registry import AgentDeps, register_variant
 from app.application.events.recorder import EventRecorder
 from app.domain.agents import VariantSpec
@@ -59,6 +61,19 @@ class FakeEchoAgentRunner:
         )
         await self._recorder.persist(event)
         return response
+
+    async def run_stream(
+        self, request: AgentRequest
+    ) -> AsyncIterator[AgentEvent]:
+        """Minimal Protocol-compliant stream: run to completion and yield a
+        single `final` event. Token-level streaming is intentionally absent
+        for the P0 variant."""
+        response = await self.run(request)
+        yield AgentEvent(
+            kind="final",
+            payload={"response": response},
+            ts=time.monotonic(),
+        )
 
 
 @register_variant(FAKE_ECHO_VARIANT_ID)
