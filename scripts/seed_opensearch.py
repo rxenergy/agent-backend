@@ -71,9 +71,18 @@ def recreate_index() -> None:
 
 
 def _load_encoders():
-    """Lazy import the backend embedding adapters (torch is heavy)."""
-    repo_root = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(repo_root / "backend"))
+    """Lazy import the backend embedding adapters (torch is heavy).
+
+    Supports two layouts:
+      * host repo — scripts/ alongside backend/, so backend/ holds the `app` pkg
+      * container — Dockerfile copies `app` package to /app/app, with scripts/
+        mounted at /app/scripts; the parent of scripts/ already holds `app/`
+    """
+    here = Path(__file__).resolve().parent.parent
+    for candidate in (here / "backend", here):
+        if (candidate / "app" / "adapters" / "embeddings" / "e5.py").exists():
+            sys.path.insert(0, str(candidate))
+            break
     from app.adapters.embeddings.e5 import E5Encoder  # noqa: WPS433
     from app.adapters.embeddings.fermi import FermiEncoder  # noqa: WPS433
 

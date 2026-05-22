@@ -32,6 +32,9 @@ services:
       - ../../prompts:/app/prompts:ro
       - ../../tools:/app/tools:ro
       - ../../variants:/app/variants:ro
+      - ../../scripts:/app/scripts:ro
+      - ../../datasets:/app/datasets:ro
+      - ../../infra/opensearch:/app/infra/opensearch:ro
       - agent_events:/var/lib/agent/events
       - hf_cache:/var/cache/huggingface
     healthcheck:
