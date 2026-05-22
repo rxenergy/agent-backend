@@ -3,7 +3,11 @@ SHELL := /bin/sh
 COMPOSE := docker compose --env-file infra/env/local.env --profile local \
   -f infra/compose/compose.yml -f infra/compose/compose.local.yml
 
-.PHONY: help build up-local down logs ps test test-integration smoke smoke-stream seed seed-encode opensearch-init verify-w1 fmt clean migrate psql prompts-validate
+COMPOSE_ONPREM := docker compose --env-file infra/env/onprem.env --profile onprem \
+  -f infra/compose/compose.yml -f infra/compose/compose.onprem.yml
+
+.PHONY: help build up-local down logs ps test test-integration smoke smoke-stream seed seed-encode opensearch-init verify-w1 fmt clean migrate psql prompts-validate \
+  build-onprem up-onprem down-onprem logs-onprem ps-onprem clean-onprem
 
 help:
 	@echo "Targets:"
@@ -17,6 +21,14 @@ help:
 	@echo "  smoke-stream  Stream a sample query (SSE) and pretty-print each frame"
 	@echo "  fmt        Run ruff format on backend"
 	@echo "  clean      Tear down stack and remove volumes"
+	@echo ""
+	@echo "On-premise (air-gapped + local vLLM):"
+	@echo "  build-onprem  Build agent-api/open-webui images for onprem profile"
+	@echo "  up-onprem     Bring up onprem stack (requires vllm-node:latest + ./models/gemma4)"
+	@echo "  down-onprem   Tear down onprem stack (keeps volumes)"
+	@echo "  logs-onprem   Tail agent-api logs (onprem)"
+	@echo "  ps-onprem     Show onprem stack status"
+	@echo "  clean-onprem  Tear down onprem stack and remove volumes"
 
 build:
 	$(COMPOSE) build agent-api open-webui
@@ -94,3 +106,26 @@ migrate:
 
 psql:
 	$(COMPOSE) exec postgres psql -U agent -d agent_state
+
+# ── On-premise targets ────────────────────────────────────────────────────
+# 사전 준비:
+#   1) docker/vllm/README.md 절차로 호스트 docker 데몬에 `vllm-node:latest` 적재
+#   2) ./models/gemma4 에 Gemma 4 26B A4B-it 가중치 사전 다운로드
+#   3) (선택) hf_cache 볼륨에 임베더(e5/fermi) 사전 동기화 (HF_HUB_OFFLINE=1)
+build-onprem:
+	$(COMPOSE_ONPREM) build agent-api open-webui
+
+up-onprem:
+	$(COMPOSE_ONPREM) up -d
+
+down-onprem:
+	$(COMPOSE_ONPREM) down
+
+logs-onprem:
+	$(COMPOSE_ONPREM) logs -f agent-api
+
+ps-onprem:
+	$(COMPOSE_ONPREM) ps
+
+clean-onprem:
+	$(COMPOSE_ONPREM) down -v
