@@ -3,7 +3,7 @@ SHELL := /bin/sh
 COMPOSE := docker compose --env-file infra/env/local.env --profile local \
   -f infra/compose/compose.yml -f infra/compose/compose.local.yml
 
-.PHONY: help build up-local down logs ps test test-integration smoke seed verify-w1 fmt clean migrate psql prompts-validate
+.PHONY: help build up-local down logs ps test test-integration smoke seed seed-encode opensearch-init verify-w1 fmt clean migrate psql prompts-validate
 
 help:
 	@echo "Targets:"
@@ -52,11 +52,25 @@ prompts-validate:
 smoke:
 	./scripts/smoke.sh
 
+opensearch-init:
+	OPENSEARCH_ENDPOINT=http://localhost:9200 \
+	OPENSEARCH_INDEX=nrc-all-v3 \
+	OPENSEARCH_SEARCH_PIPELINE=nrc-hybrid-search \
+	sh infra/opensearch/init.sh
+
+# BM25-only seed (no embeddings). Use `make seed-encode` for full hybrid.
 seed:
 	OPENSEARCH_ENDPOINT=http://localhost:9200 \
-	OPENSEARCH_INDEX=smr-docs \
+	OPENSEARCH_INDEX=nrc-all-v3 \
 	SEED_FILE=datasets/seed_docs/smr_seed.jsonl \
-	python3 scripts/seed_opensearch.py
+	python3 scripts/seed_opensearch.py --recreate
+
+# Full hybrid seed: requires `pip install -e backend/[embeddings]` on the host.
+seed-encode:
+	OPENSEARCH_ENDPOINT=http://localhost:9200 \
+	OPENSEARCH_INDEX=nrc-all-v3 \
+	SEED_FILE=datasets/seed_docs/smr_seed.jsonl \
+	python3 scripts/seed_opensearch.py --recreate --encode
 
 verify-w1:
 	./scripts/verify-w1.sh
