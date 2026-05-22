@@ -15,3 +15,22 @@ backend/*.egg-info/
 infra/env/*.secret.env
 
 .DS_Store
+# Local on-prem model weights — never commit these
+models/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Env files
+.env
+.env.*
+!.env.example

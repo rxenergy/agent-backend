@@ -1,0 +1,45 @@
+# Root compose — FastAPI(e5 + fermi) + OpenSearch 단일 스택.
+#
+# include 디렉티브로 docker/opensearch/docker-compose.yml 의 OpenSearch 서비스를
+# 같은 프로젝트로 끌어와 `docker compose up` 한 번으로 둘 다 띄운다.
+# API 는 OpenSearch healthcheck 통과 후 시작된다.
+
+name: agent-backend
+
+include:
+  - path: docker/opensearch/docker-compose.yml
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    image: agent-backend-api
+    container_name: agent-backend-api
+    shm_size: "16gb"
+    ports:
+      - "8080:8000"
+    environment:
+      OPENSEARCH_URL: http://opensearch:9200
+      INDEX_NAME: nrc-all-v3
+      DEVICE: cuda
+      # 온프레미스: 호스트에서 huggingface-cli 로 ./models 에 받아둔 가중치를 사용.
+      E5_MODEL_ID: /workspace/models/intfloat/multilingual-e5-large
+      FERMI_MODEL_ID: /workspace/models/atomic-canyon/fermi-1024
+      # HF 허브 호출을 차단해 의도치 않은 외부 통신을 막는다.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      - ./app:/workspace/app
+      - ./models:/workspace/models:ro
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
