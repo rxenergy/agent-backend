@@ -4,6 +4,7 @@ from typing import Any
 
 import httpx
 
+from app.adapters.tools._opensearch_hybrid import build_hybrid_query
 from app.domain.errors import RetrievalTimeoutError, RetrievalUnavailableError
 from app.domain.retrieval import (
     RetrievedChunk,
@@ -11,32 +12,49 @@ from app.domain.retrieval import (
     RetrieverSearchOutput,
 )
 from app.domain.tools import ToolResult
+from app.ports.embedding import DenseEncoderPort, SparseEncoderPort
 from app.ports.tool import ToolExecutionContext
 
 
 class OpenSearchRetrieverTool:
-    """BM25-only retriever against an OpenSearch index.
+    """Hybrid retriever (BM25 + dense kNN + sparse rank_features) against OpenSearch 3.x.
 
-    Document schema expected (also written by `scripts/seed_opensearch.py`):
+    The DSL is built by `build_hybrid_query` using injected encoders. Entity
+    boosts and ``scenario_object`` filters live inside the BM25 sub-query of
+    the hybrid clause; dense/sparse sub-queries stay scenario-agnostic.
+
+    Document schema expected on the index (e.g. ``nrc-all-v3``):
         {
-          "document_id": "kins-rg-2024-001",
-          "chunk_id":    "kins-rg-2024-001#p7#1",
-          "title":       "...",
-          "page":        7,
-          "section":     "§3.2",
-          "scenario_object": "regulation",
-          "text":        "<chunk body>"
+          "document_id":      "kins-rg-2024-001",
+          "chunk_id":         "kins-rg-2024-001#p7#1",
+          "title":            "...",
+          "page":             7,
+          "section":          "§3.2",
+          "scenario_object":  "regulation",
+          "doc_type":         "vendor|regulation|rai",
+          "revision":         "...",
+          "response_date":    "YYYY-MM-DD",
+          "text":             "<chunk body>",
+          "dense_e5":         [float, ...]   # knn_vector(1024)
+          "sparse_fermi":     {tok: float}   # rank_features
         }
     """
 
     name = "retriever.search"
-    version = "v1"
+    version = "v2"
 
     def __init__(
         self,
         *,
         endpoint: str,
         index: str,
+        dense_encoder: DenseEncoderPort,
+        sparse_encoder: SparseEncoderPort,
+        search_pipeline: str | None = None,
+        dense_field: str = "dense_e5",
+        sparse_field: str = "sparse_fermi",
+        text_field: str = "text",
+        k_dense: int = 50,
         username: str | None = None,
         password: str | None = None,
         timeout_s: float = 5.0,
@@ -46,6 +64,13 @@ class OpenSearchRetrieverTool:
             raise ValueError("OpenSearchRetrieverTool requires endpoint")
         self._endpoint = endpoint.rstrip("/")
         self._index = index
+        self._dense = dense_encoder
+        self._sparse = sparse_encoder
+        self._search_pipeline = search_pipeline or None
+        self._dense_field = dense_field
+        self._sparse_field = sparse_field
+        self._text_field = text_field
+        self._k_dense = k_dense
         self._auth = (username, password) if username else None
         self._timeout_s = timeout_s
         self._verify = verify_certs
@@ -58,15 +83,29 @@ class OpenSearchRetrieverTool:
         if isinstance(tool_input, dict):
             tool_input = RetrieverSearchInput.model_validate(tool_input)
 
-        body = self._build_query(tool_input)
+        hq = build_hybrid_query(
+            tool_input,
+            dense_encoder=self._dense,
+            sparse_encoder=self._sparse,
+            dense_field=self._dense_field,
+            sparse_field=self._sparse_field,
+            text_field=self._text_field,
+            k_dense=self._k_dense,
+        )
         url = f"{self._endpoint}/{self._index}/_search"
+        params: dict[str, str] = {}
+        if self._search_pipeline:
+            params["search_pipeline"] = self._search_pipeline
 
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout_s, verify=self._verify, auth=self._auth
             ) as client:
                 resp = await client.post(
-                    url, json=body, headers={"Content-Type": "application/json"}
+                    url,
+                    json=hq.dsl,
+                    params=params or None,
+                    headers={"Content-Type": "application/json"},
                 )
             if resp.status_code >= 500:
                 raise RetrievalUnavailableError(
@@ -98,36 +137,6 @@ class OpenSearchRetrieverTool:
             input_hash="",
             trace_id=context.trace_id,
         )
-
-    def _build_query(self, ti: RetrieverSearchInput) -> dict[str, Any]:
-        must: list[dict[str, Any]] = [
-            {"match": {"text": {"query": ti.query_text}}},
-        ]
-        # Entity 부스트: 노형명/규제ID/RAI번호가 본문에 등장하면 점수 가중.
-        # 한국어 standard analyzer 기준이라 should의 match로 부스팅한다.
-        for vals in (ti.entities or {}).values():
-            for v in vals:
-                if v:
-                    must.append({"match": {"text": {"query": v, "boost": 1.5}}})
-        filters: list[dict[str, Any]] = []
-        if ti.scenario_object:
-            filters.append({"term": {"scenario_object": ti.scenario_object}})
-        return {
-            "size": max(1, ti.top_k),
-            "query": {"bool": {"must": must, "filter": filters}},
-            "_source": [
-                "document_id",
-                "chunk_id",
-                "title",
-                "page",
-                "section",
-                "scenario_object",
-                "doc_type",
-                "revision",
-                "response_date",
-                "text",
-            ],
-        }
 
     @staticmethod
     def _hit_to_chunk(hit: dict[str, Any]) -> RetrievedChunk:

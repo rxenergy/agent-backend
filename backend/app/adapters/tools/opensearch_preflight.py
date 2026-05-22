@@ -20,13 +20,16 @@ class OpenSearchPreflight:
     endpoint: str
     index: str
     severity: Severity
+    search_pipeline: str | None = None
     timeout_s: float = 5.0
     verify_certs: bool = False
     name: str = "opensearch"
 
     async def run(self) -> PreflightResult:
         base = self.endpoint.rstrip("/")
-        details = {"endpoint": base, "index": self.index}
+        details: dict[str, object] = {"endpoint": base, "index": self.index}
+        if self.search_pipeline:
+            details["search_pipeline"] = self.search_pipeline
         try:
             async with httpx.AsyncClient(
                 timeout=self.timeout_s, verify=self.verify_certs
@@ -57,6 +60,26 @@ class OpenSearchPreflight:
                         message=f"index check failed (status={head.status_code})",
                         details=details,
                     )
+                if self.search_pipeline:
+                    pipe = await client.get(
+                        f"{base}/_search/pipeline/{self.search_pipeline}"
+                    )
+                    if pipe.status_code == 404:
+                        return PreflightResult(
+                            name=self.name,
+                            ok=False,
+                            severity=self.severity,
+                            message=f"search pipeline missing: {self.search_pipeline}",
+                            details=details,
+                        )
+                    if pipe.status_code >= 400:
+                        return PreflightResult(
+                            name=self.name,
+                            ok=False,
+                            severity=self.severity,
+                            message=f"search pipeline check failed (status={pipe.status_code})",
+                            details=details,
+                        )
         except httpx.RequestError as exc:
             return PreflightResult(
                 name=self.name,
