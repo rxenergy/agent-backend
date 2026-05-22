@@ -1,19 +1,31 @@
 #!/usr/bin/env python3
-"""Index SMR seed JSONL into OpenSearch.
+"""Index seed JSONL into OpenSearch ``nrc-all-v3`` (hybrid mapping).
 
-Usage (host):
+Two modes:
+
+* default — index text + metadata only (BM25 works; dense/sparse subqueries
+  fall back to ``match_none``-style behavior). Useful for fast iteration
+  without loading torch.
+* ``--encode`` — load E5 + Fermi encoders, compute ``dense_e5`` /
+  ``sparse_fermi`` per chunk, and index everything for full hybrid scoring.
+  Requires the backend's ``[embeddings]`` extra (``torch``,
+  ``sentence-transformers``, ``transformers``) to be installed.
+
+The index/pipeline themselves are created by ``infra/opensearch/init.sh``;
+this script assumes the mapping already exists and only bulk-indexes docs.
+Set ``--recreate`` to drop and rebuild the index from the mapping file.
+
+Usage::
+
     OPENSEARCH_ENDPOINT=http://localhost:9200 \
-    OPENSEARCH_INDEX=smr-docs \
+    OPENSEARCH_INDEX=nrc-all-v3 \
     SEED_FILE=datasets/seed_docs/smr_seed.jsonl \
-    python3 scripts/seed_opensearch.py
-
-Idempotent: deletes + recreates the index so re-runs always produce the same
-document set. Uses _bulk for low-overhead indexing. No third-party dependency
-(urllib only) so it can run on a bare Python 3.11 install.
+    python3 scripts/seed_opensearch.py [--encode] [--recreate]
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -22,56 +34,75 @@ import urllib.request
 from pathlib import Path
 
 ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT", "http://localhost:9200").rstrip("/")
-INDEX = os.environ.get("OPENSEARCH_INDEX", "smr-docs")
+INDEX = os.environ.get("OPENSEARCH_INDEX", "nrc-all-v3")
 SEED_FILE = Path(os.environ.get("SEED_FILE", "datasets/seed_docs/smr_seed.jsonl"))
-
-INDEX_MAPPING = {
-    "settings": {
-        "number_of_shards": 1,
-        "number_of_replicas": 0,
-        "analysis": {
-            "analyzer": {
-                "default": {"type": "standard"},
-            }
-        },
-    },
-    "mappings": {
-        "properties": {
-            "document_id": {"type": "keyword"},
-            "chunk_id": {"type": "keyword"},
-            "title": {"type": "text"},
-            "page": {"type": "integer"},
-            "section": {"type": "keyword"},
-            "scenario_object": {"type": "keyword"},
-            "doc_type": {"type": "keyword"},
-            "revision": {"type": "keyword"},
-            "response_date": {"type": "keyword"},
-            "text": {"type": "text"},
-        }
-    },
-}
+MAPPING_FILE = Path(
+    os.environ.get(
+        "OPENSEARCH_MAPPING_FILE",
+        "infra/opensearch/mappings/nrc-all-v3.json",
+    )
+)
 
 
-def request(method: str, path: str, body: bytes | None = None, content_type: str = "application/json") -> tuple[int, bytes]:
+def request(
+    method: str, path: str, body: bytes | None = None, content_type: str = "application/json"
+) -> tuple[int, bytes]:
     req = urllib.request.Request(f"{ENDPOINT}{path}", data=body, method=method)
     if body is not None:
         req.add_header("Content-Type", content_type)
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
 
 
 def recreate_index() -> None:
+    if not MAPPING_FILE.exists():
+        raise SystemExit(f"mapping file not found: {MAPPING_FILE}")
     status, _ = request("DELETE", f"/{INDEX}")
     if status not in (200, 404):
         raise SystemExit(f"DELETE /{INDEX} → {status}")
-    body = json.dumps(INDEX_MAPPING).encode("utf-8")
+    body = MAPPING_FILE.read_bytes()
     status, payload = request("PUT", f"/{INDEX}", body)
     if status >= 300:
         raise SystemExit(f"PUT /{INDEX} → {status}: {payload!r}")
-    print(f"  recreated index '{INDEX}'")
+    print(f"  recreated index '{INDEX}' from {MAPPING_FILE}")
+
+
+def _load_encoders():
+    """Lazy import the backend embedding adapters (torch is heavy)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(repo_root / "backend"))
+    from app.adapters.embeddings.e5 import E5Encoder  # noqa: WPS433
+    from app.adapters.embeddings.fermi import FermiEncoder  # noqa: WPS433
+
+    e5 = E5Encoder(
+        model_id=os.environ.get("EMBEDDING_E5_MODEL", "intfloat/multilingual-e5-large"),
+        device=os.environ.get("EMBEDDING_DEVICE", "cpu"),
+        max_seq_len=int(os.environ.get("EMBEDDING_E5_MAX_SEQ_LEN", "512")),
+    )
+    fermi = FermiEncoder(
+        model_id=os.environ.get("EMBEDDING_FERMI_MODEL", "atomic-canyon/fermi-1024"),
+        device=os.environ.get("EMBEDDING_DEVICE", "cpu"),
+        max_seq_len=int(os.environ.get("EMBEDDING_FERMI_MAX_SEQ_LEN", "1024")),
+        top_n=int(os.environ.get("EMBEDDING_FERMI_TOP_N", "200")),
+    )
+    print(f"  encoders loaded: e5 dim={e5.dim}")
+    return e5, fermi
+
+
+def _enrich_with_embeddings(docs: list[dict], e5, fermi) -> None:
+    """Compute dense_e5 + sparse_fermi for each doc in place."""
+    for i, doc in enumerate(docs):
+        text = doc.get("text", "") or ""
+        # Encoders treat passages and queries identically here — the seed
+        # corpus is small enough that we accept the small e5 mismatch
+        # (`passage: ` prefix) by calling the proper API.
+        doc["dense_e5"] = e5.encode_passages([text])[0]
+        doc["sparse_fermi"] = fermi.encode_query(text)
+        if (i + 1) % 25 == 0:
+            print(f"  encoded {i + 1}/{len(docs)}")
 
 
 def bulk_index(docs: list[dict]) -> None:
@@ -81,7 +112,9 @@ def bulk_index(docs: list[dict]) -> None:
         lines.append(json.dumps(meta).encode("utf-8"))
         lines.append(json.dumps(doc, ensure_ascii=False).encode("utf-8"))
     body = b"\n".join(lines) + b"\n"
-    status, payload = request("POST", "/_bulk?refresh=true", body, content_type="application/x-ndjson")
+    status, payload = request(
+        "POST", "/_bulk?refresh=true", body, content_type="application/x-ndjson"
+    )
     if status >= 300:
         raise SystemExit(f"_bulk → {status}: {payload[:512]!r}")
     parsed = json.loads(payload)
@@ -91,14 +124,41 @@ def bulk_index(docs: list[dict]) -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--encode",
+        action="store_true",
+        help="compute dense_e5 + sparse_fermi via backend embedding adapters",
+    )
+    parser.add_argument(
+        "--recreate",
+        action="store_true",
+        help="DELETE + PUT the index using the mapping file before bulk indexing",
+    )
+    args = parser.parse_args()
+
     if not SEED_FILE.exists():
         print(f"seed file not found: {SEED_FILE}", file=sys.stderr)
         return 2
-    docs = [json.loads(line) for line in SEED_FILE.read_text(encoding="utf-8").splitlines() if line.strip()]
-    print(f"OpenSearch: {ENDPOINT}  index: {INDEX}  seed: {SEED_FILE} ({len(docs)} docs)")
-    recreate_index()
+    docs = [
+        json.loads(line)
+        for line in SEED_FILE.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    print(
+        f"OpenSearch: {ENDPOINT}  index: {INDEX}  seed: {SEED_FILE} "
+        f"({len(docs)} docs, encode={args.encode})"
+    )
+
+    if args.recreate:
+        recreate_index()
+
+    if args.encode:
+        e5, fermi = _load_encoders()
+        _enrich_with_embeddings(docs, e5, fermi)
+
     bulk_index(docs)
-    # Verify count
+
     status, payload = request("GET", f"/{INDEX}/_count")
     if status >= 300:
         raise SystemExit(f"_count → {status}: {payload!r}")

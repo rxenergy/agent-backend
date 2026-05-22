@@ -1,0 +1,14 @@
+{
+  "description": "Hybrid search pipeline for nrc-all-v3 (BM25 + dense kNN + sparse rank_features).",
+  "phase_results_processors": [
+    {
+      "normalization-processor": {
+        "normalization": {"technique": "min_max"},
+        "combination": {
+          "technique": "arithmetic_mean",
+          "parameters": {"weights": [0.3, 0.5, 0.2]}
+        }
+      }
+    }
+  ]
+}
