@@ -13,5 +13,4 @@ class ScenarioObject(str, Enum):
 class ScenarioDepth(str, Enum):
     D1 = "D1"  # Overview
     D2 = "D2"  # Technical
-    D3 = "D3"  # Rationale
-    D4 = "D4"  # Formal / clause-level
+    D3 = "D3"  # Formal / clause-level

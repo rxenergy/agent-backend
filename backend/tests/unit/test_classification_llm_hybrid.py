@@ -21,11 +21,11 @@ class _StubLLM:
 @pytest.mark.asyncio
 async def test_llm_classifier_parses_json() -> None:
     llm = _StubLLM(
-        text='{"object":"O2","depth":"D4","object_confidence":0.9,"depth_confidence":0.8}'
+        text='{"object":"O2","depth":"D3","object_confidence":0.9,"depth_confidence":0.8}'
     )
     r = await LLMClassifier(llm).classify("RG 1.157 원문 정의")
     assert r.scenario_object == "O2"
-    assert r.scenario_depth == "D4"
+    assert r.scenario_depth == "D3"
     assert r.confidence == 0.8
 
 
@@ -58,9 +58,9 @@ async def test_hybrid_prefers_rule_when_confident() -> None:
 @pytest.mark.asyncio
 async def test_hybrid_escalates_to_llm_when_rule_low() -> None:
     rule = RuleClassifier()
-    llm = LLMClassifier(_StubLLM(text='{"object":"O2","depth":"D4","object_confidence":0.9,"depth_confidence":0.9}'))
+    llm = LLMClassifier(_StubLLM(text='{"object":"O2","depth":"D3","object_confidence":0.9,"depth_confidence":0.9}'))
     h = HybridClassifier(rule, llm, escalate_below=0.9)
     r = await h.classify("질문")  # rule will give 0 confidence
     assert r.classifier_backend == "hybrid"
     assert r.scenario_object == "O2"
-    assert r.scenario_depth == "D4"
+    assert r.scenario_depth == "D3"

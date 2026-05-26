@@ -39,10 +39,6 @@ _TECHNICAL_KEYWORDS = (
     "설계", "메커니즘", "원리", "수치", "파라미터", "기준값", "성능",
     "design", "mechanism", "spec", "specification", "특징", "동작",
 )
-_RATIONALE_KEYWORDS = (
-    "왜", "이유", "배경", "근거", "맥락", "trade", "trade-off",
-    "rationale", "why", "reason",
-)
 _FORMAL_KEYWORDS = (
     "원문", "정의", "조항", "요건", "정확한", "공식",
     "definition", "verbatim", "clause", "section",
@@ -80,8 +76,7 @@ class RuleClassifier:
         d_scores = {
             "D1": _hits(q, _OVERVIEW_KEYWORDS),
             "D2": _hits(q, _TECHNICAL_KEYWORDS),
-            "D3": _hits(q, _RATIONALE_KEYWORDS),
-            "D4": _hits(q, _FORMAL_KEYWORDS),
+            "D3": _hits(q, _FORMAL_KEYWORDS),
         }
         # RAI 번호가 있으면 O3 가중치 부스트
         entities = _extract_entities(query_text)

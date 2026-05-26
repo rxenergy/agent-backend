@@ -40,7 +40,6 @@ def build_prompts(
         "depth/d1_v1.md": "D1 body",
         "depth/d2_v1.md": "D2 body",
         "depth/d3_v1.md": "D3 body",
-        "depth/d4_v1.md": "D4 body",
         "cell/o1_d2_v1.md": "CELL_O1D2",
         "schemas/answer_v1.json": "{}",
     }

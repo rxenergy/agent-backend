@@ -24,12 +24,11 @@ Object:
 
 Depth:
 - D1 Overview: 현황/통계/패턴
-- D2 Technical: 기술 디테일/메커니즘/수치
-- D3 Rationale: 배경/근거/이유/맥락
-- D4 Formal: 원문/정의/조항/공식 요건
+- D2 Technical: 기술 디테일/메커니즘/수치/인과 사슬
+- D3 Formal: 원문/정의/조항/공식 요건
 
 응답은 다음 JSON 형식으로만 답한다(설명 금지):
-{"object":"O1|O2|O3|O4","depth":"D1|D2|D3|D4","object_confidence":0.0-1.0,"depth_confidence":0.0-1.0}
+{"object":"O1|O2|O3|O4","depth":"D1|D2|D3","object_confidence":0.0-1.0,"depth_confidence":0.0-1.0}
 
 질의: {query}
 """
@@ -79,7 +78,7 @@ class LLMClassifier:
         if obj not in ("O1", "O2", "O3", "O4"):
             obj = DEFAULT_OBJECT
             oc = 0.0
-        if dep not in ("D1", "D2", "D3", "D4"):
+        if dep not in ("D1", "D2", "D3"):
             dep = DEFAULT_DEPTH
             dc = 0.0
         return ClassificationResult(
