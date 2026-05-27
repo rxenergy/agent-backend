@@ -117,6 +117,10 @@ services:
   #     가드가 onprem 스택 가동 중 실행을 차단한다.
   #   - 새 인덱스를 옮겨와야 한다면 snapshot/restore 또는 opensearch_data 볼륨
   #     스냅샷 교체로 진행한다.
+  opensearch:
+    volumes:
+      - opensearch_snapshots:/usr/share/opensearch/snapshots
+
 
 volumes:
   # onprem 전용: 사전 적재된 외부 볼륨을 마운트한다.
@@ -126,3 +130,10 @@ volumes:
   opensearch_data:
     external: true
     name: opensearch-data-single-gpu
+
+  opensearch_snapshots:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /srv/os-snapshots
