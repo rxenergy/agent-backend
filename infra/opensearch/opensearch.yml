@@ -20,3 +20,12 @@ knn.algo_param.index_thread_qty: 4
 
 # ---- 네트워크 ----
 network.host: 0.0.0.0
+
+# ---- Snapshot ----
+# fs 타입 snapshot repository 등록을 허용할 경로 화이트리스트.
+# onprem overlay 가 호스트의 /srv/os-snapshots 를 컨테이너의
+# /usr/share/opensearch/snapshots 로 bind-mount 한다. 이 설정이 없으면
+# `PUT _snapshot/<repo> {"type":"fs","settings":{"location":...}}` 가
+# repository_exception 으로 거부된다. local 프로파일에서는 해당 경로가
+# 마운트되지 않아도 무해 (등록을 하지 않는 한 사용되지 않음).
+path.repo: ["/usr/share/opensearch/snapshots"]

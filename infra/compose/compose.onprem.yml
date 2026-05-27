@@ -131,6 +131,17 @@ volumes:
     external: true
     name: opensearch-data-single-gpu
 
+  # Snapshot repository 저장소 (fs 타입). compose 가 자동 생성하지 않으므로
+  # 호스트에서 사전에 디렉토리를 만들고 OpenSearch 컨테이너 사용자(uid 1000)
+  # 에게 쓰기 권한을 부여해야 한다:
+  #   sudo mkdir -p /srv/os-snapshots
+  #   sudo chown 1000:1000 /srv/os-snapshots
+  # 컨테이너 내부 경로(/usr/share/opensearch/snapshots) 는 opensearch.yml 의
+  # path.repo 화이트리스트와 일치해야 한다.
+  # 스택 가동 후 한 번 repository 를 등록한다:
+  #   curl -X PUT http://localhost:9200/_snapshot/onprem_fs \
+  #     -H 'Content-Type: application/json' \
+  #     -d '{"type":"fs","settings":{"location":"/usr/share/opensearch/snapshots","compress":true}}'
   opensearch_snapshots:
     driver: local
     driver_opts:
