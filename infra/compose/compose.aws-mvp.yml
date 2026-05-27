@@ -1,0 +1,86 @@
+# AWS MVP profile — frontend-only deployment overlay.
+#
+# 베이스 compose.yml 과 합치지 않는다. AWS EC2 단일 인스턴스에는 백엔드
+# 서비스(agent-api / postgres / opensearch / vllm / phoenix / minio / …) 가
+# 일체 떠 있지 않고, OpenWebUI 컨테이너 + Caddy (TLS 리버스 프록시) 만 띄운다.
+# 백엔드 호출은 Tailscale MagicDNS(`onprem-agent`) 로 온프레미스로 빠진다.
+#
+# 사전 조건:
+#   1) EC2 호스트에 tailscaled 가 systemd 로 실행 중, hostname=aws-frontend,
+#      tag:frontend-aws. tailnet 안에서 onprem-agent:8000 도달 가능.
+#   2) /data (EBS gp3) 마운트 — OpenWebUI SQLite + Caddy ACME 데이터 영속화.
+#   3) /etc/agent-frontend/aws-mvp.secret.env 가 SSM 에서 생성됨
+#      (WEBUI_SECRET_KEY, OPENAI_API_KEY 등).
+#
+# Usage:
+#   docker compose \
+#     --env-file ../env/aws-mvp.env \
+#     --env-file /etc/agent-frontend/aws-mvp.secret.env \
+#     -f compose.aws-mvp.yml up -d
+
+services:
+
+  open-webui:
+    # 사내 ECR 에서 pull. 빌드는 CI(또는 개발자 머신)에서.
+    image: ${FRONTEND_IMAGE:-agent-saas/frontend:aws-mvp}
+    container_name: open-webui
+    restart: unless-stopped
+    # 호스트에 직접 포트 노출하지 않는다 — Caddy 가 reverse proxy.
+    expose:
+      - "8080"
+    environment:
+      # OpenAI-compatible 백엔드 (Tailscale MagicDNS)
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
+      ENABLE_OPENAI_API: "true"
+      ENABLE_OLLAMA_API: "false"
+
+      # Auth 정책은 frontend/Dockerfile 의 ENV 가 기본값 — 여기서는 시크릿만.
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
+      WEBUI_NAME: ${OPEN_WEBUI_NAME:-RX Agent UI}
+      WEBUI_URL: ${WEBUI_URL}
+      WEBUI_SESSION_COOKIE_SECURE: ${WEBUI_SESSION_COOKIE_SECURE:-true}
+      WEBUI_SESSION_COOKIE_SAME_SITE: ${WEBUI_SESSION_COOKIE_SAME_SITE:-lax}
+      CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+
+      # SQLite — OpenWebUI 의 default (sqlite:///${DATA_DIR}/webui.db).
+      # DATABASE_URL 은 **아예 set 하지 않는다**. 빈 문자열로 set 하면 OpenWebUI 가
+      # 빈 값을 URL 로 파싱하려다 `Unrecognized scheme: ""` 에러로 죽는다
+      # (env 가 "unset" 일 때만 default 가 적용됨).
+      # 온프레미스/local 프로파일은 Postgres 를 쓰지만 aws-mvp 는 SQLite 전용.
+      DATA_DIR: ${DATA_DIR:-/app/backend/data}
+    volumes:
+      # EBS 볼륨의 /data/open-webui 를 컨테이너 데이터 디렉토리로 마운트
+      - /data/open-webui:/app/backend/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+  caddy:
+    # Docker Hub anonymous rate limit (100 pulls / 6h per IP) 회피용으로
+    # ECR Public 의 caddy 미러 사용. AWS 리전 내부 트래픽이라 더 빠름.
+    image: public.ecr.aws/docker/library/caddy:${CADDY_VERSION:-2.8}
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN}
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL}
+    volumes:
+      - ../caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /data/caddy/data:/data
+      - /data/caddy/config:/config
+    # depends_on 의도적으로 service_started 만 — service_healthy 로 두면
+    # OpenWebUI healthcheck 통과 전까지 Caddy 가 안 떠서 Let's Encrypt 발급도
+    # 못 받는 닭-달걀이 된다. Caddy 는 OpenWebUI 가 아직 부팅 중일 때 502 를
+    # 잠깐 반환할 뿐, ACME challenge (HTTP-01) 는 OpenWebUI 와 무관하게 처리.
+    depends_on:
+      open-webui:
+        condition: service_started

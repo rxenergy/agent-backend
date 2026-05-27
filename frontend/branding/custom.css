@@ -1,55 +1,28 @@
 /* =============================================================================
- * RX Agent — OpenWebUI custom theme
+ * RX Agent — OpenWebUI custom theme (safe / minimal)
  *
- * Implements docs/meta/RX-Brand-Color-Palette.md as a CSS layer over OpenWebUI.
- * Loaded by OpenWebUI from /app/backend/open_webui/static/custom.css.
+ * Loaded by OpenWebUI from /app/backend/open_webui/static/custom.css
+ * (and /app/build/static/custom.css — Dockerfile mirrors both).
  *
- * Rules from the palette (do not break):
- *   - 무채색 모노크롬만 사용. 채도 있는 색 0건.
- *   - 그라디언트 fill 금지.
+ * 설계 원칙 (이전 광범위 sweep 버전이 OpenWebUI 컴포넌트를 부수는 문제로 축소):
+ *   1. 절대 깨지지 않을 영역에만 손댄다. 의심스러우면 OpenWebUI 기본값 유지.
+ *      → 로고/파비콘은 Dockerfile 에서 정적 자산으로 교체 (CSS 비의존).
+ *      → 폰트는 system stack 위주, Pretendard 는 *있으면* 사용.
+ *   2. 외부 CDN @import 금지. 차단망에서 FOUC/지연 유발.
+ *   3. 와일드카드 / 광범위 attribute 셀렉터 금지:
+ *        header, aside, [class*="header"], [class*="sidebar"],
+ *        [class*="banner"], *, .border, .text-3xl ... 모두 사용하지 않는다.
+ *   4. !important 는 OpenWebUI 의 Tailwind utility 를 이겨야 할 때만 최소한.
+ *   5. 채도 있는 색은 텍스트 한정으로만 톤다운. 배경 fill 은 OpenWebUI 기본 색
+ *      그대로 두는 편이 안전 — 다음 OpenWebUI 버전 업그레이드에서 깨질 위험↓.
  *
- * Light vs Dark (palette doc v1.1, §3 + §3-Dark):
- *   동적 UI 한정으로 두 변종 모두 허용. 토큰 *이름* 은 시맨틱(두 모드 공통),
- *   *값* 만 모드별 swap.
- *   - light (기본 / prefers-color-scheme: light):
- *       흰색 배경 + 어두운 그레이 텍스트. 팔레트 §3 9-step ramp.
- *   - dark (html.dark / [data-theme="dark"] / prefers-color-scheme: dark):
- *       어두운 무채색 배경 + 밝은 그레이 텍스트. 팔레트 §3-Dark ramp.
- *       채도 0 / 그라디언트 0 원칙은 두 모드 공통 (palette §1).
- *
- * Approach:
- *   1. Expose RX palette as CSS custom properties — *semantic*, not literal.
- *      e.g. --rx-white = page background (light=white, dark=#1F1F1F).
- *   2. dark 모드 진입 시 토큰 값만 swap → 모든 컴포넌트 셀렉터가 자동 반전.
- *   3. Sweep Tailwind chromatic utility classes (blue/green/red/yellow/indigo
- *      /violet/orange/pink/cyan/teal) → 무채색 ramp 로 환원.
- *   4. Pretendard 폰트 강제 (CDN). 네트워크 차단 환경에선 fallback 적용.
- *
- * If OpenWebUI bumps to a major version, sweep selectors (§ "Tailwind sweep")
- * may need refresh. Test by visiting the UI in BOTH themes and visually verify
- * that no chromatic color remains and contrast holds. =================== */
+ * 이 파일이 비활성화돼도 (Dockerfile 에서 COPY 만 빼면) 로고/파비콘은 그대로,
+ * UI 색상만 OpenWebUI 디폴트로 돌아간다. 깨지지 않는 fallback.
+ * =========================================================================== */
 
 /* -----------------------------------------------------------------------------
- * 0. Pretendard webfont
- *    내부망에서 jsdelivr 차단 시 이 @import 줄을 주석 처리하고 fallback 적용.
- * --------------------------------------------------------------------------- */
-@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css");
-
-/* -----------------------------------------------------------------------------
- * 1. RX Palette tokens — LIGHT theme (default)
- *
- * 토큰 의미 (semantic, 두 모드에서 동일):
- *   --rx-white      페이지 본 배경
- *   --rx-surface    카드 / 사이드바 배경
- *   --rx-subtle     약한 강조 박스 / user 메시지 배경
- *   --rx-divider    얇은 구분선
- *   --rx-border     입력 외곽선 / 강한 구분선
- *   --rx-muted      캡션 / placeholder
- *   --rx-primary    본문 텍스트
- *   --rx-ink        강조 헤드라인 / 핵심 텍스트
- *   --rx-header-bar 다크 헤더 / 강조 액션 fill
- *
- * 위 의미는 light/dark 공통이고, *값* 만 두 모드에서 다르다.
+ * 1. RX palette tokens — 정의만. 강제 적용은 매우 제한적으로.
+ *    토큰은 다른 (좁은) 셀렉터가 참조하기 위한 단일 진실원.
  * --------------------------------------------------------------------------- */
 :root {
   --rx-white:      #FFFFFF;
@@ -60,420 +33,68 @@
   --rx-muted:      #8C8C8C;
   --rx-primary:    #535353;
   --rx-ink:        #1F1F1F;
-  --rx-header-bar: #3B3838;
 
-  /* Semantic (텍스트·작은 아이콘 전용 — 큰 면적 fill 에 사용 금지) */
-  --rx-success:    #2D5A3D;
-  --rx-warn:       #7A5A1F;
-  --rx-danger:     #7A2D2D;
-
-  /* Fill helpers — primary 액션 버튼 / 강조 fill 용.
-     light: 어두운 fill + 흰 글자.  dark: 밝은 fill + 어두운 글자.
-     테마 무관 항상 사용 가능. */
-  --rx-fill-strong:    #3B3838;
-  --rx-on-fill-strong: #FFFFFF;
-
-  /* "항상 흰색 글자" 가 필요한 잔여 케이스 (.text-white 등) 용 anchor.
-     light/dark 양쪽에서 동일하게 #FFFFFF. */
-  --rx-pure-white:     #FFFFFF;
-
-  /* Type stack (palette doc §6) */
-  --rx-font: 'Pretendard', 'Noto Sans KR', 'Malgun Gothic', Arial, sans-serif;
-
-  color-scheme: light;
+  /* Type stack — Pretendard 가 시스템에 있으면 사용, 없으면 OS sans-serif.
+     CDN import 는 사용하지 않는다 (FOUC / 차단망 회피). */
+  --rx-font:
+    'Pretendard', 'Pretendard Variable',
+    -apple-system, BlinkMacSystemFont,
+    'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic',
+    'Segoe UI', Roboto, sans-serif;
 }
 
-/* -----------------------------------------------------------------------------
- * 2. DARK theme — 토큰 재정의만으로 모든 컴포넌트 자동 반전
- *
- * 무채색 ramp 를 거꾸로 매핑:
- *   light  white(100%) → ink(12%) ramp 의 high end
- *   dark   "white" = ink(12%) — 페이지 배경이 가장 어두움
- *          "ink"   = #FFFFFF — 강조 텍스트가 가장 밝음
- *
- * 셀렉터 우선순위: html.dark, [data-theme="dark"], .dark 모두 커버.
- * OpenWebUI 가 토글하는 방식이 버전마다 다를 수 있어 셋 모두 매칭.
- *
- * 의미 검증 (대비, WCAG):
- *   primary(#D9D9D9) on white(#1F1F1F) ≈ 13.3:1  AAA
- *   muted(#A6A6A6)   on white(#1F1F1F) ≈ 7.8:1   AAA
- *   ink(#FFFFFF)     on white(#1F1F1F) ≈ 16.1:1  AAA
- * --------------------------------------------------------------------------- */
 html.dark,
 [data-theme="dark"],
 .dark {
-  --rx-white:      #1F1F1F;  /* page background */
-  --rx-surface:    #2A2A2A;  /* cards, sidebar */
-  --rx-subtle:     #333333;  /* user message bubble, subtle fills */
-  --rx-divider:    #404040;  /* thin dividers */
-  --rx-border:     #595959;  /* input outline */
-  --rx-muted:      #A6A6A6;  /* captions, placeholders (lifted from #8C8C8C for AAA on dark) */
-  --rx-primary:    #D9D9D9;  /* body text */
-  --rx-ink:        #FFFFFF;  /* strong text / headlines */
-  --rx-header-bar: #4A4A4A;  /* accent fills on dark bg (lifted from #3B3838 to remain visible) */
-
-  /* Semantic — 다크 배경 대비 가독성 위해 톤업 (채도는 여전히 매우 낮음) */
-  --rx-success:    #8FBF9F;
-  --rx-warn:       #D9B97A;
-  --rx-danger:     #D98F8F;
-
-  /* dark: 밝은 fill + 어두운 글자 (다크 배경 위에서 시인성 확보) */
-  --rx-fill-strong:    #E5E5E5;
-  --rx-on-fill-strong: #1F1F1F;
-  /* --rx-pure-white 은 anchor 토큰이라 dark 에서도 #FFFFFF 유지 */
-
-  color-scheme: dark;
+  --rx-white:      #1F1F1F;
+  --rx-surface:    #2A2A2A;
+  --rx-subtle:     #333333;
+  --rx-divider:    #404040;
+  --rx-border:     #595959;
+  --rx-muted:      #A6A6A6;
+  --rx-primary:    #D9D9D9;
+  --rx-ink:        #FFFFFF;
 }
 
-/* OS 선호가 dark 인데 OpenWebUI 가 아직 .dark 클래스를 못 붙인 초기 paint
-   순간을 위한 안전망. 동일 토큰 재정의를 prefers-color-scheme 으로도 적용. */
-@media (prefers-color-scheme: dark) {
-  :root:not(.light):not([data-theme="light"]) {
-    --rx-white:      #1F1F1F;
-    --rx-surface:    #2A2A2A;
-    --rx-subtle:     #333333;
-    --rx-divider:    #404040;
-    --rx-border:     #595959;
-    --rx-muted:      #A6A6A6;
-    --rx-primary:    #D9D9D9;
-    --rx-ink:        #FFFFFF;
-    --rx-header-bar: #4A4A4A;
-    --rx-success:    #8FBF9F;
-    --rx-warn:       #D9B97A;
-    --rx-danger:     #D98F8F;
-    --rx-fill-strong:    #E5E5E5;
-    --rx-on-fill-strong: #1F1F1F;
-    color-scheme: dark;
-  }
-}
-
-/* 루트 텍스트/배경을 토큰으로 일관 적용 (다크에서 body 가 흰색 잔존하는 영역
-   방지). !important 는 OpenWebUI 의 Tailwind 기본 fill 을 이기기 위함. */
-html,
+/* -----------------------------------------------------------------------------
+ * 2. Typography only — body 한 곳에만 font-family 지정.
+ *    html, button, input, [class*="text-"] 같은 광범위 적용은 하지 않는다
+ *    (OpenWebUI 가 monospace 를 의도한 곳까지 덮어쓰는 사례 방지).
+ *    !important 없이도 body 상속으로 대부분 적용됨.
+ * --------------------------------------------------------------------------- */
 body {
-  background-color: var(--rx-white) !important;
-  color: var(--rx-primary) !important;
+  font-family: var(--rx-font);
+}
+
+/* code / pre 는 monospace 유지 — 일부 OpenWebUI 빌드에서 prose 가 강제하지
+   않는 경우 대비 명시. */
+code, pre, kbd, samp {
+  font-family:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
 }
 
 /* -----------------------------------------------------------------------------
- * 3. Global typography + base
+ * 3. Selection — 안전한 단일 셀렉터. 채도 0.
  * --------------------------------------------------------------------------- */
-html,
-body,
-button,
-input,
-textarea,
-select,
-[class*="text-"] {
-  font-family: var(--rx-font) !important;
-}
-
-body {
-  background-color: var(--rx-white);
-  color: var(--rx-primary);
-}
-
-h1, h2, h3, h4, h5, h6,
-.text-3xl, .text-2xl, .text-xl, .text-lg {
-  color: var(--rx-ink) !important;
-  font-weight: 600;
-}
-
-a {
-  color: var(--rx-primary) !important;
-  text-decoration-color: var(--rx-divider);
-}
-a:hover {
-  color: var(--rx-ink) !important;
-  text-decoration-color: var(--rx-primary);
-}
-
-hr,
-.border-t, .border-b, .border-l, .border-r, .border {
-  border-color: var(--rx-divider) !important;
-}
-
-/* -----------------------------------------------------------------------------
- * 4. Tailwind chromatic sweep
- *    OpenWebUI 가 사용하는 Tailwind utility 중 채도 있는 색을 모두 그레이로
- *    환원. 새 OpenWebUI 버전에서 다른 색 utility 가 등장하면 추가.
- * --------------------------------------------------------------------------- */
-
-/* Blue — 가장 흔한 primary action 색 */
-.bg-blue-50,
-.bg-blue-100,
-.bg-blue-200 { background-color: var(--rx-subtle) !important; }
-.bg-blue-300,
-.bg-blue-400 { background-color: var(--rx-border) !important; }
-.bg-blue-500,
-.bg-blue-600 { background-color: var(--rx-fill-strong) !important; color: var(--rx-on-fill-strong) !important; }
-.bg-blue-700,
-.bg-blue-800,
-.bg-blue-900 { background-color: var(--rx-fill-strong) !important; color: var(--rx-on-fill-strong) !important; }
-.hover\:bg-blue-500:hover,
-.hover\:bg-blue-600:hover,
-.hover\:bg-blue-700:hover { background-color: var(--rx-primary) !important; color: var(--rx-on-fill-strong) !important; }
-
-.text-blue-400,
-.text-blue-500,
-.text-blue-600,
-.text-blue-700 { color: var(--rx-primary) !important; }
-
-.border-blue-300,
-.border-blue-400,
-.border-blue-500,
-.border-blue-600 { border-color: var(--rx-primary) !important; }
-
-.ring-blue-500,
-.ring-blue-600,
-.focus\:ring-blue-500:focus { --tw-ring-color: var(--rx-primary) !important; }
-
-/* Indigo / Violet / Purple */
-.bg-indigo-500, .bg-indigo-600,
-.bg-violet-500, .bg-violet-600,
-.bg-purple-500, .bg-purple-600 { background-color: var(--rx-fill-strong) !important; color: var(--rx-on-fill-strong) !important; }
-.text-indigo-500, .text-indigo-600,
-.text-violet-500, .text-violet-600,
-.text-purple-500, .text-purple-600 { color: var(--rx-primary) !important; }
-
-/* Green — 완료 상태. fill 금지, 텍스트만 successInk */
-.bg-green-50,
-.bg-green-100,
-.bg-green-200 { background-color: var(--rx-subtle) !important; }
-.bg-green-500,
-.bg-green-600,
-.bg-green-700 { background-color: var(--rx-fill-strong) !important; color: var(--rx-on-fill-strong) !important; }
-.text-green-500,
-.text-green-600,
-.text-green-700 { color: var(--rx-success) !important; }
-.border-green-500,
-.border-green-600 { border-color: var(--rx-success) !important; }
-
-/* Red — 차단·에러. 텍스트만 dangerInk */
-.bg-red-50,
-.bg-red-100 { background-color: var(--rx-subtle) !important; }
-.bg-red-500,
-.bg-red-600,
-.bg-red-700 { background-color: var(--rx-fill-strong) !important; color: var(--rx-on-fill-strong) !important; }
-.text-red-400,
-.text-red-500,
-.text-red-600,
-.text-red-700 { color: var(--rx-danger) !important; }
-.border-red-500,
-.border-red-600 { border-color: var(--rx-danger) !important; }
-
-/* Yellow / Amber / Orange — 검토 필요. 텍스트만 warnInk */
-.bg-yellow-50,
-.bg-yellow-100,
-.bg-amber-50,
-.bg-amber-100 { background-color: var(--rx-subtle) !important; }
-.bg-yellow-500,
-.bg-yellow-600,
-.bg-amber-500,
-.bg-amber-600,
-.bg-orange-500,
-.bg-orange-600 { background-color: var(--rx-muted) !important; color: var(--rx-on-fill-strong) !important; }
-.text-yellow-500,
-.text-yellow-600,
-.text-yellow-700,
-.text-amber-500,
-.text-amber-600,
-.text-orange-500,
-.text-orange-600 { color: var(--rx-warn) !important; }
-
-/* Cyan / Teal / Pink / Rose — 잔여 chromatic */
-.bg-cyan-500, .bg-cyan-600,
-.bg-teal-500, .bg-teal-600,
-.bg-pink-500, .bg-pink-600,
-.bg-rose-500, .bg-rose-600,
-.bg-sky-500,  .bg-sky-600,
-.bg-emerald-500, .bg-emerald-600,
-.bg-lime-500, .bg-lime-600,
-.bg-fuchsia-500, .bg-fuchsia-600 { background-color: var(--rx-fill-strong) !important; color: var(--rx-on-fill-strong) !important; }
-.text-cyan-500, .text-cyan-600,
-.text-teal-500, .text-teal-600,
-.text-pink-500, .text-pink-600,
-.text-rose-500, .text-rose-600,
-.text-sky-500,  .text-sky-600 { color: var(--rx-primary) !important; }
-
-/* -----------------------------------------------------------------------------
- * 5. Gradient kill — 그라디언트 fill 절대 금지
- * --------------------------------------------------------------------------- */
-[class*="bg-gradient"],
-[style*="linear-gradient"],
-[style*="radial-gradient"] {
-  background-image: none !important;
-  background: var(--rx-surface) !important;
-}
-
-/* -----------------------------------------------------------------------------
- * 6. Surface remap — Tailwind gray utilities 를 RX ramp 에 매핑
- *    OpenWebUI 가 회색조를 쓰더라도 톤이 살짝 차가운 (slate/zinc) 경우가
- *    있어 RX neutral 로 통일.
- * --------------------------------------------------------------------------- */
-.bg-gray-50,   .bg-slate-50,   .bg-zinc-50,   .bg-neutral-50,   .bg-stone-50    { background-color: var(--rx-surface) !important; }
-.bg-gray-100,  .bg-slate-100,  .bg-zinc-100,  .bg-neutral-100,  .bg-stone-100   { background-color: var(--rx-subtle)  !important; }
-.bg-gray-200,  .bg-slate-200,  .bg-zinc-200,  .bg-neutral-200,  .bg-stone-200   { background-color: var(--rx-divider) !important; }
-.bg-gray-300,  .bg-slate-300,  .bg-zinc-300,  .bg-neutral-300,  .bg-stone-300   { background-color: var(--rx-border)  !important; }
-.bg-gray-700,  .bg-slate-700,  .bg-zinc-700,  .bg-neutral-700,  .bg-stone-700,
-.bg-gray-800,  .bg-slate-800,  .bg-zinc-800,  .bg-neutral-800,  .bg-stone-800   { background-color: var(--rx-fill-strong) !important; color: var(--rx-on-fill-strong) !important; }
-.bg-gray-900,  .bg-slate-900,  .bg-zinc-900,  .bg-neutral-900,  .bg-stone-900   { background-color: var(--rx-fill-strong) !important; color: var(--rx-on-fill-strong) !important; }
-
-.text-gray-400, .text-slate-400, .text-zinc-400, .text-neutral-400 { color: var(--rx-muted) !important; }
-.text-gray-500, .text-slate-500, .text-zinc-500, .text-neutral-500 { color: var(--rx-muted) !important; }
-.text-gray-600, .text-slate-600, .text-zinc-600, .text-neutral-600 { color: var(--rx-primary) !important; }
-.text-gray-700, .text-slate-700, .text-zinc-700, .text-neutral-700 { color: var(--rx-primary) !important; }
-.text-gray-800, .text-slate-800, .text-zinc-800, .text-neutral-800 { color: var(--rx-ink) !important; }
-.text-gray-900, .text-slate-900, .text-zinc-900, .text-neutral-900 { color: var(--rx-ink) !important; }
-
-/* .text-white 은 "어두운 fill 위 흰 글자" 라는 Tailwind 의미 그대로.
-   양 모드 무관 항상 흰색을 의도하므로 anchor 토큰 사용. */
-.text-white, .dark\:text-white { color: var(--rx-pure-white) !important; }
-
-/* -----------------------------------------------------------------------------
- * 7. Component-level overrides (best-effort — selectors may drift across
- *    OpenWebUI versions; verify visually after each bump).
- * --------------------------------------------------------------------------- */
-
-/* App shell / sidebar */
-aside,
-nav[aria-label*="sidebar" i],
-.sidebar,
-[class*="sidebar"] {
-  background-color: var(--rx-surface) !important;
-  border-color: var(--rx-divider) !important;
-}
-
-/* Top header / app bar */
-header,
-[role="banner"],
-[class*="top-bar"],
-[class*="header"]:not([class*="message-header"]) {
-  background-color: var(--rx-white) !important;
-  border-bottom: 1px solid var(--rx-divider) !important;
-  color: var(--rx-ink) !important;
-}
-
-/* Chat message bubbles */
-[class*="message-user"],
-[data-message-role="user"],
-.user-message {
-  background-color: var(--rx-subtle) !important;
-  color: var(--rx-ink) !important;
-  border: 1px solid var(--rx-divider) !important;
-}
-[class*="message-assistant"],
-[data-message-role="assistant"],
-.assistant-message {
-  background-color: var(--rx-white) !important;
-  color: var(--rx-primary) !important;
-  border: 1px solid var(--rx-divider) !important;
-}
-
-/* Inline code + code blocks */
-code,
-pre,
-.prose code,
-.prose pre {
-  background-color: var(--rx-surface) !important;
-  color: var(--rx-ink) !important;
-  border: 1px solid var(--rx-divider) !important;
-}
-
-/* Form inputs */
-input[type="text"],
-input[type="email"],
-input[type="password"],
-input[type="search"],
-input[type="url"],
-textarea,
-select {
-  background-color: var(--rx-white) !important;
-  color: var(--rx-ink) !important;
-  border: 1px solid var(--rx-border) !important;
-}
-input:focus,
-textarea:focus,
-select:focus {
-  border-color: var(--rx-primary) !important;
-  outline-color: var(--rx-primary) !important;
-  /* 토큰 기반이 아닌 정적 rgba — 양 모드에서 모두 1~2px ring 으로 보이도록
-     중간 회색의 반투명. light/dark 어디서도 색감 유지. */
-  box-shadow: 0 0 0 2px rgba(140, 140, 140, 0.35) !important;
-}
-
-/* Primary buttons (best-effort selector — keep both data-role and Tailwind sweep above) */
-button[type="submit"],
-button.primary,
-.btn-primary {
-  background-color: var(--rx-fill-strong) !important;
-  color: var(--rx-on-fill-strong) !important;
-  border: 1px solid var(--rx-fill-strong) !important;
-}
-button[type="submit"]:hover,
-button.primary:hover,
-.btn-primary:hover {
-  background-color: var(--rx-primary) !important;
-  border-color: var(--rx-primary) !important;
-  color: var(--rx-on-fill-strong) !important;
-}
-
-/* Banners / notices */
-[role="alert"],
-[class*="banner"] {
-  background-color: var(--rx-subtle) !important;
-  color: var(--rx-ink) !important;
-  border: 1px solid var(--rx-border) !important;
-}
-
-/* Scrollbars */
-* {
-  scrollbar-color: var(--rx-border) var(--rx-surface);
-}
-*::-webkit-scrollbar { width: 8px; height: 8px; }
-*::-webkit-scrollbar-track { background: var(--rx-surface); }
-*::-webkit-scrollbar-thumb { background: var(--rx-border); border-radius: 4px; }
-*::-webkit-scrollbar-thumb:hover { background: var(--rx-muted); }
-
-/* Selection */
 ::selection {
-  background-color: var(--rx-fill-strong);
-  color: var(--rx-on-fill-strong);
+  background-color: var(--rx-ink);
+  color: var(--rx-white);
 }
 
 /* -----------------------------------------------------------------------------
- * 8. Markdown rendering inside chat (citation footnotes use this surface).
- *    spec §10.3 의 인용 렌더링 규칙을 시각적으로 보강.
- * --------------------------------------------------------------------------- */
-.prose {
-  color: var(--rx-primary) !important;
-}
-.prose h1, .prose h2, .prose h3, .prose h4 {
-  color: var(--rx-ink) !important;
-  border-bottom: 1px solid var(--rx-divider);
-  padding-bottom: 0.25em;
-}
-.prose blockquote {
-  border-left: 3px solid var(--rx-border) !important;
-  color: var(--rx-muted) !important;
-}
-.prose table {
-  border-color: var(--rx-divider) !important;
-}
-.prose th {
-  background-color: var(--rx-subtle) !important;
-  color: var(--rx-ink) !important;
-  border-color: var(--rx-divider) !important;
-}
-.prose td {
-  border-color: var(--rx-divider) !important;
-}
-/* Footnote markers in citation responses (spec §10.3 [^1] style) */
-.prose sup,
-.prose a[href^="#fn"] {
-  color: var(--rx-primary) !important;
-  font-weight: 600;
-}
-
-/* =========================================================================== */
-/* End of file */
+ * 4. End of file.
+ *
+ * 의도적으로 빠진 것들 (이전 버전에서 OpenWebUI 깨뜨림):
+ *   - html/body 배경·전경 강제
+ *   - header / aside / [class*="..."] 광범위 셀렉터
+ *   - Tailwind chromatic sweep (bg-blue/red/green/yellow ... → gray)
+ *   - .border / .text-3xl / .text-lg / hr 일괄 색 강제
+ *   - 컴포넌트 단위 message / sidebar / banner 오버라이드
+ *   - 외부 CDN @import (Pretendard)
+ *   - 전 요소 (*) scrollbar 스타일
+ *
+ * 위 항목들이 정말 필요해지면 OpenWebUI 의 *정확한* 컴포넌트 클래스명을
+ * DevTools 로 확인하고, 단일·구체 셀렉터로만 추가할 것.
+ * 광범위 attribute selector + !important 조합은 금지.
+ * =========================================================================== */

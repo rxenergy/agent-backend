@@ -51,9 +51,10 @@ RUN set -eux; \
     convert master-dark.png  -resize 512x512\>   -background none  -gravity center -extent 512x512   /work/out/web-app-manifest-512x512.png; \
     convert master-dark.png  -define icon:auto-resize=16,32,48      /work/out/favicon.ico; \
     \
-    # Splash — RX rule: white background. master-dark logo centered.
-    convert -size 1024x1024 xc:white \( master-dark.png -resize 768x384\> \) -gravity center -composite /work/out/splash.png; \
-    cp /work/out/splash.png /work/out/splash-dark.png; \
+    # Splash — transparent background so OpenWebUI 의 theme(light/dark) 배경과
+    # 자연스럽게 합성된다. light 는 dark 로고, dark 는 white 로고 사용.
+    convert -size 1024x1024 xc:none  \( master-dark.png  -resize 768x384\> \) -gravity center -composite /work/out/splash.png; \
+    convert -size 1024x1024 xc:none  \( master-white.png -resize 768x384\> \) -gravity center -composite /work/out/splash-dark.png; \
     \
     # Operator overrides win — drop properly-designed files in
     # frontend/branding/assets/ to replace any auto-derived file.

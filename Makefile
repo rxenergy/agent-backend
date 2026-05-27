@@ -7,7 +7,8 @@ COMPOSE_ONPREM := docker compose --env-file infra/env/onprem.env --profile onpre
   -f infra/compose/compose.yml -f infra/compose/compose.onprem.yml
 
 .PHONY: help build up-local down logs ps test test-integration smoke smoke-stream seed seed-encode opensearch-init verify-w1 fmt clean migrate psql prompts-validate \
-  build-onprem up-onprem down-onprem logs-onprem ps-onprem clean-onprem _guard-local-only
+  build-onprem up-onprem down-onprem logs-onprem ps-onprem clean-onprem _guard-local-only \
+  aws-ecr-login aws-build aws-push aws-deploy aws-setup aws-destroy aws-ssh aws-logs aws-status aws-secrets-put
 
 help:
 	@echo "Targets:"
@@ -145,3 +146,70 @@ ps-onprem:
 
 clean-onprem:
 	$(COMPOSE_ONPREM) down -v
+
+# ── AWS MVP frontend deployment ───────────────────────────────────────────
+# 사내 MVP 용 단일 EC2 + Caddy + Tailscale 토폴로지. 백엔드는 온프레미스 유지.
+# 자세한 절차는 infra/aws/README.md 참조.
+#
+# 사전:
+#   - aws cli v2, 적절한 IAM 권한 (rx-agent-mvp-deployer-policy)
+#   - AWS_REGION 기본 ap-northeast-2 (override 시: `make aws-deploy AWS_REGION=us-west-2`)
+#   - 첫 실행 전 `make aws-setup` 으로 EC2/EBS/EIP/SG/IAM Role 생성
+#   - SSM Parameter Store 에 시크릿 3개 등록 (`make aws-secrets-put` 또는 README §3)
+
+AWS_REGION    ?= ap-northeast-2
+AWS_ACCOUNT   := $(shell aws sts get-caller-identity --query Account --output text 2>/dev/null)
+ECR_REGISTRY  := $(AWS_ACCOUNT).dkr.ecr.$(AWS_REGION).amazonaws.com
+FRONTEND_REPO := agent-saas/frontend
+FRONTEND_TAG  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+FRONTEND_IMAGE := $(ECR_REGISTRY)/$(FRONTEND_REPO):$(FRONTEND_TAG)
+
+aws-ecr-login:
+	@test -n "$(AWS_ACCOUNT)" || (echo "[aws] AWS_ACCOUNT 확인 실패. aws cli 자격증명을 점검하세요." && exit 1)
+	aws ecr describe-repositories --region $(AWS_REGION) --repository-names $(FRONTEND_REPO) >/dev/null 2>&1 \
+	  || aws ecr create-repository --region $(AWS_REGION) --repository-name $(FRONTEND_REPO) \
+	       --image-scanning-configuration scanOnPush=true \
+	       --image-tag-mutability MUTABLE
+	aws ecr get-login-password --region $(AWS_REGION) \
+	  | docker login --username AWS --password-stdin $(ECR_REGISTRY)
+
+aws-build:
+	docker build -t $(FRONTEND_IMAGE) -t $(ECR_REGISTRY)/$(FRONTEND_REPO):latest ./frontend
+	@echo ">>> Built: $(FRONTEND_IMAGE)"
+
+aws-push: aws-ecr-login aws-build
+	docker push $(FRONTEND_IMAGE)
+	docker push $(ECR_REGISTRY)/$(FRONTEND_REPO):latest
+	@echo ">>> Pushed: $(FRONTEND_IMAGE)"
+
+aws-setup:
+	AWS_REGION=$(AWS_REGION) ECR_REGISTRY=$(ECR_REGISTRY) ./infra/aws/setup-ec2.sh
+
+aws-secrets-put:
+	AWS_REGION=$(AWS_REGION) ./infra/aws/secrets-put.sh
+
+aws-deploy: aws-push
+	AWS_REGION=$(AWS_REGION) FRONTEND_IMAGE=$(FRONTEND_IMAGE) ./infra/aws/deploy.sh
+
+aws-ssh:
+	@test -f infra/aws/.state/instance-id || (echo "[aws] infra/aws/.state/instance-id 없음. 'make aws-setup' 먼저 실행." && exit 1)
+	aws ssm start-session --region $(AWS_REGION) --target $$(cat infra/aws/.state/instance-id)
+
+aws-logs:
+	@test -f infra/aws/.state/instance-id || (echo "[aws] infra/aws/.state/instance-id 없음." && exit 1)
+	aws ssm send-command --region $(AWS_REGION) \
+	  --instance-ids $$(cat infra/aws/.state/instance-id) \
+	  --document-name AWS-RunShellScript \
+	  --parameters 'commands=["cd /opt/agent-saas && docker compose --env-file infra/env/aws-mvp.env --env-file /etc/agent-frontend/aws-mvp.secret.env -f infra/compose/compose.aws-mvp.yml logs --tail=200 --no-color"]' \
+	  --query 'Command.CommandId' --output text \
+	  | xargs -I{} sh -c 'sleep 4 && aws ssm get-command-invocation --region $(AWS_REGION) --instance-id $$(cat infra/aws/.state/instance-id) --command-id {} --query StandardOutputContent --output text'
+
+aws-status:
+	@test -f infra/aws/.state/instance-id || (echo "[aws] infra/aws/.state/instance-id 없음." && exit 1)
+	aws ec2 describe-instances --region $(AWS_REGION) \
+	  --instance-ids $$(cat infra/aws/.state/instance-id) \
+	  --query 'Reservations[].Instances[].{ID:InstanceId,State:State.Name,EIP:PublicIpAddress,Type:InstanceType}' \
+	  --output table
+
+aws-destroy:
+	AWS_REGION=$(AWS_REGION) ./infra/aws/destroy.sh
