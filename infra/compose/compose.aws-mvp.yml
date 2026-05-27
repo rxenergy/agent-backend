@@ -58,7 +58,9 @@ services:
       start_period: 30s
 
   caddy:
-    image: caddy:${CADDY_VERSION:-2.8}
+    # Docker Hub anonymous rate limit (100 pulls / 6h per IP) 회피용으로
+    # ECR Public 의 caddy 미러 사용. AWS 리전 내부 트래픽이라 더 빠름.
+    image: public.ecr.aws/docker/library/caddy:${CADDY_VERSION:-2.8}
     container_name: caddy
     restart: unless-stopped
     ports:
@@ -72,6 +74,10 @@ services:
       - ../caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - /data/caddy/data:/data
       - /data/caddy/config:/config
+    # depends_on 의도적으로 service_started 만 — service_healthy 로 두면
+    # OpenWebUI healthcheck 통과 전까지 Caddy 가 안 떠서 Let's Encrypt 발급도
+    # 못 받는 닭-달걀이 된다. Caddy 는 OpenWebUI 가 아직 부팅 중일 때 502 를
+    # 잠깐 반환할 뿐, ACME challenge (HTTP-01) 는 OpenWebUI 와 무관하게 처리.
     depends_on:
       open-webui:
-        condition: service_healthy
+        condition: service_started

@@ -171,13 +171,31 @@ AMI_ID=$(aws ec2 describe-images --region "${REGION}" --owners amazon \
 log "    AMI=${AMI_ID}"
 
 # ─────────────────────────────────────────────────────────────────────────
-# 7. user-data (rendered with ECR_REGISTRY)
+# 7. user-data (rendered with ECR_REGISTRY + 3개 config 파일 base64 인라인)
+#    Git 의존성을 제거하기 위해 compose / env / Caddyfile 을 user-data 안에
+#    직접 박아 넣는다. EC2 부팅 시 base64 decode 해서 /opt/agent-saas/ 에 기록.
 # ─────────────────────────────────────────────────────────────────────────
-log "7/8 user-data 렌더링"
+log "7/8 user-data 렌더링 (config 파일 인라인)"
 USERDATA_FILE="${STATE_DIR}/user-data.rendered.sh"
+
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+COMPOSE_B64=$(base64 -w0 < "${REPO_ROOT}/infra/compose/compose.aws-mvp.yml")
+ENV_B64=$(base64 -w0     < "${REPO_ROOT}/infra/env/aws-mvp.env")
+CADDY_B64=$(base64 -w0   < "${REPO_ROOT}/infra/caddy/Caddyfile")
+
 sed -e "s|@@AWS_REGION@@|${REGION}|g" \
     -e "s|@@ECR_REGISTRY@@|${ECR_REG}|g" \
+    -e "s|@@COMPOSE_B64@@|${COMPOSE_B64}|g" \
+    -e "s|@@ENV_B64@@|${ENV_B64}|g" \
+    -e "s|@@CADDY_B64@@|${CADDY_B64}|g" \
     "${SCRIPT_DIR}/user-data.sh" > "${USERDATA_FILE}"
+
+# user-data 크기 검증 (AWS 제한 16KB raw / 64KB MIME base64 — 보통 충분)
+USERDATA_SIZE=$(wc -c < "${USERDATA_FILE}")
+log "    user-data size: ${USERDATA_SIZE} bytes (AWS limit: 16384 raw)"
+if [ "${USERDATA_SIZE}" -gt 16000 ]; then
+    log "    경고: user-data 가 16KB 에 근접/초과. config 파일을 줄이거나 옵션 B(S3) 검토."
+fi
 
 # ─────────────────────────────────────────────────────────────────────────
 # 8. EC2 launch + EBS data volume + EIP associate
