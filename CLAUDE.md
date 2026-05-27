@@ -13,7 +13,7 @@ A development + experiment environment for an **Agent**, not a SaaS service. The
 Three deployment profiles share the same Docker image:
 - `local` — developer machine, MinIO artifact store
 - `aws-mvp` — EC2 + Docker Compose + S3 (single VM, no managed services beyond S3)
-- `onprem` — VM/bare metal + Docker Compose + MinIO, no external network
+- `onprem` — VM/bare metal + Docker Compose + MinIO, air-gapped. LLM은 내부망 vLLM/self-hosted OpenAI-호환 endpoint 단독; Anthropic/OpenAI 등 외부 SaaS provider는 금지 (필요 시 `local` 또는 `aws-mvp` 사용).
 
 Profile differences are env vars only — never branch the image.
 

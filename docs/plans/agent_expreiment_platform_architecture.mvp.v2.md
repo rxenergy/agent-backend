@@ -1076,13 +1076,14 @@ On-prem VM / bare metal
 조건:
 
 ```text
-- 외부 network 없이 실행 가능
+- 외부 network 없이 실행 가능 (air-gapped)
 - Docker image 사전 반입 가능
 - prompt bundle local mount 가능
 - tool registry local mount 가능
 - artifact store는 MinIO 사용
 - model endpoint와 retriever endpoint는 env로 주입
 - full context snapshot은 on-prem에서만 허용
+- LLM은 내부망 vLLM(또는 동등한 OpenAI-호환 self-hosted endpoint) 단독 사용. Anthropic / OpenAI 등 외부 SaaS provider는 onprem profile에서 금지한다. 외부 SaaS LLM이 필요한 사용처는 `local` 또는 `aws-mvp` profile을 사용한다.
 ```
 
 ---
@@ -1375,7 +1376,7 @@ failed_golden_questions
 16. memory_ids_used가 trace와 InteractionEvent에 기록된다.
 17. eval-runner가 smoke / memory / tool dataset을 실행한다.
 18. AWS에서는 S3, On-prem에서는 MinIO로 artifact store를 교체할 수 있다.
-19. On-prem profile에서는 외부 network tool 호출을 비활성화할 수 있다.
+19. On-prem profile에서는 외부 network tool 호출(외부 SaaS LLM 포함)을 비활성화한다. LLM은 내부망 vLLM/self-hosted OpenAI-호환 endpoint만 허용한다.
 20. 모델 서빙과 OpenSearch 상세 구성 없이도 Agent 실험 인프라가 실행된다.
 ```
 
