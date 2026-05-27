@@ -120,7 +120,8 @@ services:
   opensearch:
     volumes:
       - opensearch_snapshots:/usr/share/opensearch/snapshots
-
+    environment:
+      - path.repo=/usr/share/opensearch/snapshots
 
 volumes:
   # onprem 전용: 사전 적재된 외부 볼륨을 마운트한다.
