@@ -1,0 +1,38 @@
+# Caddy reverse proxy — AWS MVP profile.
+#
+# 동작:
+#   - 80 → 443 자동 리다이렉트 (Caddy 기본)
+#   - {$CADDY_DOMAIN} 에 대해 Let's Encrypt ACME 인증서 자동 발급/갱신
+#   - WebSocket / SSE (OpenWebUI 스트리밍) pass-through 자동
+#
+# 환경변수는 compose 가 주입 (compose.aws-mvp.yml).
+
+{
+    email {$CADDY_ACME_EMAIL}
+    # ACME 데이터는 /data (= /data/caddy/data on host EBS) 에 영속화.
+}
+
+{$CADDY_DOMAIN} {
+    encode zstd gzip
+
+    reverse_proxy open-webui:8080 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up Host {host}
+
+        # OpenWebUI 스트리밍 응답을 위한 긴 타임아웃
+        transport http {
+            read_timeout 600s
+            write_timeout 600s
+        }
+    }
+
+    log {
+        output file /data/access.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+        format json
+    }
+}
