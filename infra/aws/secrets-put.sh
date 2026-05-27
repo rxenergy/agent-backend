@@ -9,6 +9,10 @@
 
 set -euo pipefail
 
+# read -rs 중 Ctrl+C/오류로 종료될 때 터미널 echo 가 꺼진 채로 남는 것을 방지.
+restore_tty() { stty echo 2>/dev/null || true; }
+trap restore_tty EXIT INT TERM
+
 REGION="${AWS_REGION:?AWS_REGION required}"
 
 log()  { printf '\033[1;34m[secrets-put]\033[0m %s\n' "$*"; }
