@@ -54,6 +54,8 @@ cat > "${PARAMS_FILE}" <<EOF
     "echo ${COMPOSE_B64} | base64 -d > /opt/agent-saas/infra/compose/compose.aws-mvp.yml",
     "echo ${ENV_B64} | base64 -d > /opt/agent-saas/infra/env/aws-mvp.env",
     "echo ${CADDY_B64} | base64 -d > /opt/agent-saas/infra/caddy/Caddyfile",
+    "mkdir -p /data/open-webui /data/caddy/data /data/caddy/config",
+    "chown -R 1000:1000 /data/open-webui",
     "cd /opt/agent-saas/infra/compose",
     "aws ecr get-login-password --region ${REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}",
     "export FRONTEND_IMAGE=${IMAGE}",

@@ -8,6 +8,11 @@
 > 에 IaC 의 ROI 가 없다. 대신 1회성 인프라 생성도 셸 스크립트(`setup-ec2.sh`) 로
 > 재현 가능하게 만들고, 반복 작업(이미지 빌드/푸시/재배포) 은 Makefile + SSM
 > Send-Command 로 무인화한다.
+>
+> **EC2 는 Git 을 사용하지 않는다.** 3개 config 파일(`compose.aws-mvp.yml`,
+> `aws-mvp.env`, `Caddyfile`) 은 `setup-ec2.sh` 가 base64 로 user-data 에
+> 인라인하고, 재배포 시 `deploy.sh` 가 SSM Send-Command 로 직접 EC2 에
+> 덮어쓴다. 로컬 레포 ↔ EC2 동기화는 `make aws-deploy` 가 책임진다.
 
 ## 토폴로지
 

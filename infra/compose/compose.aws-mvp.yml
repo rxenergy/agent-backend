@@ -44,8 +44,11 @@ services:
       CORS_ALLOW_ORIGIN: ${CORS_ALLOW_ORIGIN}
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
 
-      # SQLite — DATABASE_URL 비우면 ${DATA_DIR}/webui.db 사용
-      DATABASE_URL: ${DATABASE_URL:-}
+      # SQLite — OpenWebUI 의 default (sqlite:///${DATA_DIR}/webui.db).
+      # DATABASE_URL 은 **아예 set 하지 않는다**. 빈 문자열로 set 하면 OpenWebUI 가
+      # 빈 값을 URL 로 파싱하려다 `Unrecognized scheme: ""` 에러로 죽는다
+      # (env 가 "unset" 일 때만 default 가 적용됨).
+      # 온프레미스/local 프로파일은 Postgres 를 쓰지만 aws-mvp 는 SQLite 전용.
       DATA_DIR: ${DATA_DIR:-/app/backend/data}
     volumes:
       # EBS 볼륨의 /data/open-webui 를 컨테이너 데이터 디렉토리로 마운트
