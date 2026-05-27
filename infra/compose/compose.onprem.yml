@@ -26,6 +26,10 @@ services:
       context: ../../backend
       dockerfile: Dockerfile
     image: agent-backend:${BACKEND_TAG:-onprem}
+    env_file:
+      - ../env/onprem.env
+      - path: ../env/onprem.secret.env
+        required: false
     environment:
       APP_PROFILE: onprem
       # 외부 네트워크 없음 — 임베더 가중치는 호스트의 ./models 디렉토리(평면 구조)
