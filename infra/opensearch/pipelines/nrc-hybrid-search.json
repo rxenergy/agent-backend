@@ -6,7 +6,7 @@
         "normalization": {"technique": "min_max"},
         "combination": {
           "technique": "arithmetic_mean",
-          "parameters": {"weights": [0.3, 0.5, 0.2]}
+          "parameters": {"weights": [0.2, 0.3, 0.5]}
         }
       }
     }
