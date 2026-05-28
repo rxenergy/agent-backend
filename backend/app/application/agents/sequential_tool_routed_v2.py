@@ -216,7 +216,11 @@ class SequentialToolRoutedRunner:
             oi.set_io(root, input_value=request.query_text)
 
             # === Node 1: intent_classification ===
-            await emit_step("intent_classification", "started")
+            await emit_step(
+                "intent_classification",
+                "started",
+                query=request.query_text[:200],
+            )
             with _TRACER.start_as_current_span("agent.intent_classification") as s:
                 classification = await self._classify(request)
                 scenario_object = classification.scenario_object
@@ -247,6 +251,8 @@ class SequentialToolRoutedRunner:
                 scenario_object=scenario_object,
                 scenario_depth=scenario_depth,
                 confidence=classification_confidence,
+                classifier_backend=classification.classifier_backend,
+                entities=entities,
             )
 
             # Refuse early on low-confidence or inactive cells.
@@ -286,6 +292,7 @@ class SequentialToolRoutedRunner:
                 pass
 
             # === 3. tool.memory.session_load ===
+            await emit_step("session_memory_load", "started")
             session_load = await self._tools.invoke(
                 "memory.session_load",
                 {"session_id": request.session_id},
@@ -334,8 +341,25 @@ class SequentialToolRoutedRunner:
                     ),
                 )
 
+            summary_preview = (conversation_summary or "")[:200] if conversation_summary else None
+            await emit_step(
+                "session_memory_load",
+                "ok",
+                present=bool(session_load.output and session_load.output.get("present")),
+                injected=decision.inject,
+                reason=decision.reason,
+                prior_scenario_object=prior_so,
+                prior_scenario_depth=prior_sd,
+                summary_preview=summary_preview,
+            )
+
             # === 4. tool.retriever.search (Node 2) ===
-            await emit_step("retrieval", "started")
+            await emit_step(
+                "retrieval",
+                "started",
+                query=request.query_text[:200],
+                top_k=self._top_k,
+            )
             try:
                 retrieval = await self._tools.invoke(
                     "retriever.search",
@@ -374,9 +398,28 @@ class SequentialToolRoutedRunner:
                     error_code="tool_empty_result",
                 )
 
-            await emit_step("retrieval", "ok", num_chunks=len(chunks))
+            chunks_preview = [
+                {
+                    "chunk_id": c.chunk_id,
+                    "document_id": c.document_id,
+                    "title": c.title,
+                    "page": c.page,
+                    "section": c.section,
+                    "score": c.score,
+                    "doc_type": c.doc_type,
+                    "snippet": (c.snippet or c.text or "")[:200] or None,
+                }
+                for c in chunks
+            ]
+            await emit_step(
+                "retrieval",
+                "ok",
+                num_chunks=len(chunks),
+                chunks_preview=chunks_preview,
+            )
 
             # === 5. tool.memory.approved_search (Phase 5에서 활성화) ===
+            await emit_step("memory_approved_search", "started")
             approved = await self._tools.invoke(
                 "memory.approved_search",
                 {
@@ -410,6 +453,20 @@ class SequentialToolRoutedRunner:
                 )
             if approved_refs:
                 memory_refs = memory_refs + tuple(approved_refs)
+
+            hits_preview = [
+                {
+                    "memory_id": ref.memory_id,
+                    "score": memory_retrieval_scores.get(ref.memory_id),
+                }
+                for ref in approved_refs
+            ]
+            await emit_step(
+                "memory_approved_search",
+                "ok",
+                hit_count=len(approved_refs),
+                hits_preview=hits_preview,
+            )
 
             # === Track E: summary compression (Node 5 책임이지만 prompt에 prepend하기 위해 여기서 갱신) ===
             if self._summarizer is not None:
@@ -543,6 +600,7 @@ class SequentialToolRoutedRunner:
             chunk_ids = [c.chunk_id for c in chunks]
 
             # === 9. tool.document.resolve_citation ===
+            await emit_step("citation_resolve", "started")
             try:
                 resolve = await self._tools.invoke(
                     "document.resolve_citation",
@@ -590,6 +648,23 @@ class SequentialToolRoutedRunner:
                 for cid, r in resolved_by_cid.items()
                 if r.get("resolvable", False)
             ]
+            resolved_preview = [
+                {
+                    "citation_id": cid,
+                    "document_id": (resolved_by_cid.get(cid) or {}).get("document_id"),
+                    "page": (resolved_by_cid.get(cid) or {}).get("page"),
+                    "section": (resolved_by_cid.get(cid) or {}).get("section"),
+                    "revision": (resolved_by_cid.get(cid) or {}).get("revision"),
+                }
+                for cid in resolvable_citation_ids
+            ]
+            await emit_step(
+                "citation_resolve",
+                "ok",
+                resolved_count=len(resolvable_citation_ids),
+                total=len(citation_ids),
+                resolved_preview=resolved_preview,
+            )
 
             # === 10–11. verification (Node 4) + 1차 실패 fallback ===
             await emit_step("verification", "started")
@@ -623,6 +698,7 @@ class SequentialToolRoutedRunner:
             new_turns = list(request.chat_history) + [
                 ChatTurn(role="user", content=request.query_text)
             ]
+            await emit_step("session_memory_update", "started")
             session_update = await self._tools.invoke(
                 "memory.session_update",
                 {
@@ -638,6 +714,7 @@ class SequentialToolRoutedRunner:
                 ctx,
             )
             record(session_update)
+            await emit_step("session_memory_update", "ok", tool_status=session_update.status)
 
             # === 14. event.persist (Node 14 — recorder is the sole artifact
             # write path; v2 spec §15 단일 sink). artifact.write_event tool 제거.

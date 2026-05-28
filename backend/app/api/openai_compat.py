@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.api.thinking_renderer import render as render_thinking
 from app.application.agents.events import AgentEvent
 from app.domain.interaction import AgentRequest, ChatTurn
 
@@ -175,6 +176,10 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         project_id=request.headers.get("x-project-id"),
     )
 
+    thinking_expose = bool(settings.thinking_expose)
+    content_mode = settings.trace_content_mode
+    max_items = int(settings.thinking_max_items)
+
     if req.stream:
         return StreamingResponse(
             _sse_stream_from_runner(
@@ -183,12 +188,21 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                 interaction_id=interaction_id,
                 variant_id=variant_id,
                 fallback_llm=llm_id,
+                thinking_expose=thinking_expose,
+                content_mode=content_mode,
+                max_items=max_items,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    response = await runner.run(agent_request)
+    if thinking_expose:
+        response, thinking_lines = await _run_collecting_thinking(
+            runner, agent_request, content_mode=content_mode, max_items=max_items
+        )
+    else:
+        response = await runner.run(agent_request)
+        thinking_lines = []
     resolved_llm = response.llm_id or llm_id
     composite_id = f"{variant_id}@{resolved_llm}"
     smr_meta = _smr_agent_metadata(
@@ -198,6 +212,11 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         response=response,
     )
 
+    content_text = response.answer_text
+    if thinking_lines:
+        think_block = "<think>\n" + "\n".join(thinking_lines) + "\n</think>\n\n"
+        content_text = think_block + (response.answer_text or "")
+
     return {
         "id": interaction_id,
         "object": "chat.completion",
@@ -206,7 +225,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": response.answer_text},
+                "message": {"role": "assistant", "content": content_text},
                 "finish_reason": response.refusal_reason or "stop",
             }
         ],
@@ -282,6 +301,31 @@ def _frame(
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
+async def _run_collecting_thinking(
+    runner,
+    agent_request: AgentRequest,
+    *,
+    content_mode: str,
+    max_items: int,
+):
+    """Drive `run_stream()` non-streaming side: return the final AgentResponse
+    plus the list of human-readable thinking lines accumulated from step/tool
+    events. Mirrors the streaming path so the two surfaces stay in sync."""
+    response = None
+    thinking: list[str] = []
+    async for event in runner.run_stream(agent_request):
+        if event.kind == "final":
+            response = event.payload["response"]
+            continue
+        if event.kind == "error":
+            raise RuntimeError(event.payload.get("message") or "agent error")
+        lines = render_thinking(event, content_mode=content_mode, max_items=max_items)
+        thinking.extend(lines)
+    if response is None:
+        raise RuntimeError("runner produced no final response")
+    return response, thinking
+
+
 async def _sse_stream_from_runner(
     *,
     runner,
@@ -289,6 +333,9 @@ async def _sse_stream_from_runner(
     interaction_id: str,
     variant_id: str,
     fallback_llm: str,
+    thinking_expose: bool = True,
+    content_mode: str = "metadata",
+    max_items: int = 3,
 ) -> AsyncIterator[bytes]:
     """Translate `runner.run_stream()` events into OpenAI chat.completion.chunk
     SSE frames.
@@ -332,6 +379,16 @@ async def _sse_stream_from_runner(
                     delta={"reasoning_content": event.payload.get("content", "")},
                 )
             elif event.kind in ("step", "tool"):
+                if thinking_expose:
+                    for line in render_thinking(
+                        event, content_mode=content_mode, max_items=max_items
+                    ):
+                        yield _frame(
+                            interaction_id=interaction_id,
+                            composite_id=composite_id,
+                            created=created,
+                            delta={"reasoning_content": line + "\n"},
+                        )
                 yield _frame(
                     interaction_id=interaction_id,
                     composite_id=composite_id,

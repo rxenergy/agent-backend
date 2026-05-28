@@ -124,6 +124,11 @@ class Settings(BaseSettings):
     minio_secret_key: str = "minioadmin"
     aws_region: str = "ap-northeast-2"
 
+    # OpenAI-compatible thinking surface (workflow → reasoning_content / <think>)
+    thinking_expose: bool = True
+    # Per-step preview cap (top-N chunks / hits / citations shown in thinking).
+    thinking_max_items: int = 3
+
     # Capture modes (§13.2, §14)
     trace_content_mode: Literal["metadata", "snippets", "full"] = "metadata"
     context_capture_mode: Literal["metadata", "snippets", "full"] = "metadata"
