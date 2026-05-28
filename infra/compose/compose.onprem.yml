@@ -61,6 +61,8 @@ services:
         OPENWEBUI_VERSION: ${OPENWEBUI_VERSION:-v0.9.5}
     image: agent-saas/frontend:${BACKEND_TAG:-onprem}
     environment:
+      ENABLE_SIGNUP: "true"
+      DEFAULT_USER_ROLE: admin
       WEBUI_SESSION_COOKIE_SECURE: "false"
       WEBUI_URL: http://localhost:${OPEN_WEBUI_PORT:-3100}
 
