@@ -50,6 +50,9 @@ def test_hybrid_dsl_has_three_subqueries():
 
 
 def test_hybrid_dsl_includes_scenario_filter_and_entity_boost():
+    """scenario_object → search_type 매핑은 top-level hybrid.filter 로 분리되고,
+    엔티티 boost 는 BM25 sub-query 의 should 절에 그대로 남는다.
+    """
     hq = build_hybrid_query(
         _input(
             scenario_object="regulation",
@@ -58,10 +61,38 @@ def test_hybrid_dsl_includes_scenario_filter_and_entity_boost():
         dense_encoder=_FakeDense(),
         sparse_encoder=_FakeSparse(),
     )
-    bm25 = hq.dsl["query"]["hybrid"]["queries"][0]["bool"]
-    assert bm25["filter"] == [{"term": {"scenario_object": "regulation"}}]
+    hybrid = hq.dsl["query"]["hybrid"]
+    # 공통 필터는 hybrid.filter 에 단일 query 객체로 (bool.filter 로 감싸서).
+    assert hybrid["filter"] == {
+        "bool": {"filter": [{"term": {"search_type": "manual"}}]}
+    }
+    bm25 = hybrid["queries"][0]["bool"]
+    # BM25 sub-query 자체에는 더 이상 scenario filter 가 없음.
+    assert bm25.get("filter", []) == []
     boosts = [s["match"]["text"]["query"] for s in bm25["should"]]
     assert boosts == ["BWRX-300", "RAI-12"]  # empty value skipped
+
+
+def test_hybrid_dsl_nuscale_search_type_filter():
+    """scenario_object="nuscale" → search_type=nuscale 필터."""
+    hq = build_hybrid_query(
+        _input(scenario_object="nuscale"),
+        dense_encoder=_FakeDense(),
+        sparse_encoder=_FakeSparse(),
+    )
+    assert hq.dsl["query"]["hybrid"]["filter"] == {
+        "bool": {"filter": [{"term": {"search_type": "nuscale"}}]}
+    }
+
+
+def test_hybrid_dsl_no_filter_when_scenario_object_unknown():
+    """알 수 없는 scenario_object 값은 필터를 생성하지 않는다."""
+    hq = build_hybrid_query(
+        _input(scenario_object="other-domain"),
+        dense_encoder=_FakeDense(),
+        sparse_encoder=_FakeSparse(),
+    )
+    assert "filter" not in hq.dsl["query"]["hybrid"]
 
 
 def test_hybrid_dsl_empty_sparse_falls_back_to_match_none():

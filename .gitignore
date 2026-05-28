@@ -36,3 +36,7 @@ venv/
 !.env.example
 infra/aws/.state/
 *.pem
+
+# OpenSearch snapshot 본체는 호스트의 /srv/os-snapshots 에만 두고
+# 저장소 안에는 절대 두지 않는다 (수 GB 단위).
+infra/opensearch/snapshots/

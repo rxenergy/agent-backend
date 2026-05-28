@@ -1,5 +1,5 @@
 {
-  "description": "hybrid search pipeline (weights=[0.2, 0.3, 0.5])",
+  "description": "hybrid search pipeline (weights=[1.0, 0.0, 0.0])",
   "phase_results_processors": [
     {
       "normalization-processor": {
@@ -10,9 +10,9 @@
           "technique": "arithmetic_mean",
           "parameters": {
             "weights": [
-              0.2,
-              0.3,
-              0.5
+              1.0,
+              0.0,
+              0.0
             ]
           }
         }

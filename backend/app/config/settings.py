@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     retriever_min_score: float = 0.0
     retriever_k_dense: int = 50
     opensearch_endpoint: str = "http://opensearch:9200"
-    opensearch_index: str = "nrc-all-v3"
+    opensearch_index: str = "nrc-all-v1"
     opensearch_search_pipeline: str = "nrc-hybrid-search"
     opensearch_dense_field: str = "dense_e5"
     opensearch_sparse_field: str = "sparse_fermi"

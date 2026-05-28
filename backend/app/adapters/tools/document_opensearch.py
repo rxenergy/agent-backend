@@ -62,7 +62,16 @@ class OpenSearchDocumentResolverTool:
             body = {
                 "size": len(unique_chunks),
                 "query": {"terms": {"chunk_id": unique_chunks}},
-                "_source": ["chunk_id", "document_id", "page", "section"],
+                "_source": [
+                    "chunk_id",
+                    "source_id",
+                    "page_start",
+                    "section_path_str",
+                    "section_path",
+                    "doc_metadata.AccessionNumber",
+                    "doc_metadata.DocumentTitle",
+                    "doc_metadata.title",
+                ],
             }
             try:
                 async with httpx.AsyncClient(
@@ -97,15 +106,18 @@ class OpenSearchDocumentResolverTool:
 
         resolved = []
         for i, (cid, chunk_id) in enumerate(zip(citation_ids, chunk_ids, strict=False)):
-            src = sources.get(chunk_id)
+            src = sources.get(chunk_id) or {}
+            meta = src.get("doc_metadata") or {}
+            section = src.get("section_path_str") or " > ".join(src.get("section_path") or []) or None
+            document_id = src.get("source_id") or meta.get("AccessionNumber")
             resolved.append(
                 {
                     "citation_id": cid,
                     "chunk_id": chunk_id,
-                    "document_id": (src or {}).get("document_id"),
-                    "page": (src or {}).get("page"),
-                    "section": (src or {}).get("section"),
-                    "resolvable": src is not None,
+                    "document_id": document_id,
+                    "page": src.get("page_start"),
+                    "section": section,
+                    "resolvable": bool(src),
                     "_position": i,
                 }
             )

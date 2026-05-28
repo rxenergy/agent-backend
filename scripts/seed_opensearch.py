@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Index seed JSONL into OpenSearch ``nrc-all-v3`` (hybrid mapping).
+"""Index seed JSONL into OpenSearch ``nrc-all-v1`` (hybrid mapping).
 
 Two modes:
 
@@ -18,7 +18,7 @@ Set ``--recreate`` to drop and rebuild the index from the mapping file.
 Usage::
 
     OPENSEARCH_ENDPOINT=http://localhost:9200 \
-    OPENSEARCH_INDEX=nrc-all-v3 \
+    OPENSEARCH_INDEX=nrc-all-v1 \
     SEED_FILE=datasets/seed_docs/smr_seed.jsonl \
     python3 scripts/seed_opensearch.py [--encode] [--recreate]
 """
@@ -34,12 +34,12 @@ import urllib.request
 from pathlib import Path
 
 ENDPOINT = os.environ.get("OPENSEARCH_ENDPOINT", "http://localhost:9200").rstrip("/")
-INDEX = os.environ.get("OPENSEARCH_INDEX", "nrc-all-v3")
+INDEX = os.environ.get("OPENSEARCH_INDEX", "nrc-all-v1")
 SEED_FILE = Path(os.environ.get("SEED_FILE", "datasets/seed_docs/smr_seed.jsonl"))
 MAPPING_FILE = Path(
     os.environ.get(
         "OPENSEARCH_MAPPING_FILE",
-        "infra/opensearch/mappings/nrc-all-v3.json",
+        "infra/opensearch/mappings/nrc-all-v1.json",
     )
 )
 

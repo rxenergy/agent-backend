@@ -13,9 +13,15 @@ class RetrievedChunk(BaseModel):
     section: str | None = None
     snippet: str | None = None
     text: str | None = None  # full text only when CONTEXT_CAPTURE_MODE=full
-    doc_type: str | None = None  # vendor | regulation | rai (기획 doc §Citation Format)
+    doc_type: str | None = None  # NRC 도메인: collection 값 (10CFR/DSRS/FR/RG/SRP/nuscale_*)
     revision: str | None = None
-    response_date: str | None = None  # RAI 응답 일자
+    response_date: str | None = None  # ADAMS DocumentDate 또는 govinfo dateIssued
+    # NRC nrc-all-v1 스키마 전용 필드 (선택, 다운스트림 인용/필터링용)
+    collection: str | None = None
+    search_type: str | None = None  # "manual" | "nuscale"
+    source_id: str | None = None  # ADAMS Accession Number 또는 govinfo packageId
+    page_end: int | None = None
+    title: str | None = None  # doc_metadata.DocumentTitle 또는 doc_metadata.title
 
 
 class RetrieverSearchInput(BaseModel):

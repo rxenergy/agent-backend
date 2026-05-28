@@ -23,20 +23,27 @@ class OpenSearchRetrieverTool:
     boosts and ``scenario_object`` filters live inside the BM25 sub-query of
     the hybrid clause; dense/sparse sub-queries stay scenario-agnostic.
 
-    Document schema expected on the index (e.g. ``nrc-all-v3``):
+    Document schema expected on the index (``nrc-all-v1``, NRC ADAMS/govinfo):
         {
-          "document_id":      "kins-rg-2024-001",
-          "chunk_id":         "kins-rg-2024-001#p7#1",
-          "title":            "...",
-          "page":             7,
-          "section":          "§3.2",
-          "scenario_object":  "regulation",
-          "doc_type":         "vendor|regulation|rai",
-          "revision":         "...",
-          "response_date":    "YYYY-MM-DD",
+          "chunk_id":         "ML15355A364_c0001",
+          "source_id":        "ML15355A364",
+          "collection":       "DSRS",                       # 10CFR|DSRS|FR|RG|SRP|nuscale_*
+          "search_type":      "manual",                     # manual | nuscale
+          "section_path":     ["...","..."],                # 계층 섹션
+          "section_path_str": "... > ...",
+          "page_start":       1,
+          "page_end":         3,
           "text":             "<chunk body>",
-          "dense_e5":         [float, ...]   # knn_vector(1024)
-          "sparse_fermi":     {tok: float}   # rank_features
+          "dense_e5":         [float, ...]                  # knn_vector(1024)
+          "sparse_fermi":     {tok: float}                  # rank_features
+          "doc_metadata": {
+            "AccessionNumber": "ML15355A364",               # ADAMS
+            "DocumentTitle":   "...",
+            "DocumentDate":    "YYYY-MM-DD",
+            "dateIssued":      "YYYY-MM-DD",                # govinfo
+            "title":           "...",                       # govinfo
+            ...
+          }
         }
     """
 
@@ -141,19 +148,35 @@ class OpenSearchRetrieverTool:
     @staticmethod
     def _hit_to_chunk(hit: dict[str, Any]) -> RetrievedChunk:
         src = hit.get("_source", {}) or {}
+        meta = src.get("doc_metadata") or {}
         text = src.get("text", "") or ""
-        # Fallback: 색인 문서에 document_id가 누락된 경우 _id 사용. 데이터 측 보정 전 임시 조치.
-        # ISSUE: ingest 파이프라인의 document_id 누락 이슈 참조.
-        document_id = src.get("document_id") or hit.get("_id") or "unknown"
-        chunk_id = src.get("chunk_id") or hit.get("_id") or document_id
+
+        # source_id는 nrc-all-v1 의 1차 문서 식별자. 없으면 ADAMS AccessionNumber,
+        # 그래도 없으면 _id 사용.
+        source_id = src.get("source_id") or meta.get("AccessionNumber") or hit.get("_id") or "unknown"
+        chunk_id = src.get("chunk_id") or hit.get("_id") or source_id
+
+        # 섹션은 계층 배열을 " > " 로 합쳐 단일 문자열로 (이미 색인된 section_path_str 우선).
+        section_path = src.get("section_path") or []
+        section = src.get("section_path_str") or (" > ".join(section_path) if section_path else None)
+
+        # 응답일자: ADAMS DocumentDate 우선, govinfo dateIssued 차순.
+        response_date = meta.get("DocumentDate") or meta.get("dateIssued")
+        title = meta.get("DocumentTitle") or meta.get("title")
+
         return RetrievedChunk(
             chunk_id=chunk_id,
-            document_id=document_id,
+            document_id=source_id,
             score=float(hit.get("_score", 0.0)),
-            page=src.get("page"),
-            section=src.get("section"),
+            page=src.get("page_start"),
+            section=section,
             snippet=text[:512],
-            doc_type=src.get("doc_type"),
-            revision=src.get("revision"),
-            response_date=src.get("response_date"),
+            doc_type=src.get("collection"),
+            revision=None,  # NRC 스키마에 대응 필드 없음
+            response_date=response_date,
+            collection=src.get("collection"),
+            search_type=src.get("search_type"),
+            source_id=source_id if src.get("source_id") else None,
+            page_end=src.get("page_end"),
+            title=title,
         )

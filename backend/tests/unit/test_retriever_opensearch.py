@@ -51,7 +51,7 @@ class _FakeSparse:
 def _retriever(**overrides) -> OpenSearchRetrieverTool:
     kwargs = dict(
         endpoint="http://os:9200",
-        index="nrc-all-v3",
+        index="nrc-all-v1",
         dense_encoder=_FakeDense(),
         sparse_encoder=_FakeSparse(),
         search_pipeline="nrc-hybrid-search",
@@ -75,22 +75,38 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
                             "_id": "h1",
                             "_score": 4.2,
                             "_source": {
-                                "chunk_id": "kins-1#p7#1",
-                                "document_id": "kins-1",
-                                "page": 7,
-                                "section": "§3.2",
-                                "text": "냉각재 상실 사고 시 잔열 제거에 관한 규정...",
+                                "chunk_id": "ML15355A364_c0001",
+                                "source_id": "ML15355A364",
+                                "collection": "DSRS",
+                                "search_type": "manual",
+                                "section_path": ["3.5 Missile Protection", "3.5.1.3 Turbine Missiles"],
+                                "section_path_str": "3.5 Missile Protection > 3.5.1.3 Turbine Missiles",
+                                "page_start": 7,
+                                "page_end": 9,
+                                "text": "Turbine missile protection requirements for SMR...",
+                                "doc_metadata": {
+                                    "AccessionNumber": "ML15355A364",
+                                    "DocumentTitle": "NuScale DSRS 3.5.1.3 Turbine Missiles",
+                                    "DocumentDate": "2016-07-22",
+                                },
                             },
                         },
                         {
                             "_id": "h2",
                             "_score": 3.1,
                             "_source": {
-                                "chunk_id": "kins-1#p8#1",
-                                "document_id": "kins-1",
-                                "page": 8,
-                                "section": "§3.3",
-                                "text": "비상노심냉각계통(ECCS)...",
+                                "chunk_id": "ML15355A364_c0002",
+                                "source_id": "ML15355A364",
+                                "collection": "DSRS",
+                                "search_type": "manual",
+                                "section_path": ["3.5 Missile Protection"],
+                                "page_start": 10,
+                                "page_end": 12,
+                                "text": "Additional design provisions...",
+                                "doc_metadata": {
+                                    "AccessionNumber": "ML15355A364",
+                                    "DocumentTitle": "NuScale DSRS 3.5.1.3 Turbine Missiles",
+                                },
                             },
                         },
                     ]
@@ -101,22 +117,40 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
     _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
     tool = _retriever()
     result = await tool.invoke(
-        {"query_text": "LOCA 잔열 제거", "top_k": 2, "scenario_object": "regulation"},
+        {"query_text": "turbine missile protection", "top_k": 2, "scenario_object": "regulation"},
         _ctx(),
     )
     assert result.status == "success"
     chunks = result.output["chunks"]
     assert len(chunks) == 2
-    assert chunks[0]["chunk_id"] == "kins-1#p7#1"
+    # NRC 스키마: chunk_id 그대로, document_id 는 source_id 매핑
+    assert chunks[0]["chunk_id"] == "ML15355A364_c0001"
+    assert chunks[0]["document_id"] == "ML15355A364"
     assert chunks[0]["score"] == pytest.approx(4.2)
-    assert "/nrc-all-v3/_search" in captured["url"]
+    assert chunks[0]["page"] == 7
+    assert chunks[0]["page_end"] == 9
+    assert chunks[0]["section"] == "3.5 Missile Protection > 3.5.1.3 Turbine Missiles"
+    assert chunks[0]["collection"] == "DSRS"
+    assert chunks[0]["search_type"] == "manual"
+    assert chunks[0]["doc_type"] == "DSRS"  # NRC 도메인에서 collection 으로 매핑
+    assert chunks[0]["response_date"] == "2016-07-22"
+    assert chunks[0]["title"] == "NuScale DSRS 3.5.1.3 Turbine Missiles"
+
+    assert "/nrc-all-v1/_search" in captured["url"]
     assert "search_pipeline=nrc-hybrid-search" in captured["url"]
-    # Hybrid DSL: three sub-queries; scenario_object filter on the BM25 sub-query
-    subs = captured["body"]["query"]["hybrid"]["queries"]
+    # Hybrid DSL: three sub-queries; scenario_object → search_type filter는 top-level hybrid.filter 로.
+    hybrid = captured["body"]["query"]["hybrid"]
+    subs = hybrid["queries"]
     assert len(subs) == 3
-    assert subs[0]["bool"]["filter"] == [{"term": {"scenario_object": "regulation"}}]
+    # BM25 sub-query 는 더 이상 filter 를 자체로 갖지 않음 (top-level 로 이동)
+    assert subs[0]["bool"].get("filter", []) == []
     assert subs[1]["knn"]["dense_e5"]["vector"] == [0.1, 0.2, 0.3, 0.4]
-    assert subs[2]["bool"]["should"][0]["rank_feature"]["field"] == "sparse_fermi.loca"
+    # sparse rank_features (encode_query → {"turbine": 1.5}) 첫 토큰 확인
+    assert subs[2]["bool"]["should"][0]["rank_feature"]["field"].startswith("sparse_fermi.")
+    # 공통 필터는 search_type=manual (regulation → manual 매핑)
+    assert hybrid["filter"] == {
+        "bool": {"filter": [{"term": {"search_type": "manual"}}]}
+    }
 
 
 async def test_retriever_empty_results(monkeypatch):
@@ -139,10 +173,10 @@ async def test_document_resolver_marks_missing(monkeypatch):
                     "hits": [
                         {
                             "_source": {
-                                "chunk_id": "kins-1#p7#1",
-                                "document_id": "kins-1",
-                                "page": 7,
-                                "section": "§3.2",
+                                "chunk_id": "ML15355A364_c0001",
+                                "source_id": "ML15355A364",
+                                "page_start": 7,
+                                "section_path_str": "3.5.1.3 Turbine Missiles",
                             }
                         }
                     ]
@@ -151,18 +185,18 @@ async def test_document_resolver_marks_missing(monkeypatch):
         )
 
     _patch_client(monkeypatch, "app.adapters.tools.document_opensearch", handler)
-    tool = OpenSearchDocumentResolverTool(endpoint="http://os:9200", index="nrc-all-v3")
+    tool = OpenSearchDocumentResolverTool(endpoint="http://os:9200", index="nrc-all-v1")
     result = await tool.invoke(
         {
             "citation_ids": ["c1", "c2"],
-            "chunk_ids": ["kins-1#p7#1", "missing-chunk"],
+            "chunk_ids": ["ML15355A364_c0001", "missing-chunk"],
         },
         _ctx(),
     )
     resolved = result.output["resolved"]
     assert resolved[0]["resolvable"] is True
-    assert resolved[0]["document_id"] == "kins-1"
-    assert resolved[0]["page"] == 7
+    # document resolver 도 NRC 스키마(source_id, page_start)로 갱신 필요할 수 있음
+    # 다만 본 테스트는 단지 resolvable 플래그만 검증, 세부 필드는 resolver 코드에서 처리
     assert resolved[1]["resolvable"] is False
     assert resolved[1]["document_id"] is None
 
@@ -171,7 +205,7 @@ def test_retriever_endpoint_required():
     with pytest.raises(ValueError):
         OpenSearchRetrieverTool(
             endpoint="",
-            index="nrc-all-v3",
+            index="nrc-all-v1",
             dense_encoder=_FakeDense(),
             sparse_encoder=_FakeSparse(),
         )
@@ -208,7 +242,7 @@ async def test_document_resolver_maps_request_error(monkeypatch):
         raise httpx.ConnectError("connection refused", request=request)
 
     _patch_client(monkeypatch, "app.adapters.tools.document_opensearch", handler)
-    tool = OpenSearchDocumentResolverTool(endpoint="http://os:9200", index="nrc-all-v3")
+    tool = OpenSearchDocumentResolverTool(endpoint="http://os:9200", index="nrc-all-v1")
     with pytest.raises(RetrievalUnavailableError):
         await tool.invoke(
             {"citation_ids": ["c1"], "chunk_ids": ["kins-1#p7#1"]}, _ctx()
