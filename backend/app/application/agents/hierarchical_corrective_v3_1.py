@@ -288,6 +288,16 @@ class HierarchicalCorrectiveRunner:
                 s.set_attribute("scenario_depth", scenario_depth)
                 s.set_attribute("classification_confidence", conf)
                 oi.set_kind(s, oi.KIND_CHAIN)
+                oi.set_io(
+                    s,
+                    input_value=request.query_text,
+                    output_value={
+                        "scenario_object": scenario_object,
+                        "scenario_depth": scenario_depth,
+                        "confidence": conf,
+                        "entities": entities,
+                    },
+                )
             await emit_step("intent_classification", "ok",
                             scenario_object=scenario_object,
                             scenario_depth=scenario_depth, confidence=conf)
@@ -348,39 +358,49 @@ class HierarchicalCorrectiveRunner:
                 prior_entities = session_load.output.get("active_entities") or {}
                 conversation_summary = session_load.output.get("conversation_summary")
 
-            # Node 5 — retrieval_execute (다전략 fan-out + RRF)
+            # Node 5 — retrieval_execute (다전략 fan-out + RRF). span 이 전략별
+            # tool.retriever.search 를 묶어 Phoenix 에서 한 그룹으로 보이게 한다.
             await emit_step("retrieval_execute", "started",
                             strategies=[st.name for st in plan.strategies])
-            try:
-                dispatch = await self._dispatcher.execute(
-                    plan,
-                    query_text=request.query_text,
-                    fetch_k=self._fetch_k,
-                    scenario_object=scenario_object,
-                    scenario_depth=scenario_depth,
-                    entities=entities,
-                    ctx=ctx,
-                    min_score=self._min_score,  # raw 필터는 dispatcher 가 융합 전 적용
-                )
-            except RequiredToolFailed as e:
-                return await self._refuse(
-                    request, started, tool_calls, scenario_object, scenario_depth,
-                    RefusalReason.RETRIEVAL_NO_RESULT, conf, error_code=e.code.value,
-                )
-            for r in dispatch.tool_results:
-                record(r)
-            # 실제 실행된 전략으로 plan 을 확정(감사 trace 에 전략명 명시).
-            if dispatch.executed:
-                plan = replace(plan, strategies=tuple(dispatch.executed))
-            # 융합 순서가 권위(RRF rank). raw score 로 재필터하지 않는다(계약).
-            # 깊은 fetch 풀에서 상위 top_k 만 다운스트림으로.
-            pool = dispatch.fused_chunks
-            chunks = pool[: self._top_k]
-            if not chunks:
-                return await self._refuse(
-                    request, started, tool_calls, scenario_object, scenario_depth,
-                    RefusalReason.RETRIEVAL_NO_RESULT, conf, error_code="tool_empty_result",
-                )
+            with _TRACER.start_as_current_span("agent.retrieval_execute") as s:
+                oi.set_kind(s, oi.KIND_RETRIEVER)
+                try:
+                    dispatch = await self._dispatcher.execute(
+                        plan,
+                        query_text=request.query_text,
+                        fetch_k=self._fetch_k,
+                        scenario_object=scenario_object,
+                        scenario_depth=scenario_depth,
+                        entities=entities,
+                        ctx=ctx,
+                        min_score=self._min_score,  # raw 필터는 dispatcher 가 융합 전 적용
+                    )
+                except RequiredToolFailed as e:
+                    return await self._refuse(
+                        request, started, tool_calls, scenario_object, scenario_depth,
+                        RefusalReason.RETRIEVAL_NO_RESULT, conf, error_code=e.code.value,
+                    )
+                for r in dispatch.tool_results:
+                    record(r)
+                # 실제 실행된 전략으로 plan 을 확정(감사 trace 에 전략명 명시).
+                if dispatch.executed:
+                    plan = replace(plan, strategies=tuple(dispatch.executed))
+                # 융합 순서가 권위(RRF rank). raw score 로 재필터하지 않는다(계약).
+                # 깊은 fetch 풀에서 상위 top_k 만 다운스트림으로.
+                pool = dispatch.fused_chunks
+                chunks = pool[: self._top_k]
+                if not chunks:
+                    return await self._refuse(
+                        request, started, tool_calls, scenario_object, scenario_depth,
+                        RefusalReason.RETRIEVAL_NO_RESULT, conf, error_code="tool_empty_result",
+                    )
+                s.set_attribute("retrieval.num_chunks", len(chunks))
+                s.set_attribute("retrieval.pool_size", len(pool))
+                s.set_attribute("retrieval.strategies_ok",
+                                [st.name for st in dispatch.executed])
+                if dispatch.failed_strategies:
+                    s.set_attribute("retrieval.strategies_failed",
+                                    dispatch.failed_strategies)
             await emit_step("retrieval_execute", "ok",
                             num_chunks=len(chunks), pool_size=len(pool),
                             strategies_ok=[s.name for s in dispatch.executed],
@@ -388,19 +408,34 @@ class HierarchicalCorrectiveRunner:
 
             # Node 6 — retrieval_evaluate (5-신호 결정론 게이트)
             await emit_step("retrieval_evaluate", "started")
-            evaluation = self._evaluator.evaluate(
-                chunks,
-                query_text=request.query_text,
-                entities=entities,
-                version_constraint=query_plan.version_constraint,
-                rrf_scores=dispatch.rrf_scores,
-                regulatory_enforced=self._regulatory_enforced,
-            )
+            with _TRACER.start_as_current_span("agent.retrieval_evaluate") as s:
+                oi.set_kind(s, oi.KIND_CHAIN)
+                evaluation = self._evaluator.evaluate(
+                    chunks,
+                    query_text=request.query_text,
+                    entities=entities,
+                    version_constraint=query_plan.version_constraint,
+                    rrf_scores=dispatch.rrf_scores,
+                    regulatory_enforced=self._regulatory_enforced,
+                )
+                num_pass = sum(1 for sig in evaluation.per_chunk
+                               if sig.decision == GateDecision.PASS.value)
+                s.set_attribute("evaluate.overall_decision", evaluation.overall_decision)
+                s.set_attribute("evaluate.regulatory_enforced",
+                                evaluation.regulatory_enforced)
+                if evaluation.evaluator_policy_hash:
+                    s.set_attribute("evaluate.policy_hash",
+                                    evaluation.evaluator_policy_hash)
+                s.set_attribute("evaluate.num_pass", num_pass)
+                s.set_attribute("evaluate.num_chunks", len(evaluation.per_chunk))
+                oi.set_io(s, output_value={
+                    "overall_decision": evaluation.overall_decision,
+                    "num_pass": num_pass,
+                })
             await emit_step("retrieval_evaluate", "ok",
                             overall=evaluation.overall_decision,
                             regulatory_enforced=evaluation.regulatory_enforced,
-                            num_pass=sum(1 for s in evaluation.per_chunk
-                                         if s.decision == GateDecision.PASS.value))
+                            num_pass=num_pass)
 
             # Node 7 — retrieval_recover. WEAK/FAIL → 결정론 진단·복구 → Node 5
             # 재-dispatch → Node 6 재평가. max N round. 경계는 dispatch→evaluate 만
@@ -425,24 +460,35 @@ class HierarchicalCorrectiveRunner:
                 cur_entities = action.entities
                 cur_fetch_k = action.fetch_k
                 cur_min_score = action.min_score
-                try:
-                    dispatch = await self._dispatcher.execute(
-                        plan, query_text=request.query_text, fetch_k=cur_fetch_k,
-                        scenario_object=scenario_object, scenario_depth=scenario_depth,
-                        entities=cur_entities, ctx=ctx, min_score=cur_min_score,
+                # 라운드별 span — 재-dispatch 의 tool.retriever.search 가 이 span
+                # 아래 nest 되어 Phoenix 에서 어느 복구 라운드인지 구분된다.
+                with _TRACER.start_as_current_span("agent.retrieval_recover") as rs:
+                    oi.set_kind(rs, oi.KIND_RETRIEVER)
+                    rs.set_attribute("recover.round", rnd)
+                    rs.set_attribute("recover.diagnosis", diagnosis)
+                    rs.set_attribute("recover.strategy", action.strategy_id)
+                    rs.set_attribute("recover.fetch_k", cur_fetch_k)
+                    rs.set_attribute("recover.min_score", cur_min_score)
+                    try:
+                        dispatch = await self._dispatcher.execute(
+                            plan, query_text=request.query_text, fetch_k=cur_fetch_k,
+                            scenario_object=scenario_object, scenario_depth=scenario_depth,
+                            entities=cur_entities, ctx=ctx, min_score=cur_min_score,
+                        )
+                    except RequiredToolFailed:
+                        rs.set_attribute("recover.aborted", True)
+                        break
+                    for r in dispatch.tool_results:
+                        record(r)  # 복구 라운드의 재검색도 tool_calls 에 기록(재현성).
+                    pool = dispatch.fused_chunks
+                    chunks = pool[: self._top_k]
+                    evaluation = self._evaluator.evaluate(
+                        chunks, query_text=request.query_text, entities=cur_entities,
+                        version_constraint=query_plan.version_constraint,
+                        rrf_scores=dispatch.rrf_scores,
+                        regulatory_enforced=self._regulatory_enforced,
                     )
-                except RequiredToolFailed:
-                    break
-                for r in dispatch.tool_results:
-                    record(r)  # 복구 라운드의 재검색도 tool_calls 에 기록(재현성).
-                pool = dispatch.fused_chunks
-                chunks = pool[: self._top_k]
-                evaluation = self._evaluator.evaluate(
-                    chunks, query_text=request.query_text, entities=cur_entities,
-                    version_constraint=query_plan.version_constraint,
-                    rrf_scores=dispatch.rrf_scores,
-                    regulatory_enforced=self._regulatory_enforced,
-                )
+                    rs.set_attribute("recover.outcome", evaluation.overall_decision)
                 recover_rounds.append(
                     RecoverRound(
                         round_index=rnd, diagnosis=diagnosis,
@@ -473,22 +519,26 @@ class HierarchicalCorrectiveRunner:
 
             # Node 9 — evidence_snippet (문장 window 추출; LLM 미사용)
             await emit_step("evidence_snippet", "started")
-            citation_ids_for_snippet = [f"cite-{i}" for i in range(len(chunks))]
-            evidence_pack = self._snippet_extractor.extract(
-                chunks,
-                query_text=request.query_text,
-                entities=entities,
-                citation_ids=citation_ids_for_snippet,
-            )
-            # 추출된 window 로 각 chunk 의 snippet 을 교체 → 기존 ContextBuilder 가
-            # 그대로 prompt 에 싣는다(ContextBuilder 변경 불필요, v2 공유 안전).
-            window_by_chunk = {s.chunk_id: s.text for s in evidence_pack.snippets}
-            chunks = [
-                # RetrievedChunk 는 pydantic(frozen) — dataclasses.replace 가 아니라
-                # model_copy(update=...) 로 교체.
-                c.model_copy(update={"snippet": window_by_chunk.get(c.chunk_id, c.snippet)})
-                for c in chunks
-            ]
+            with _TRACER.start_as_current_span("agent.evidence_snippet") as s:
+                oi.set_kind(s, oi.KIND_CHAIN)
+                citation_ids_for_snippet = [f"cite-{i}" for i in range(len(chunks))]
+                evidence_pack = self._snippet_extractor.extract(
+                    chunks,
+                    query_text=request.query_text,
+                    entities=entities,
+                    citation_ids=citation_ids_for_snippet,
+                )
+                # 추출된 window 로 각 chunk 의 snippet 을 교체 → 기존 ContextBuilder 가
+                # 그대로 prompt 에 싣는다(ContextBuilder 변경 불필요, v2 공유 안전).
+                window_by_chunk = {s.chunk_id: s.text for s in evidence_pack.snippets}
+                chunks = [
+                    # RetrievedChunk 는 pydantic(frozen) — dataclasses.replace 가 아니라
+                    # model_copy(update=...) 로 교체.
+                    c.model_copy(update={"snippet": window_by_chunk.get(c.chunk_id, c.snippet)})
+                    for c in chunks
+                ]
+                s.set_attribute("snippet.num_snippets", len(evidence_pack.snippets))
+                s.set_attribute("snippet.pack_hash", evidence_pack.pack_hash)
             await emit_step("evidence_snippet", "ok",
                             num_snippets=len(evidence_pack.snippets),
                             pack_hash=evidence_pack.pack_hash)
@@ -580,6 +630,35 @@ class HierarchicalCorrectiveRunner:
                 )
                 s.set_attribute("context_hash", pack.context_hash)
                 oi.set_kind(s, oi.KIND_RETRIEVER)
+                # Node 9 window 가 주입된 chunk 를 RETRIEVER 타일에 노출(v2 parity).
+                oi.set_retrieval_documents(
+                    s,
+                    [
+                        {
+                            "id": c.chunk_id,
+                            "score": c.score,
+                            "content": getattr(c, "snippet", None)
+                            or getattr(c, "text", None)
+                            or getattr(c, "content", ""),
+                            "metadata": {
+                                "document_id": getattr(c, "document_id", None),
+                                "page": getattr(c, "page", None),
+                                "section": getattr(c, "section", None),
+                                "doc_type": getattr(c, "doc_type", None),
+                            },
+                        }
+                        for c in chunks
+                    ],
+                )
+                oi.set_io(
+                    s,
+                    input_value=request.query_text,
+                    output_value={
+                        "context_hash": pack.context_hash,
+                        "num_chunks": len(chunks),
+                        "num_memory_refs": len(memory_refs),
+                    },
+                )
             await emit_step("context_build", "ok", context_hash=pack.context_hash)
 
             # Node 12 — prompt_render (+ citation contract preamble)
@@ -609,6 +688,15 @@ class HierarchicalCorrectiveRunner:
                 if self._citation_contract_sha:
                     s.set_attribute("citation_contract_sha", self._citation_contract_sha)
                 oi.set_kind(s, oi.KIND_CHAIN)
+                oi.set_io(
+                    s,
+                    input_value=request.query_text,
+                    output_value={
+                        "profile_id": rendered.profile_id,
+                        "profile_version": rendered.profile_version,
+                        "rendered_prompt_hash": rendered.rendered_prompt_hash,
+                    },
+                )
                 await self._sink.write_prompt_render_record(
                     request.interaction_id,
                     self._renderer.to_record(rendered, query_text=request.query_text),
@@ -800,6 +888,18 @@ class HierarchicalCorrectiveRunner:
                     regulatory_grounding=regulatory_grounding,
                 )
                 oi.set_kind(_rfmt, oi.KIND_CHAIN)
+                oi.set_io(
+                    _rfmt,
+                    input_value={
+                        "verification_status": verification_status,
+                        "regulatory_grounding": regulatory_grounding,
+                    },
+                    output_value={
+                        "refusal_reason": refusal,
+                        "num_citations": len(citations),
+                        "answer_text": answer_text,
+                    },
+                )
 
             with _TRACER.start_as_current_span("event.persist") as s:
                 event = self._recorder.build(

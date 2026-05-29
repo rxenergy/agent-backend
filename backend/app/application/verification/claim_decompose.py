@@ -6,7 +6,11 @@ from dataclasses import dataclass
 
 from app.application.retrieval.snippet import regex_sentence_split
 from app.domain.verification import Claim, ClaimType
+from app.observability import openinference as oi
+from app.observability.otel import get_tracer
 from app.ports.llm import GrammarSpec, LLMPort
+
+_TRACER = get_tracer("verify")
 
 # v3.1 Node 14 — claim_decompose. 답변을 atomic claim 리스트로 분해.
 # 1차: utility LLM + JSON-schema grammar(temperature 0). 실패(파싱불가/미가용)
@@ -58,20 +62,35 @@ class ClaimDecomposer:
     async def decompose(self, answer_text: str) -> DecomposeResult:
         prompt = _PROMPT.format(answer=answer_text)
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
-        try:
-            res = await self._llm.generate(
-                prompt,
-                model_options={"temperature": 0.0},
-                grammar=GrammarSpec(kind="json_schema", value=CLAIM_SCHEMA),
-            )
-            claims = _parse_llm_claims(res.text)
-            if claims:
-                return DecomposeResult(tuple(claims), "llm", prompt_hash)
-        except Exception:  # noqa: BLE001 — 미가용/파싱불가 → 결정론 fallback
-            pass
-        return DecomposeResult(
-            tuple(_fallback_decompose(answer_text)), "fallback", prompt_hash
-        )
+        # LLM 분해 호출을 Phoenix LLM span 으로 계측 — fallback 경로도 method 로
+        # 기록해 silent degrade 가 트레이스에서 보이게 한다.
+        with _TRACER.start_as_current_span("verify.claim_decompose") as span:
+            oi.set_kind(span, oi.KIND_LLM)
+            oi.set_io(span, input_value=prompt)
+            span.set_attribute("decompose.prompt_hash", prompt_hash)
+            try:
+                res = await self._llm.generate(
+                    prompt,
+                    model_options={"temperature": 0.0},
+                    grammar=GrammarSpec(kind="json_schema", value=CLAIM_SCHEMA),
+                )
+                oi.set_llm(
+                    span, model_name=res.model_id, prompt=prompt, completion=res.text,
+                    prompt_tokens=int(res.token_usage.get("prompt_tokens", 0)),
+                    completion_tokens=int(res.token_usage.get("completion_tokens", 0)),
+                )
+                claims = _parse_llm_claims(res.text)
+                if claims:
+                    span.set_attribute("decompose.method", "llm")
+                    span.set_attribute("decompose.num_claims", len(claims))
+                    return DecomposeResult(tuple(claims), "llm", prompt_hash)
+            except Exception:  # noqa: BLE001 — 미가용/파싱불가 → 결정론 fallback
+                pass
+            fb = _fallback_decompose(answer_text)
+            span.set_attribute("decompose.method", "fallback")
+            span.set_attribute("decompose.num_claims", len(fb))
+            oi.set_io(span, output_value={"method": "fallback", "num_claims": len(fb)})
+            return DecomposeResult(tuple(fb), "fallback", prompt_hash)
 
 
 def _parse_llm_claims(text: str) -> list[Claim]:

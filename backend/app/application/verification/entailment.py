@@ -4,7 +4,11 @@ import json
 from dataclasses import dataclass
 
 from app.domain.verification import Claim
+from app.observability import openinference as oi
+from app.observability.otel import get_tracer
 from app.ports.llm import GrammarSpec, LLMPort
+
+_TRACER = get_tracer("verify")
 
 # v3.1 Node 15 step 3 — textual entailment. spec 옵션 B(PoC 기본): utility LLM
 # 1 batch 호출 + schema-constrained. 4-step 중 *유일하게* "claim 이 근거에
@@ -56,15 +60,30 @@ class EntailmentChecker:
         if not claims:
             return {}
         prompt = _build_prompt(claims, evidence_by_cite)
-        try:
-            res = await self._llm.generate(
-                prompt,
-                model_options={"temperature": 0.0},
-                grammar=GrammarSpec(kind="json_schema", value=ENTAIL_SCHEMA),
-            )
-            return _parse(res.text)
-        except Exception:  # noqa: BLE001
-            return {}
+        # 함의 판정 LLM 호출을 Phoenix LLM span 으로 계측. 미가용/파싱불가 시
+        # entailment.ran=False 로 기록(verifier 가 citation-grounded degrade).
+        with _TRACER.start_as_current_span("verify.entailment") as span:
+            oi.set_kind(span, oi.KIND_LLM)
+            oi.set_io(span, input_value=prompt)
+            span.set_attribute("entailment.num_claims", len(claims))
+            try:
+                res = await self._llm.generate(
+                    prompt,
+                    model_options={"temperature": 0.0},
+                    grammar=GrammarSpec(kind="json_schema", value=ENTAIL_SCHEMA),
+                )
+                oi.set_llm(
+                    span, model_name=res.model_id, prompt=prompt, completion=res.text,
+                    prompt_tokens=int(res.token_usage.get("prompt_tokens", 0)),
+                    completion_tokens=int(res.token_usage.get("completion_tokens", 0)),
+                )
+                verdicts = _parse(res.text)
+                span.set_attribute("entailment.num_verdicts", len(verdicts))
+                span.set_attribute("entailment.ran", True)
+                return verdicts
+            except Exception:  # noqa: BLE001
+                span.set_attribute("entailment.ran", False)
+                return {}
 
 
 def _build_prompt(claims: list[Claim], evidence_by_cite: dict[str, str]) -> str:
