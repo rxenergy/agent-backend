@@ -65,7 +65,7 @@ prompt_profiles:
       system: {path: system/smr_agent_system_v4.md, version: v4, sha256: "891fc4dafdec1bb2e6d386e13aaf5ceaee658238143847ecde7fe92f3e494d07"}
       object: {path: object/o1_vendor_v1.md,        version: v1, sha256: "03c1f9348d1c1235079a8b06484113018d51e6f2eed85e9317626e2fd0cad222"}
       depth:  {path: depth/d2_technical_v1.md,      version: v1, sha256: "bded8e63fa3443a49845b1bd7a174fbfbe6bd30d12adf6cd1fb1279c4b5e052d"}
-      cell:   {path: cell/o1_d2_vendor_technical_v1.md, version: v1, sha256: "d9924fa6181d8a203b03b118d146d2734573f0173f92afd2a755f650aa7c68fc"}
+      cell:   {path: cell/o1_d2_vendor_technical_v2.md, version: v2, sha256: "2b8153755a3843dcc09a8e0e5f64580b0e75803c72073bb898f3a67ed14a9b6d"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
     model_options: {temperature: 0.1, max_tokens: 2000}
 
@@ -114,7 +114,7 @@ prompt_profiles:
       system: {path: system/smr_agent_system_v4.md, version: v4, sha256: "891fc4dafdec1bb2e6d386e13aaf5ceaee658238143847ecde7fe92f3e494d07"}
       object: {path: object/o2_regulation_v1.md,    version: v1, sha256: "b849699cb8ec810255da7412950b36292d366f64fd0f36ddd35d53bd1cc20456"}
       depth:  {path: depth/d3_formal_v1.md,         version: v1, sha256: "a945d00cb8d1849bf5a7eba8a436b336a9ee5979ff713d553b4a8118cb80fab0"}
-      cell:   {path: cell/o2_d3_regulation_formal_v1.md, version: v1, sha256: "121cbd206cedb7c17c7437ffbe95e6eacb74d3dab2045233803df926bcf8d974"}
+      cell:   {path: cell/o2_d3_regulation_formal_v2.md, version: v2, sha256: "9bb1a69fe00877663dce65642c8858254a190cf5e153a7aa87183ac0bc2c74a4"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
     model_options: {temperature: 0.05, max_tokens: 2000}
 
@@ -139,7 +139,7 @@ prompt_profiles:
       system: {path: system/smr_agent_system_v4.md, version: v4, sha256: "891fc4dafdec1bb2e6d386e13aaf5ceaee658238143847ecde7fe92f3e494d07"}
       object: {path: object/o3_rai_v1.md,           version: v1, sha256: "0f1bf1b028a42c12e33649fa07ca7fef65bda1e0dc598691d50b2c80eff8c8df"}
       depth:  {path: depth/d2_technical_v1.md,      version: v1, sha256: "bded8e63fa3443a49845b1bd7a174fbfbe6bd30d12adf6cd1fb1279c4b5e052d"}
-      cell:   {path: cell/o3_d2_rai_technical_v1.md, version: v1, sha256: "6be4d5804f92ca80f3b1050103c9185c518a0479a25af5cdfc3f9d081e0f102c"}
+      cell:   {path: cell/o3_d2_rai_technical_v2.md, version: v2, sha256: "e0079d02b96bd4fc2c56a233c2e6a6a10be5e0b4af355dce298cc2c76382b47c"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
     model_options: {temperature: 0.1, max_tokens: 2000}
 
@@ -176,7 +176,7 @@ prompt_profiles:
       system: {path: system/smr_agent_system_v4.md, version: v4, sha256: "891fc4dafdec1bb2e6d386e13aaf5ceaee658238143847ecde7fe92f3e494d07"}
       object: {path: object/o4_relation_v1.md,      version: v1, sha256: "3b887f01c463f2ea4d03106df622f8199fbbc0ac51d99689d23db5c92dc4dc63"}
       depth:  {path: depth/d2_technical_v1.md,      version: v1, sha256: "bded8e63fa3443a49845b1bd7a174fbfbe6bd30d12adf6cd1fb1279c4b5e052d"}
-      cell:   {path: cell/o4_d2_relation_technical_v1.md, version: v1, sha256: "9c59a279eb91d51c38e95cb0f11e10c7b00d59eecc457ffcb4456ea738dee46a"}
+      cell:   {path: cell/o4_d2_relation_technical_v2.md, version: v2, sha256: "0733b3c26018127772335db568c7503b7c848e20980dc2e641bd8d6637c5ca29"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
     model_options: {temperature: 0.1, max_tokens: 2000}
 
