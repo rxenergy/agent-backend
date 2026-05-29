@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # Retriever backend (W1)
     retriever_backend: Literal["local", "opensearch"] = "local"
     retriever_top_k: int = 3
+    # v3.1 Node 5 — 전략별 후보 풀 fetch 깊이 (spec ~20). 최종 top_k 와 분리:
+    # 깊게 fetch 해 RRF 융합해야 더 나은 상위 top_k 를 고른다.
+    retrieval_fetch_k: int = 20
     retriever_min_score: float = 0.0
     retriever_k_dense: int = 50
     opensearch_endpoint: str = "http://opensearch:9200"

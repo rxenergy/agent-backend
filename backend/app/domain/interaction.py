@@ -146,6 +146,9 @@ class InteractionEvent:
     query_understanding: dict[str, Any] | None = None
     retrieval_plan_hash: str | None = None
     evaluator_policy_hash: str | None = None
+    # 규제 hard gate 가 실제로 강제됐는지(v1=false). false 인 PASS 는 규제 근거가
+    # *검증된* PASS 가 아님 — 감사/defensibility 가 이 둘을 구분해야 한다.
+    regulatory_enforced: bool | None = None
     per_chunk_signals: tuple[ChunkSignals, ...] = ()
     per_sub_question_decisions: tuple[SubQuestionDecision, ...] = ()
     recover_rounds: tuple[RecoverRound, ...] = ()

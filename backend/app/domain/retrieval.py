@@ -43,6 +43,10 @@ class RetrieverSearchInput(BaseModel):
     scenario_object: str | None = None
     scenario_depth: str | None = None
     entities: dict[str, list[str]] = Field(default_factory=dict)
+    # v3.1 Node 5 다전략 검색. 코드(dispatcher)가 전략별로 한 번씩 호출한다.
+    # OpenSearch 어댑터는 이 값을 search_pipeline 선택에 사용(동일 hybrid DSL에
+    # weight 변종 pipeline 적용). local 어댑터는 무시. 미지정 시 hybrid.
+    strategy: str = "hybrid"
 
 
 class RetrieverSearchOutput(BaseModel):
@@ -129,6 +133,11 @@ class EvaluationResult:
     per_sub_question: tuple[SubQuestionDecision, ...] = ()
     overall_decision: str = GateDecision.FAIL.value
     evaluator_policy_hash: str | None = None
+    # v3.1 — 규제 hard gate(authority_tier)가 *실제로 강제되었는지*. v1 에서는
+    # clause_id/effective_on 부재 + collection-유도 tier 라 false. 이 플래그가
+    # false 인 PASS 는 "규제 근거가 검증된 PASS"가 아님을 downstream/감사에
+    # 알린다(advisor: unknown 이 verified 로 둔갑하지 않게).
+    regulatory_enforced: bool = False
 
 
 @dataclass(frozen=True)

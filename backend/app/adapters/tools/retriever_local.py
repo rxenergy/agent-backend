@@ -25,6 +25,13 @@ class LocalRetrieverTool:
             tool_input = RetrieverSearchInput.model_validate(tool_input)
 
         seed = hashlib.sha256(tool_input.query_text.encode("utf-8")).hexdigest()
+        # 현실 반영: 검색으로 올라온 chunk 는 질의어·엔티티를 포함한다(BM25/dense 가
+        # 그래서 올렸다). snippet 에 query_text + entity 값을 넣어 Node 6 의 lexical/
+        # entity 신호가 fake 경로에서도 의미를 갖게 한다(없으면 evaluator 가 전량
+        # WEAK/FAIL → 로컬 dev/데모가 깨짐).
+        entity_terms = " ".join(
+            v for vs in (tool_input.entities or {}).values() for v in vs if v
+        )
         chunks = [
             RetrievedChunk(
                 chunk_id=f"chunk-{seed[:8]}-{i}",
@@ -32,10 +39,7 @@ class LocalRetrieverTool:
                 score=round(0.9 - i * 0.1, 3),
                 page=10 + i,
                 section=f"§{i + 1}",
-                snippet=(
-                    f"[fake snippet {i} for "
-                    f"{tool_input.scenario_object or '?'}/{tool_input.scenario_depth or '?'}]"
-                ),
+                snippet=f"[fake {i}] {tool_input.query_text} {entity_terms}".strip(),
             )
             for i in range(max(1, tool_input.top_k))
         ]

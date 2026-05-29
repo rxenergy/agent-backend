@@ -73,6 +73,7 @@ class OpenSearchRetrieverTool:
         password: str | None = None,
         timeout_s: float = 5.0,
         verify_certs: bool = False,
+        strategy_pipelines: dict[str, str] | None = None,
     ) -> None:
         if not endpoint:
             raise ValueError("OpenSearchRetrieverTool requires endpoint")
@@ -88,6 +89,19 @@ class OpenSearchRetrieverTool:
         self._auth = (username, password) if username else None
         self._timeout_s = timeout_s
         self._verify = verify_certs
+        # v3.1 Node 5 strategy → search_pipeline. "hybrid" 는 생성자 기본
+        # pipeline(설정값) 사용. 나머지는 repo 의 weight-변종 pipeline 으로 매핑.
+        self._strategy_pipelines: dict[str, str] = strategy_pipelines or {
+            "bm25": "nrc-hybrid-bm25-only",
+            "vector": "nrc-hybrid-dense-only",
+            "dense": "nrc-hybrid-dense-only",
+            "sparse": "nrc-hybrid-sparse-only",
+        }
+
+    def _pipeline_for_strategy(self, strategy: str | None) -> str | None:
+        if strategy and strategy != "hybrid" and strategy in self._strategy_pipelines:
+            return self._strategy_pipelines[strategy]
+        return self._search_pipeline
 
     async def invoke(
         self,
@@ -108,8 +122,13 @@ class OpenSearchRetrieverTool:
         )
         url = f"{self._endpoint}/{self._index}/_search"
         params: dict[str, str] = {}
-        if self._search_pipeline:
-            params["search_pipeline"] = self._search_pipeline
+        # v3.1 Node 5: strategy → search_pipeline. 단일 전략 pipeline 은 동일한
+        # 3-sub-query hybrid DSL 에 weight 변종을 적용한다 (bm25-only=[1,0,0],
+        # dense-only=[0,1,0], hybrid=[.2,.3,.5]). DSL 은 그대로, pipeline 만 교체.
+        # 미지의 strategy 는 생성자 기본 pipeline 으로 폴백.
+        pipeline = self._pipeline_for_strategy(tool_input.strategy)
+        if pipeline:
+            params["search_pipeline"] = pipeline
 
         try:
             async with httpx.AsyncClient(

@@ -223,6 +223,8 @@ async def build_container(settings: Settings) -> AppContainer:
     context_builder: ContextBuilder | None = None
     classifier: Any = None
     summarizer: ConversationSummarizer | None = None
+    retrieval_planner: Any = None
+    retrieval_evaluator: Any = None
 
     if needs_tool_stack:
         session_store: SessionMemoryStore
@@ -233,6 +235,21 @@ async def build_container(settings: Settings) -> AppContainer:
             session_store = InMemorySessionMemoryStore()
 
         registry = ToolRegistry.from_yaml(settings.tool_registry_path)
+
+        # v3.1 Node 4 planner — `retrieval_strategies.yaml` (tools/ sibling of
+        # the tool registry). 없으면 단일 hybrid 폴백(변형이 default() 사용).
+        from app.application.retrieval.planner import RetrievalPlanner
+
+        _strategies_path = Path(settings.tool_registry_path).parent / "retrieval_strategies.yaml"
+        if _strategies_path.is_file():
+            retrieval_planner = RetrievalPlanner.from_yaml(_strategies_path)
+
+        # v3.1 Node 6 evaluator — `evaluator_policy.yaml` (tools/ sibling).
+        from app.application.retrieval.evaluator import RetrievalEvaluator
+
+        _policy_path = Path(settings.tool_registry_path).parent / "evaluator_policy.yaml"
+        if _policy_path.is_file():
+            retrieval_evaluator = RetrievalEvaluator.from_yaml(_policy_path)
 
         if settings.retriever_backend == "opensearch":
             preflight_severity = _resolve_preflight_severity(settings)
@@ -380,6 +397,8 @@ async def build_container(settings: Settings) -> AppContainer:
         context_builder=context_builder,
         classifier=classifier,
         summarizer=summarizer,
+        retrieval_planner=retrieval_planner,
+        retrieval_evaluator=retrieval_evaluator,
         tunables={
             "classification_threshold": settings.classification_threshold,
             "verification_citation_threshold": settings.verification_citation_threshold,
@@ -387,6 +406,10 @@ async def build_container(settings: Settings) -> AppContainer:
             "verification_retry_on_fail": settings.verification_retry_on_fail,
             "retriever_top_k": settings.retriever_top_k,
             "retriever_min_score": settings.retriever_min_score,
+            "retrieval_fetch_k": settings.retrieval_fetch_k,
+            # 규제 hard gate(authority_tier) 강제는 v2 스키마 선언 시에만 — v1 은
+            # collection-유도 tier 라 vendor(tertiary) 를 차단하면 안 됨.
+            "regulatory_hard_gates_enforced": settings.opensearch_schema_version == "v2",
             "active_cells_mode": settings.active_cells_mode,
             # v3.1 (hierarchical_corrective). Ignored by other variants.
             "llm_call_budget": getattr(settings, "llm_call_budget", 8),

@@ -45,17 +45,14 @@ from app.domain.interaction import (
     Citation,
     ToolCallRecord,
 )
+from app.application.retrieval.dispatcher import RetrievalDispatcher
+from app.application.retrieval.evaluator import RetrievalEvaluator
+from app.application.retrieval.planner import RetrievalPlanner
 from app.domain.memory import MemoryRef, MemoryReviewStatus, StalenessStatus
 from app.domain.query import QueryPlan
 from app.domain.retrieval import (
-    ChunkSignals,
-    EvaluationResult,
     EvidencePack,
     GateDecision,
-    RetrievalPlan,
-    RetrievalStrategy,
-    RetrieverSearchOutput,
-    SubQuestionDecision,
 )
 from app.observability import openinference as oi
 from app.observability.otel import get_tracer
@@ -122,9 +119,13 @@ class HierarchicalCorrectiveRunner:
         summarizer: ConversationSummarizer | None = None,
         retriever_top_k: int = 3,
         retriever_min_score: float = 0.0,
+        retrieval_fetch_k: int = 20,
         active_cells_mode: str = "all",
         llm_call_budget: int = 8,
         citation_contract_path: str | None = None,
+        retrieval_planner: RetrievalPlanner | None = None,
+        retrieval_evaluator: RetrievalEvaluator | None = None,
+        regulatory_hard_gates_enforced: bool = False,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
@@ -142,8 +143,17 @@ class HierarchicalCorrectiveRunner:
         self._summarizer = summarizer
         self._top_k = retriever_top_k
         self._min_score = retriever_min_score
+        self._fetch_k = max(retrieval_fetch_k, retriever_top_k)
         self._active_cells_mode = active_cells_mode
         self._llm_call_budget = llm_call_budget
+        # Node 4/5 — 룰 기반 planner + 다전략 RRF dispatcher. planner 미주입 시
+        # 단일 hybrid 폴백. dispatcher 는 tool_executor 위의 얇은 래퍼.
+        self._planner = retrieval_planner or RetrievalPlanner.default()
+        self._dispatcher = RetrievalDispatcher(tool_executor, rrf_k=self._planner.rrf_k)
+        # Node 6 — 5-신호 evaluator. regulatory hard gate 강제 여부는
+        # opensearch_schema_version=="v2" 에 연동(profiles 에서 주입).
+        self._evaluator = retrieval_evaluator or RetrievalEvaluator.default()
+        self._regulatory_enforced = regulatory_hard_gates_enforced
         # Node 12 — citation contract preamble (PR-7 fragment). Loaded once;
         # prepended to the context block so it rides in the rendered prompt and
         # its presence is reflected in `rendered_prompt_hash`.
@@ -299,17 +309,17 @@ class HierarchicalCorrectiveRunner:
                             sub_questions=len(query_plan.sub_questions))
 
             # === Phase B ===================================================
-            # Node 4 — retrieval_plan_template (STUB: single-strategy plan)
+            # Node 4 — retrieval_plan_template (룰 기반, LLM 미사용)
             await emit_step("retrieval_plan", "started")
-            entity_hash = _sha16(repr(sorted((k, tuple(v)) for k, v in entities.items())))
-            plan = RetrievalPlan(
-                rule_id="default_single",
-                strategies=(RetrievalStrategy(name="retriever.search"),),
-                fusion="none",
-                plan_hash=_sha16("default_single|" + entity_hash),
+            plan = self._planner.plan(
+                scenario_object=scenario_object,
+                scenario_depth=scenario_depth,
+                entities=entities,
+                intents=query_plan.intents,
             )
             await emit_step("retrieval_plan", "ok", rule_id=plan.rule_id,
-                            plan_hash=plan.plan_hash)
+                            plan_hash=plan.plan_hash,
+                            strategies=[s.name for s in plan.strategies])
 
             # Node 3 pre-step memory.session_load (needed by Node 10 decision).
             session_load = await self._tools.invoke(
@@ -325,63 +335,63 @@ class HierarchicalCorrectiveRunner:
                 prior_entities = session_load.output.get("active_entities") or {}
                 conversation_summary = session_load.output.get("conversation_summary")
 
-            # Node 5 — retrieval_execute (single search; fan-out + RRF = PR-4)
+            # Node 5 — retrieval_execute (다전략 fan-out + RRF)
             await emit_step("retrieval_execute", "started",
                             strategies=[st.name for st in plan.strategies])
             try:
-                retrieval = await self._tools.invoke(
-                    "retriever.search",
-                    {
-                        "query_text": request.query_text,
-                        "top_k": self._top_k,
-                        "scenario_object": scenario_object,
-                        "scenario_depth": scenario_depth,
-                        "entities": entities,
-                    },
-                    ctx,
+                dispatch = await self._dispatcher.execute(
+                    plan,
+                    query_text=request.query_text,
+                    fetch_k=self._fetch_k,
+                    scenario_object=scenario_object,
+                    scenario_depth=scenario_depth,
+                    entities=entities,
+                    ctx=ctx,
+                    min_score=self._min_score,  # raw 필터는 dispatcher 가 융합 전 적용
                 )
             except RequiredToolFailed as e:
                 return await self._refuse(
                     request, started, tool_calls, scenario_object, scenario_depth,
                     RefusalReason.RETRIEVAL_NO_RESULT, conf, error_code=e.code.value,
                 )
-            record(retrieval)
-            retrieval_output = RetrieverSearchOutput.model_validate(retrieval.output or {})
-            chunks = [c for c in retrieval_output.chunks if c.score >= self._min_score]
+            for r in dispatch.tool_results:
+                record(r)
+            # 실제 실행된 전략으로 plan 을 확정(감사 trace 에 전략명 명시).
+            if dispatch.executed:
+                plan = replace(plan, strategies=tuple(dispatch.executed))
+            # 융합 순서가 권위(RRF rank). raw score 로 재필터하지 않는다(계약).
+            # 깊은 fetch 풀에서 상위 top_k 만 다운스트림으로.
+            pool = dispatch.fused_chunks
+            chunks = pool[: self._top_k]
             if not chunks:
                 return await self._refuse(
                     request, started, tool_calls, scenario_object, scenario_depth,
                     RefusalReason.RETRIEVAL_NO_RESULT, conf, error_code="tool_empty_result",
                 )
-            await emit_step("retrieval_execute", "ok", num_chunks=len(chunks))
+            await emit_step("retrieval_execute", "ok",
+                            num_chunks=len(chunks), pool_size=len(pool),
+                            strategies_ok=[s.name for s in dispatch.executed],
+                            strategies_failed=dispatch.failed_strategies)
 
-            # Node 6 — retrieval_evaluate (STUB: min_score gate → all PASS).
+            # Node 6 — retrieval_evaluate (5-신호 결정론 게이트)
             await emit_step("retrieval_evaluate", "started")
-            per_chunk = tuple(
-                ChunkSignals(
-                    chunk_id=c.chunk_id,
-                    s_lex=float(c.score),
-                    s_total=float(c.score),
-                    hard_gates_passed=True,
-                    decision=GateDecision.PASS.value,
-                )
-                for c in chunks
+            evaluation = self._evaluator.evaluate(
+                chunks,
+                query_text=request.query_text,
+                entities=entities,
+                version_constraint=query_plan.version_constraint,
+                rrf_scores=dispatch.rrf_scores,
+                regulatory_enforced=self._regulatory_enforced,
             )
-            evaluation = EvaluationResult(
-                per_chunk=per_chunk,
-                per_sub_question=(
-                    SubQuestionDecision(
-                        sub_question_id="sq0",
-                        decision=GateDecision.PASS.value,
-                        n_pass=len(per_chunk),
-                    ),
-                ),
-                overall_decision=GateDecision.PASS.value,
-                evaluator_policy_hash=None,  # PR-5 will set this
-            )
+            # NOTE: verdict 는 PR-5 에선 *기록·표면화*까지. WEAK→recover / FAIL
+            # exhausted→refuse 분기는 Node 7(recover, PR-9)에서 배선된다. 그
+            # 전까지 워크플로우는 verdict 와 무관하게 진행하되, regulatory_enforced
+            # 와 per_chunk_signals 가 event 에 실려 사후 판단을 가능케 한다.
             await emit_step("retrieval_evaluate", "ok",
                             overall=evaluation.overall_decision,
-                            num_pass=len(per_chunk))
+                            regulatory_enforced=evaluation.regulatory_enforced,
+                            num_pass=sum(1 for s in evaluation.per_chunk
+                                         if s.decision == GateDecision.PASS.value))
 
             # Node 7 — retrieval_recover (STUB: skipped; PR-9)
             await emit_step("retrieval_recover", "skipped")
@@ -698,6 +708,7 @@ class HierarchicalCorrectiveRunner:
                     },
                     retrieval_plan_hash=plan.plan_hash,
                     evaluator_policy_hash=evaluation.evaluator_policy_hash,
+                    regulatory_enforced=evaluation.regulatory_enforced,
                     per_chunk_signals=evaluation.per_chunk,
                     per_sub_question_decisions=evaluation.per_sub_question,
                     recover_rounds=(),
@@ -873,7 +884,11 @@ def _build_hierarchical_corrective(
         summarizer=deps.summarizer,
         retriever_top_k=t.get("retriever_top_k", 3),
         retriever_min_score=t.get("retriever_min_score", 0.0),
+        retrieval_fetch_k=t.get("retrieval_fetch_k", 20),
         active_cells_mode=t.get("active_cells_mode", "all"),
         llm_call_budget=t.get("llm_call_budget", 8),
         citation_contract_path=t.get("citation_contract_path"),
+        retrieval_planner=deps.retrieval_planner,
+        retrieval_evaluator=deps.retrieval_evaluator,
+        regulatory_hard_gates_enforced=t.get("regulatory_hard_gates_enforced", False),
     )
