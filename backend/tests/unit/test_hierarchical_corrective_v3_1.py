@@ -300,6 +300,43 @@ async def test_recover_weak_exhausted_proceeds_not_refused() -> None:
 
 
 @pytest.mark.asyncio
+async def test_weak_evaluation_injects_quality_advisory_into_prompt() -> None:
+    """WEAK 평가 시 Node 12 가 검색 품질 advisory 를 *생성 전* 프롬프트에 싣는다 —
+    답변이 '검색 근거가 왜 부족한지'를 설명하도록(생성-검증 결합 결함 보완)."""
+    fake = _SequenceRetriever(["weak"])
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), retriever_tool=fake)
+        req = AgentRequest(interaction_id="hwq", query_text="i-SMR ECCS passive design",
+                           session_id="swq")
+        resp = await runner.run(req)
+        assert resp.evaluation.overall_decision == "weak"
+        rec = json.loads(
+            next((Path(tmp) / "events" / "t" / "prompt_render_records").rglob("*.json"))
+            .read_text(encoding="utf-8")
+        )
+        prompt = rec["rendered_prompt"]
+        assert "RETRIEVAL QUALITY ADVISORY" in prompt
+        assert "WEAK" in prompt
+        # 거부가 아니라 '한계를 밝힌 답변'을 요구하는 톤인지(proceed-on-WEAK 보존).
+        assert "답변 거부가 아니라" in prompt
+
+
+@pytest.mark.asyncio
+async def test_pass_evaluation_omits_quality_advisory() -> None:
+    """PASS 경로에는 품질 advisory 가 프롬프트에 실리지 않는다(WEAK 한정)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), llm=_ClaimAwareLLM(entailment_status="supported"))
+        req = AgentRequest(interaction_id="hpq", query_text="i-SMR ECCS 설계", session_id="spq")
+        resp = await runner.run(req)
+        assert resp.evaluation.overall_decision == "pass"
+        rec = json.loads(
+            next((Path(tmp) / "events" / "t" / "prompt_render_records").rglob("*.json"))
+            .read_text(encoding="utf-8")
+        )
+        assert "RETRIEVAL QUALITY ADVISORY" not in rec["rendered_prompt"]
+
+
+@pytest.mark.asyncio
 async def test_contradicted_claim_refuses_with_verification_failed() -> None:
     """Node 15 가 contradicted 판정 → 답변 폐기 → VERIFICATION_FAILED refusal
     (답변을 버리는 안전-critical 분기)."""

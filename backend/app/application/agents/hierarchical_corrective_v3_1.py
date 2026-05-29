@@ -71,6 +71,16 @@ def _sha16(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+# Node 6/7 진단 라벨(RetrievalRecoverer.diagnose) → 생성 LLM 이 사용자에게 설명할
+# 수 있는 한국어 사유. WEAK advisory(_retrieval_quality_note)에서 재사용.
+_RETRIEVAL_DIAGNOSIS_REASON = {
+    "entity_coverage_low": "질의의 핵심 용어·엔티티(노형명·규제 ID 등)와 검색된 근거의 매칭이 약합니다.",
+    "low_scores": "검색된 근거의 어휘·의미 일치 점수가 전반적으로 낮습니다.",
+    "generic": "통과 기준을 명확히 충족한 근거가 부족합니다(다수 근거가 경계선 점수).",
+    "no_results": "충분한 근거를 확보하지 못했습니다.",
+}
+
+
 class HierarchicalCorrectiveRunner:
     """v3.1 — 16-node, 4-Phase Hierarchical Corrective Workflow
     (docs/plans/hierarchical_corrective_workflow.v1.md).
@@ -686,12 +696,28 @@ class HierarchicalCorrectiveRunner:
                         + "\n\n"
                         + context_block
                     )
+                # Node 6/7 이 WEAK(빈약) 로 귀결되면 *생성 전에* 그 진단 맥락을 프롬프트
+                # 최상단에 실어, 답변이 "검색 근거가 왜 부족한지"를 스스로 설명하게 한다.
+                # 스트리밍 후 사후검증은 이미 전송된 텍스트를 되돌릴 수 없으므로(생성-검증
+                # 결합 결함) 한계 고지는 생성 시점에 들어가야 한다(CLAUDE.md §6).
+                quality_note = self._retrieval_quality_note(evaluation, recover_rounds)
+                if quality_note:
+                    context_block = (
+                        "# 검색 품질 경고 (RETRIEVAL QUALITY ADVISORY)\n"
+                        + quality_note
+                        + "\n\n"
+                        + context_block
+                    )
                 rendered = self._renderer.render(
                     profile, query_text=request.query_text, context_block=context_block,
                 )
                 s.set_attribute("rendered_prompt_hash", rendered.rendered_prompt_hash)
                 if self._citation_contract_sha:
                     s.set_attribute("citation_contract_sha", self._citation_contract_sha)
+                s.set_attribute("retrieval_quality_advisory", quality_note is not None)
+                if quality_note is not None:
+                    s.set_attribute("retrieval_diagnosis",
+                                    self._recoverer.diagnose(evaluation))
                 oi.set_kind(s, oi.KIND_CHAIN)
                 oi.set_io(
                     s,
@@ -710,7 +736,8 @@ class HierarchicalCorrectiveRunner:
                     request.interaction_id, self._context_builder.to_snapshot(pack),
                 )
             await emit_step("prompt_render", "ok", profile_id=rendered.profile_id,
-                            profile_version=rendered.profile_version)
+                            profile_version=rendered.profile_version,
+                            retrieval_advisory=quality_note is not None)
 
             # Node 13 — generation
             await emit_step("generation", "started", llm_id=llm_id)
@@ -985,6 +1012,55 @@ class HierarchicalCorrectiveRunner:
             oi.set_io(root, output_value=response.answer_text)
 
         return response
+
+    # ------------------------------------------------------------------
+    def _retrieval_quality_note(
+        self, evaluation, recover_rounds: list[RecoverRound],
+    ) -> str | None:
+        """Node 6/7 이 WEAK 로 귀결될 때, 생성 LLM 에게 '검색 근거가 왜 약한지'를
+        전달하는 결정론 advisory 를 만든다. PASS 면 None(FAIL 은 Node 7 후 이미
+        refuse 되어 여기 도달하지 않는다).
+
+        WEAK 는 '검색 실패'가 아니라 '근거 빈약'이다 — proceed-on-WEAK 는 의도된
+        설계(Node 15 claim gate 가 backstop, run() L514~). 따라서 이 문구는 답변
+        *거부* 가 아니라 '한계를 명시한 답변' 을 유도하도록 조정한다. 진단 라벨
+        (diagnose) 만으로는 종종 'generic' 으로 떨어지므로, per_chunk 신호 집계를
+        함께 실어 어느 차원이 약한지 구체화한다(advisor #3)."""
+        if evaluation.overall_decision != GateDecision.WEAK.value:
+            return None
+        diagnosis = self._recoverer.diagnose(evaluation)
+        reason = _RETRIEVAL_DIAGNOSIS_REASON.get(
+            diagnosis, "검색 신호가 전반적으로 약합니다."
+        )
+        pc = evaluation.per_chunk
+        n = max(1, len(pc))
+        avg_lex = sum(c.s_lex for c in pc) / n
+        avg_cov = sum(c.entity_coverage for c in pc) / n
+        avg_reg = sum(c.s_reg for c in pc) / n
+        avg_total = sum(c.s_total for c in pc) / n
+        sq = evaluation.per_sub_question[0] if evaluation.per_sub_question else None
+        counts = (
+            f"통과 {sq.n_pass} · 경계 {sq.n_weak} · 미달 {sq.n_fail}"
+            if sq else "집계 없음"
+        )
+        recover_note = (
+            f"검색 복구를 {len(recover_rounds)}회 시도했으나 근거 품질이 기준에 미치지 못했습니다."
+            if recover_rounds
+            else "추가 검색 복구로도 개선 여지가 제한적이었습니다."
+        )
+        return (
+            f"검색 게이트 평가 결과 이번 근거는 'WEAK(빈약)' 등급입니다(진단: {diagnosis}).\n"
+            f"- 사유: {reason}\n"
+            f"- 근거 {len(pc)}건 게이트 판정: {counts}\n"
+            f"- 평균 신호(1.0 만점): 어휘일치 {avg_lex:.2f} · 엔티티커버리지 {avg_cov:.2f} · "
+            f"규제권위 {avg_reg:.2f} · 종합 {avg_total:.2f}\n"
+            f"- {recover_note}\n"
+            "지침: 위 근거만으로 답변하되, 답변 서두에 어떤 측면(예: 핵심 용어·엔티티 "
+            "매칭 부족, 규제 권위 근거 약함)에서 검색 근거가 부족한지와 그로 인한 답변의 "
+            "한계를 1~2문장으로 명시하십시오. 근거로 확인되지 않은 사항은 단정하지 말고 "
+            "확인되지 않았음을 분명히 구분하십시오. (이것은 답변 거부가 아니라, 한계를 "
+            "투명하게 밝힌 답변을 요구하는 것입니다.)"
+        )
 
     # ------------------------------------------------------------------
     async def _classify(self, request: AgentRequest) -> ClassificationResult:

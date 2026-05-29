@@ -60,8 +60,7 @@ class PromptRenderer:
         fragment_versions: dict[str, str] = {}
         fragment_hashes: dict[str, str] = {}
 
-        # for name in ("system", "object", "depth", "cell"):
-        for name in ("system", "object", "depth"):
+        for name in ("system", "object", "depth", "cell"):
             frag = profile.fragment(name)
             if frag is None:
                 continue
@@ -72,7 +71,7 @@ class PromptRenderer:
                 "system": "# SYSTEM",
                 "object": f"# OBJECT [{profile.scenario_object}]",
                 "depth": f"# DEPTH [{profile.scenario_depth}]",
-                # "cell": "# CELL",
+                "cell": "# CELL",
             }[name]
             parts.append(f"{header}\n{frag.content}")
 
