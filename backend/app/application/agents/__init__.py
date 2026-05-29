@@ -3,3 +3,4 @@
 # `variants/registry.yaml` entry — no edits to `config/profiles.py`.
 from app.application.agents import fake_echo_v0  # noqa: F401
 from app.application.agents import sequential_tool_routed_v2  # noqa: F401
+from app.application.agents import hierarchical_corrective_v3_1  # noqa: F401
