@@ -42,13 +42,15 @@ variants:
   # from stub. compatible_llms stays pool-wide so the fake-echo unit path works.
   hierarchical_corrective_v3_1:
     compatible_llms: ["*"]
+    # citation_check / faithfulness_check 는 의도적으로 제외 — Node 15 claim
+    # verifier 가 citation resolution 을 자체 set-lookup 으로 수행하고 faithfulness
+    # 는 per-claim entailment 로 대체(retired). document.resolve_citation 은
+    # resolvable id 산출에 여전히 사용.
     required_tools:
       - retriever.search
       - document.resolve_citation
       - memory.session_load
       - memory.session_update
       - memory.approved_search
-      - verification.citation_check
-      - verification.faithfulness_check
     required_scenarios: [O1, O2, O3, O4]
     capability_tags: [hierarchical, corrective, claim_level_verify, retrieval, verification, memory]

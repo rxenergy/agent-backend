@@ -1,0 +1,5 @@
+# v3.1 Node 7 recover — 동의어 확장 사전 (term: [synonyms]). 소문자 매칭.
+# entity_coverage 부족 진단 시 entity 값에 동의어를 더해 재검색한다.
+NuScale: ["NuScale Power Module", "NPM"]
+i-SMR: ["innovative SMR", "혁신형 소형모듈원자로"]
+ECCS: ["비상노심냉각계통", "Emergency Core Cooling System"]

@@ -146,6 +146,11 @@ class ContextBuilder:
 
     def to_snapshot(self, pack: ContextPack) -> dict[str, Any]:
         record = asdict(pack)
+        # `chunks` 는 pydantic RetrievedChunk 라 asdict 가 dict 로 바꾸지 않는다
+        # (deepcopy 된 객체로 남음). 명시적으로 model_dump 해 dict 화 — 안 그러면
+        # metadata/snippets 모드의 필드 blanking 이 객체 subscript 로 터지고,
+        # full 모드에선 sink 의 json.dumps(default=str)가 chunk 를 repr 로 직렬화한다.
+        record["chunks"] = [c.model_dump(mode="json") for c in pack.chunks]
         if self._capture_mode == "metadata":
             for c in record["chunks"]:
                 c["text"] = None

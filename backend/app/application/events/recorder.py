@@ -89,6 +89,8 @@ class EventRecorder:
         claims: tuple[ClaimVerification, ...] = (),
         verifier_policy_hash: str | None = None,
         entailment_model: str | None = None,
+        decompose_method: str | None = None,
+        regulatory_grounding: str | None = None,
         budget: Budget | None = None,
     ) -> InteractionEvent:
         latency_ms = (
@@ -146,6 +148,8 @@ class EventRecorder:
             claims=claims,
             verifier_policy_hash=verifier_policy_hash,
             entailment_model=entailment_model,
+            decompose_method=decompose_method,
+            regulatory_grounding=regulatory_grounding,
             budget=budget,
         )
 

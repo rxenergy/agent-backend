@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -48,12 +47,15 @@ from app.domain.interaction import (
 from app.application.retrieval.dispatcher import RetrievalDispatcher
 from app.application.retrieval.evaluator import RetrievalEvaluator
 from app.application.retrieval.planner import RetrievalPlanner
+from app.application.retrieval.recovery import RetrievalRecoverer
+from app.application.retrieval.snippet import SnippetExtractor
+from app.application.verification.claim_decompose import ClaimDecomposer
+from app.application.verification.claim_verifier import ClaimVerifier
+from app.application.verification.entailment import EntailmentChecker
+from app.domain.verification import ClaimStatus
 from app.domain.memory import MemoryRef, MemoryReviewStatus, StalenessStatus
 from app.domain.query import QueryPlan
-from app.domain.retrieval import (
-    EvidencePack,
-    GateDecision,
-)
+from app.domain.retrieval import GateDecision, RecoverRound
 from app.observability import openinference as oi
 from app.observability.otel import get_tracer
 from app.ports.event_sink import EventSinkPort
@@ -61,8 +63,6 @@ from app.ports.llm import LLMPort, LLMResult, LLMUnavailableError
 from app.ports.tool import ToolExecutionContext
 
 _TRACER = get_tracer("agent")
-
-_CITE_PATTERN = re.compile(r"\[(cite-\d+)\]")
 
 HIERARCHICAL_CORRECTIVE_VARIANT_ID = "hierarchical_corrective_v3_1"
 
@@ -106,6 +106,7 @@ class HierarchicalCorrectiveRunner:
         spec: VariantSpec,
         llm_router: LLMRouter,
         tool_executor: ToolExecutor,
+        utility_llm: LLMPort | None = None,
         prompt_resolver: PromptResolver,
         prompt_renderer: PromptRenderer,
         context_builder: ContextBuilder,
@@ -125,14 +126,22 @@ class HierarchicalCorrectiveRunner:
         citation_contract_path: str | None = None,
         retrieval_planner: RetrievalPlanner | None = None,
         retrieval_evaluator: RetrievalEvaluator | None = None,
+        retrieval_recoverer: RetrievalRecoverer | None = None,
         regulatory_hard_gates_enforced: bool = False,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
+        self._utility_llm = utility_llm  # Node 14/15 LLM(분해·함의). None 이면 생성 LLM 사용.
         self._tools = tool_executor
         self._resolver = prompt_resolver
         self._renderer = prompt_renderer
-        self._context_builder = context_builder
+        # Node 9 가 문장 window 를 prompt evidence 로 싣는 것이 v3.1 설계 전제다.
+        # 주입된 builder 의 전역 capture_mode(프로덕션 기본 "metadata")에 의존하면
+        # render_for_prompt 가 window 를 "(metadata-only capture)" 로 버린다 →
+        # Node 9 가 무력화. v3.1 은 항상 snippets 모드로 렌더해 window(chunk.snippet
+        # 에 주입됨)가 prompt 에 확실히 닿게 한다. (text 분기는 full 모드에서만
+        # 발동하므로 snippets 모드에선 항상 snippet=window 사용.)
+        self._context_builder = ContextBuilder(capture_mode="snippets")
         self._recorder = recorder
         self._sink = event_sink
         self._app_profile = app_profile
@@ -154,6 +163,10 @@ class HierarchicalCorrectiveRunner:
         # opensearch_schema_version=="v2" 에 연동(profiles 에서 주입).
         self._evaluator = retrieval_evaluator or RetrievalEvaluator.default()
         self._regulatory_enforced = regulatory_hard_gates_enforced
+        # Node 7 — 결정론 recover(동의어 확장 / filter 완화, max 2 round).
+        self._recoverer = retrieval_recoverer or RetrievalRecoverer.default()
+        # Node 9 — 문장 window 추출기(결정론 정규식 splitter 기본).
+        self._snippet_extractor = SnippetExtractor()
         # Node 12 — citation contract preamble (PR-7 fragment). Loaded once;
         # prepended to the context block so it rides in the rendered prompt and
         # its presence is reflected in `rendered_prompt_hash`.
@@ -383,26 +396,102 @@ class HierarchicalCorrectiveRunner:
                 rrf_scores=dispatch.rrf_scores,
                 regulatory_enforced=self._regulatory_enforced,
             )
-            # NOTE: verdict 는 PR-5 에선 *기록·표면화*까지. WEAK→recover / FAIL
-            # exhausted→refuse 분기는 Node 7(recover, PR-9)에서 배선된다. 그
-            # 전까지 워크플로우는 verdict 와 무관하게 진행하되, regulatory_enforced
-            # 와 per_chunk_signals 가 event 에 실려 사후 판단을 가능케 한다.
             await emit_step("retrieval_evaluate", "ok",
                             overall=evaluation.overall_decision,
                             regulatory_enforced=evaluation.regulatory_enforced,
                             num_pass=sum(1 for s in evaluation.per_chunk
                                          if s.decision == GateDecision.PASS.value))
 
-            # Node 7 — retrieval_recover (STUB: skipped; PR-9)
-            await emit_step("retrieval_recover", "skipped")
-            # Node 8 — multi_hop_expand (STUB: skipped; PR-9)
+            # Node 7 — retrieval_recover. WEAK/FAIL → 결정론 진단·복구 → Node 5
+            # 재-dispatch → Node 6 재평가. max N round. 경계는 dispatch→evaluate 만
+            # 감싸고, 복구된 chunks/evaluation 이 downstream(Node 9~)으로 흐른다.
+            recover_rounds: list[RecoverRound] = []
+            cur_fetch_k = self._fetch_k
+            cur_min_score = self._min_score
+            cur_entities = entities
+            rnd = 0
+            while (
+                evaluation.overall_decision != GateDecision.PASS.value
+                and rnd < self._recoverer.max_rounds
+            ):
+                diagnosis = self._recoverer.diagnose(evaluation)
+                action = self._recoverer.plan_action(
+                    diagnosis, entities=cur_entities,
+                    fetch_k=cur_fetch_k, min_score=cur_min_score,
+                )
+                await emit_step("retrieval_recover", "started",
+                                round=rnd, diagnosis=diagnosis,
+                                strategy=action.strategy_id)
+                cur_entities = action.entities
+                cur_fetch_k = action.fetch_k
+                cur_min_score = action.min_score
+                try:
+                    dispatch = await self._dispatcher.execute(
+                        plan, query_text=request.query_text, fetch_k=cur_fetch_k,
+                        scenario_object=scenario_object, scenario_depth=scenario_depth,
+                        entities=cur_entities, ctx=ctx, min_score=cur_min_score,
+                    )
+                except RequiredToolFailed:
+                    break
+                for r in dispatch.tool_results:
+                    record(r)  # 복구 라운드의 재검색도 tool_calls 에 기록(재현성).
+                pool = dispatch.fused_chunks
+                chunks = pool[: self._top_k]
+                evaluation = self._evaluator.evaluate(
+                    chunks, query_text=request.query_text, entities=cur_entities,
+                    version_constraint=query_plan.version_constraint,
+                    rrf_scores=dispatch.rrf_scores,
+                    regulatory_enforced=self._regulatory_enforced,
+                )
+                recover_rounds.append(
+                    RecoverRound(
+                        round_index=rnd, diagnosis=diagnosis,
+                        recover_strategy_id=action.strategy_id,
+                        outcome_decision=evaluation.overall_decision,
+                    )
+                )
+                await emit_step("retrieval_recover", "ok", round=rnd,
+                                outcome=evaluation.overall_decision)
+                rnd += 1
+            if not recover_rounds:
+                await emit_step("retrieval_recover", "skipped")
+            entities = cur_entities  # 복구로 확장된 entity 를 downstream 에 반영.
+
+            # 복구 소진 후에도 FAIL → 답할 자격 미달. 결정 (a): FAIL → refuse
+            # INSUFFICIENT_EVIDENCE(복구 시도함); WEAK → 진행(Node 15 claim gate 가
+            # backstop). PASS → 진행.
+            if evaluation.overall_decision == GateDecision.FAIL.value:
+                return await self._refuse(
+                    request, started, tool_calls, scenario_object, scenario_depth,
+                    RefusalReason.INSUFFICIENT_EVIDENCE, conf,
+                    error_code="evaluate_fail_after_recover",
+                    evaluation=evaluation, recover_rounds=recover_rounds,
+                )
+
+            # Node 8 — multi_hop_expand (STUB: skipped; 별도 PR — fetch 도구 필요)
             await emit_step("multi_hop_expand", "skipped")
 
-            # Node 9 — evidence_snippet (STUB: empty pack; chunks fed directly; PR-6)
+            # Node 9 — evidence_snippet (문장 window 추출; LLM 미사용)
             await emit_step("evidence_snippet", "started")
-            evidence_pack = EvidencePack(snippets=(), pack_hash=None,
-                                         snippet_extractor_version=None)
-            await emit_step("evidence_snippet", "ok", num_snippets=0)
+            citation_ids_for_snippet = [f"cite-{i}" for i in range(len(chunks))]
+            evidence_pack = self._snippet_extractor.extract(
+                chunks,
+                query_text=request.query_text,
+                entities=entities,
+                citation_ids=citation_ids_for_snippet,
+            )
+            # 추출된 window 로 각 chunk 의 snippet 을 교체 → 기존 ContextBuilder 가
+            # 그대로 prompt 에 싣는다(ContextBuilder 변경 불필요, v2 공유 안전).
+            window_by_chunk = {s.chunk_id: s.text for s in evidence_pack.snippets}
+            chunks = [
+                # RetrievedChunk 는 pydantic(frozen) — dataclasses.replace 가 아니라
+                # model_copy(update=...) 로 교체.
+                c.model_copy(update={"snippet": window_by_chunk.get(c.chunk_id, c.snippet)})
+                for c in chunks
+            ]
+            await emit_step("evidence_snippet", "ok",
+                            num_snippets=len(evidence_pack.snippets),
+                            pack_hash=evidence_pack.pack_hash)
 
             # === Phase C ===================================================
             # Node 5 pre-step approved memory search + Node 10 decision.
@@ -577,31 +666,60 @@ class HierarchicalCorrectiveRunner:
             ]
 
             # === Phase D ===================================================
-            # Node 14 — claim_decompose (STUB: no claims yet; PR-8)
-            await emit_step("claim_decompose", "skipped")
-            claims: tuple = ()
+            utility = self._utility_llm or llm  # Node 14/15 LLM(temperature 0)
 
-            # Node 15 — claim_verify (citation + faithfulness gate reused; the
-            # per-claim 4-step circuit lands in PR-8).
+            # Node 14 — claim_decompose
+            await emit_step("claim_decompose", "started")
+            decomposed = await ClaimDecomposer(utility).decompose(llm_result.text)
+            if decomposed.method == "llm":
+                llm_calls_used += 1
+            await emit_step("claim_decompose", "ok",
+                            num_claims=len(decomposed.claims),
+                            method=decomposed.method)
+
+            # Node 15 — claim_verify (4-step per claim → 집계 status)
             await emit_step("claim_verify", "started")
-            citation_completeness, faithfulness = await self._run_checks(
-                llm_result.text, citation_ids, chunk_ids, resolvable_citation_ids, ctx, record,
+            evidence_by_cite = {
+                s.citation_id: s.text
+                for s in evidence_pack.snippets
+                if s.citation_id
+            }
+            revision_by_cite = {
+                c.citation_id: c.revision for c in final_candidates if c.revision
+            }
+            verifier = ClaimVerifier(EntailmentChecker(utility))
+            verify_res = await verifier.verify(
+                list(decomposed.claims),
+                resolvable_citation_ids=set(resolvable_citation_ids),
+                candidate_citation_ids={c.citation_id for c in pack.citation_candidates},
+                evidence_by_cite=evidence_by_cite,
+                version_constraint=query_plan.version_constraint,
+                revision_by_cite=revision_by_cite,
             )
-            ok = (citation_completeness >= self._cit_thr
-                  and faithfulness >= self._faith_thr)
-            if ok:
-                verification_status = VerificationStatus.PASS.value
-            elif (citation_completeness >= self._cit_thr * 0.5
-                  and faithfulness >= self._faith_thr * 0.5):
-                verification_status = VerificationStatus.PARTIAL.value
-            else:
-                verification_status = VerificationStatus.FAIL.value
+            if verify_res.entailment_ran:
+                llm_calls_used += 1
+            claims = verify_res.claims
+            verification_status = verify_res.status
+            entailment_model = (
+                EntailmentChecker(utility).model_id if verify_res.entailment_ran else None
+            )
+            # 이벤트 호환용 두 스칼라 — claim 집계에서 파생(구 _run_checks 대체).
+            n_claims = max(1, len(claims))
+            citation_completeness = sum(
+                1 for cv in claims if cv.checks.citation_resolves
+            ) / n_claims
+            faithfulness = sum(
+                1 for cv in claims if cv.status == ClaimStatus.SUPPORTED.value
+            ) / n_claims
             await emit_step("claim_verify", "ok",
                             verification_status=verification_status,
-                            citation_completeness=citation_completeness,
-                            faithfulness=faithfulness)
+                            num_claims=len(claims),
+                            contradicted=verify_res.contradicted,
+                            entailment_ran=verify_res.entailment_ran)
 
-            # Node 16 — selective_regenerate (STUB: skipped; PR-8)
+            # Node 16 — selective_regenerate (PR-9 와 함께 배선). interim: partial/
+            # unsupported 는 위에서 PARTIAL 로 귀결, contradicted 는 아래 response_format
+            # 에서 VERIFICATION_FAILED refuse. 아직 국소 재작성 없음.
             await emit_step("selective_regenerate", "skipped")
 
             # session_update
@@ -630,8 +748,15 @@ class HierarchicalCorrectiveRunner:
                 total_llm_call_budget=self._llm_call_budget,
                 budget_hit=tuple(budget_hit),
             )
+            # 안전 계약: 규제 근거 검증 축(verification_status 와 직교). v1 처럼
+            # 규제 hard gate 미강제면 unverified — verification_status 가 PASS 여도
+            # "규제 검증된 답변" 아님(PR-5 decision #3 의 전제).
+            regulatory_grounding = (
+                "verified" if evaluation.regulatory_enforced else "unverified"
+            )
             with _TRACER.start_as_current_span("agent.response_format") as _rfmt:
                 if verification_status == VerificationStatus.FAIL.value:
+                    # contradicted claim 등 → 답변 폐기.
                     refusal = RefusalReason.VERIFICATION_FAILED.value
                     answer_text = _refusal_message(RefusalReason.VERIFICATION_FAILED)
                     citations: tuple[Citation, ...] = ()
@@ -639,13 +764,20 @@ class HierarchicalCorrectiveRunner:
                     refusal = RefusalReason.PARTIAL_ANSWER.value
                     answer_text = (
                         llm_result.text
-                        + "\n\n[부분 답변] 일부 인용·근거가 임계값을 충족하지 못했습니다."
+                        + "\n\n[부분 답변] 일부 claim 의 근거·인용이 검증을 충족하지 못했습니다."
                     )
                     citations = _to_citations(final_candidates)
                 else:
                     refusal = None
                     answer_text = llm_result.text
                     citations = _to_citations(final_candidates)
+                # 미검증 규제 근거를 *답변 본문*에도 명시 — dumb client 도 보이게.
+                if refusal is None and regulatory_grounding == "unverified":
+                    answer_text = (
+                        answer_text
+                        + "\n\n[규제 근거 미검증] 현재 인덱스에 조문 ID·발효일·권위 등급"
+                        " 메타가 없어 규제 차원 검증은 수행되지 않았습니다(인용 충실성만 검증)."
+                    )
                 response = AgentResponse(
                     interaction_id=request.interaction_id,
                     answer_text=answer_text,
@@ -663,8 +795,9 @@ class HierarchicalCorrectiveRunner:
                     model_id=llm_result.model_id,
                     claims=claims,
                     evaluation=evaluation,
-                    recover_rounds=(),
+                    recover_rounds=tuple(recover_rounds),
                     hops=(),
+                    regulatory_grounding=regulatory_grounding,
                 )
                 oi.set_kind(_rfmt, oi.KIND_CHAIN)
 
@@ -711,12 +844,14 @@ class HierarchicalCorrectiveRunner:
                     regulatory_enforced=evaluation.regulatory_enforced,
                     per_chunk_signals=evaluation.per_chunk,
                     per_sub_question_decisions=evaluation.per_sub_question,
-                    recover_rounds=(),
+                    recover_rounds=tuple(recover_rounds),
                     hops=(),
                     evidence_pack_hash=evidence_pack.pack_hash,
                     claims=claims,
                     verifier_policy_hash=None,
-                    entailment_model=None,
+                    entailment_model=entailment_model,
+                    decompose_method=decomposed.method,
+                    regulatory_grounding=regulatory_grounding,
                     budget=budget,
                 )
                 await self._recorder.persist(event)
@@ -733,30 +868,6 @@ class HierarchicalCorrectiveRunner:
         # Reuse the v2 Node 1 shim (ADR-0003).
         from app.application.agents.sequential.nodes.classify import classify
         return await classify(request, self._classifier)
-
-    async def _run_checks(self, answer_text, citation_ids, chunk_ids,
-                          resolvable_citation_ids, ctx, record):
-        referenced = sorted(set(_CITE_PATTERN.findall(answer_text)))
-        cit = await self._tools.invoke(
-            "verification.citation_check",
-            {
-                "answer_text": answer_text,
-                "citation_ids": citation_ids,
-                "chunk_ids": chunk_ids,
-                "referenced_citation_ids": referenced,
-                "resolvable_citation_ids": resolvable_citation_ids,
-            },
-            ctx,
-        )
-        record(cit)
-        cc = float((cit.output or {}).get("citation_completeness", 0.0))
-        f = await self._tools.invoke(
-            "verification.faithfulness_check",
-            {"answer_text": answer_text, "chunk_ids": chunk_ids}, ctx,
-        )
-        record(f)
-        fh = float((f.output or {}).get("faithfulness", 0.0))
-        return cc, fh
 
     async def _generate(self, request, rendered: RenderedPrompt, started, tool_calls,
                         scenario_object, scenario_depth, conf, *, llm: LLMPort):
@@ -807,7 +918,19 @@ class HierarchicalCorrectiveRunner:
     async def _refuse(self, request, started, tool_calls, scenario_object,
                       scenario_depth, reason: RefusalReason, conf, *,
                       error_code: str | None,
-                      verification_status: VerificationStatus = VerificationStatus.FAIL):
+                      verification_status: VerificationStatus = VerificationStatus.FAIL,
+                      evaluation=None, recover_rounds=()):
+        # 평가 *후* refusal(예: INSUFFICIENT_EVIDENCE)은 per_chunk_signals·
+        # recover_rounds·policy_hash 가 이미 존재하므로 event 에 실어야 한다 —
+        # "왜 거부했나"가 규제 도메인 defensibility 의 핵심 질문(CLAUDE.md §5).
+        evaluation_kwargs: dict[str, Any] = {}
+        if evaluation is not None:
+            evaluation_kwargs = dict(
+                evaluator_policy_hash=evaluation.evaluator_policy_hash,
+                regulatory_enforced=evaluation.regulatory_enforced,
+                per_chunk_signals=evaluation.per_chunk,
+                per_sub_question_decisions=evaluation.per_sub_question,
+            )
         response = AgentResponse(
             interaction_id=request.interaction_id,
             answer_text=_refusal_message(reason),
@@ -818,11 +941,15 @@ class HierarchicalCorrectiveRunner:
             scenario_depth=scenario_depth,
             latency_ms=int((time.monotonic() - started) * 1000),
             token_usage={},
+            evaluation=evaluation,
+            recover_rounds=tuple(recover_rounds),
         )
         event = self._recorder.build(
             request=request, response=response, agent_variant=self.spec.variant_id,
             started_at=started, tool_calls=tuple(tool_calls),
             classification_confidence=conf, error_code=error_code,
+            recover_rounds=tuple(recover_rounds),
+            **evaluation_kwargs,
         )
         await self._recorder.persist(event)
         return response
@@ -871,6 +998,7 @@ def _build_hierarchical_corrective(
         spec=spec,
         llm_router=deps.llm_router,
         tool_executor=deps.tool_executor,
+        utility_llm=deps.utility_llm,
         prompt_resolver=deps.prompt_resolver,
         prompt_renderer=deps.prompt_renderer,
         context_builder=deps.context_builder,
@@ -890,5 +1018,6 @@ def _build_hierarchical_corrective(
         citation_contract_path=t.get("citation_contract_path"),
         retrieval_planner=deps.retrieval_planner,
         retrieval_evaluator=deps.retrieval_evaluator,
+        retrieval_recoverer=deps.retrieval_recoverer,
         regulatory_hard_gates_enforced=t.get("regulatory_hard_gates_enforced", False),
     )

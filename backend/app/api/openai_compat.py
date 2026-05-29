@@ -256,6 +256,10 @@ def _smr_agent_metadata(
         "classifier_backend": response.classifier_backend,
         "entities": response.entities,
         "verification_status": response.verification_status,
+        # 규제 근거 검증 축 — verification_status 와 직교. 구조화 클라이언트가
+        # verification_status 만 읽고 v1 미검증 PASS 를 검증된 답으로 오인하지
+        # 않도록 custom field 로도 노출(v3.1 안전 계약). 기본 "n_a"(v2 변형 외).
+        "regulatory_grounding": getattr(response, "regulatory_grounding", "n_a"),
         "refusal_reason": response.refusal_reason,
         "citations": [
             {

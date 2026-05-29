@@ -225,6 +225,7 @@ async def build_container(settings: Settings) -> AppContainer:
     summarizer: ConversationSummarizer | None = None
     retrieval_planner: Any = None
     retrieval_evaluator: Any = None
+    retrieval_recoverer: Any = None
 
     if needs_tool_stack:
         session_store: SessionMemoryStore
@@ -250,6 +251,14 @@ async def build_container(settings: Settings) -> AppContainer:
         _policy_path = Path(settings.tool_registry_path).parent / "evaluator_policy.yaml"
         if _policy_path.is_file():
             retrieval_evaluator = RetrievalEvaluator.from_yaml(_policy_path)
+
+        # v3.1 Node 7 recover — data/synonyms/ (repo 루트). 없으면 빈 사전 폴백.
+        from app.application.retrieval.recovery import RetrievalRecoverer
+
+        _syn_dir = Path(settings.tool_registry_path).parent.parent / "data" / "synonyms"
+        retrieval_recoverer = RetrievalRecoverer.from_yaml_dir(
+            _syn_dir, max_rounds=settings.retrieval_max_recover_rounds
+        )
 
         if settings.retriever_backend == "opensearch":
             preflight_severity = _resolve_preflight_severity(settings)
@@ -399,6 +408,7 @@ async def build_container(settings: Settings) -> AppContainer:
         summarizer=summarizer,
         retrieval_planner=retrieval_planner,
         retrieval_evaluator=retrieval_evaluator,
+        retrieval_recoverer=retrieval_recoverer,
         tunables={
             "classification_threshold": settings.classification_threshold,
             "verification_citation_threshold": settings.verification_citation_threshold,

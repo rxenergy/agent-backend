@@ -44,6 +44,8 @@ class AgentDeps:
     retrieval_planner: Any = None
     # v3.1 Node 6 5-신호 evaluator. None 이면 변형이 RetrievalEvaluator.default().
     retrieval_evaluator: Any = None
+    # v3.1 Node 7 결정론 recover. None 이면 변형이 RetrievalRecoverer.default().
+    retrieval_recoverer: Any = None
     # Pass-through tunables — runners read what they care about.
     tunables: dict[str, Any] = field(default_factory=dict)
 

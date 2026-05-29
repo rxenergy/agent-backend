@@ -70,6 +70,11 @@ class AgentResponse:
     evaluation: EvaluationResult | None = None
     recover_rounds: tuple[RecoverRound, ...] = ()
     hops: tuple[HopEdge, ...] = ()
+    # 규제 근거 검증 축 — `verification_status`(claim 충실성)와 *직교*. v1 에선
+    # clause_id/effective_on/authority 강제 부재라 "unverified". v2 enforce 시
+    # "verified". 비규제 시나리오는 "n_a". 응답 객체·answer_text·custom field
+    # 모두에 노출돼 v1 PASS 가 규제검증된 답으로 오인되지 않게 한다(PR-5 안전 계약).
+    regulatory_grounding: str = "n_a"  # verified | unverified | n_a
 
 
 @dataclass(frozen=True)
@@ -157,4 +162,6 @@ class InteractionEvent:
     claims: tuple[ClaimVerification, ...] = ()
     verifier_policy_hash: str | None = None
     entailment_model: str | None = None
+    decompose_method: str | None = None  # "llm" | "fallback" — Node 14 가 실제 LLM 분해인지
+    regulatory_grounding: str | None = None  # verified | unverified | n_a (response 와 동일 축)
     budget: Budget | None = None
