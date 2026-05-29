@@ -109,15 +109,72 @@ class _StubRunner:
         raise RuntimeError("no final")
 
 
-def _app(thinking_expose: bool) -> FastAPI:
+class _V3StubRunner:
+    """Stub emitting a v3.1 (hierarchical_corrective_v3_1) event sequence plus
+    a `reasoning` event, so we can assert per-variant narration dispatch and
+    that the generation LLM's native chain-of-thought reaches the thinking
+    surface on both streaming and non-streaming paths."""
+
+    spec = VariantSpec(
+        variant_id="hierarchical_corrective_v3_1", compatible_llms=("fake-echo",)
+    )
+
+    async def run_stream(self, request):
+        from app.application.agents.events import AgentEvent
+
+        yield AgentEvent(kind="step", name="query_understanding", status="ok",
+                         payload={"multi_intent": False, "sub_questions": 1})
+        yield AgentEvent(kind="step", name="retrieval_evaluate", status="ok",
+                         payload={"overall": "WEAK", "regulatory_enforced": True,
+                                  "num_pass": 1})
+        yield AgentEvent(kind="step", name="retrieval_recover", status="started",
+                         payload={"round": 0, "diagnosis": "low entity coverage",
+                                  "strategy": "synonym_expand"})
+        yield AgentEvent(kind="step", name="retrieval_recover", status="ok",
+                         payload={"round": 0, "outcome": "PASS"})
+        yield AgentEvent(kind="step", name="generation", status="started",
+                         payload={"llm_id": "fake-echo"})
+        # Generation LLM native CoT — split across deltas to exercise buffering.
+        yield AgentEvent(kind="reasoning", payload={"content": "Let me reason about "})
+        yield AgentEvent(kind="reasoning", payload={"content": "the cited regulation."})
+        yield AgentEvent(kind="token", payload={"content": "답변"})
+        yield AgentEvent(kind="step", name="claim_verify", status="ok",
+                         payload={"verification_status": "PARTIAL", "num_claims": 2,
+                                  "contradicted": False, "entailment_ran": True})
+        response = AgentResponse(
+            interaction_id=request.interaction_id,
+            answer_text="답변",
+            citations=(),
+            refusal_reason=None,
+            verification_status="PARTIAL",
+            scenario_object="A",
+            scenario_depth="L1",
+            latency_ms=1,
+            token_usage={"prompt_tokens": 1, "completion_tokens": 1},
+            classification_confidence=0.9,
+            classifier_backend="rule",
+            entities={},
+            llm_id="fake-echo",
+            model_id="fake-echo",
+        )
+        yield AgentEvent(kind="final", payload={"response": response})
+
+    async def run(self, request):
+        async for ev in self.run_stream(request):
+            if ev.kind == "final":
+                return ev.payload["response"]
+        raise RuntimeError("no final")
+
+
+def _app(thinking_expose: bool, *, runner=None, variant: str = "stub_v0") -> FastAPI:
     tmp = tempfile.mkdtemp()
     sink = FilesystemEventSink(root=str(Path(tmp) / "events"), prefix="t")
     EventRecorder(sink, app_profile="local")  # not used by stub
-    runners = {"stub_v0": _StubRunner()}
+    runners = {variant: runner or _StubRunner()}
     llm_pool = {"fake-echo": FakeEchoLLM(model_id="fake-echo")}
     settings = Settings(
-        agent_variants_enabled=["stub_v0"],
-        default_variant="stub_v0",
+        agent_variants_enabled=[variant],
+        default_variant=variant,
         default_llm="fake-echo",
         utility_llm="fake-echo",
         thinking_expose=thinking_expose,
@@ -128,6 +185,11 @@ def _app(thinking_expose: bool) -> FastAPI:
         settings=settings, runners=runners, llm_pool=llm_pool, event_sink=sink,
     )
     return app
+
+
+def _app_v3(thinking_expose: bool) -> FastAPI:
+    return _app(thinking_expose, runner=_V3StubRunner(),
+                variant="hierarchical_corrective_v3_1")
 
 
 def _sse_chunks(body: str) -> list[dict]:
@@ -230,3 +292,55 @@ def test_non_streaming_no_think_when_disabled():
     content = body["choices"][0]["message"]["content"]
     assert "<think>" not in content
     assert content == "안녕하세요"
+
+
+# --- v3.1 variant dispatch + LLM reasoning surfacing ----------------------
+
+
+def test_v3_streaming_narrates_v3_steps_and_passes_reasoning():
+    client = TestClient(_app_v3(thinking_expose=True))
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "hierarchical_corrective_v3_1@fake-echo",
+            "stream": True,
+            "messages": [{"role": "user", "content": "안녕"}],
+        },
+    )
+    assert resp.status_code == 200
+    chunks = _sse_chunks(resp.text)
+    reasoning = [
+        c["choices"][0]["delta"]["reasoning_content"]
+        for c in chunks
+        if "reasoning_content" in c["choices"][0].get("delta", {})
+    ]
+    joined = "".join(reasoning)
+    # v3.1-specific narration (dispatched by runner.spec.variant_id).
+    assert "Gate decision WEAK" in joined
+    assert "low entity coverage" in joined
+    assert "Verification PARTIAL" in joined
+    # Generation LLM native chain-of-thought passed straight through.
+    assert "Let me reason about the cited regulation." in joined
+
+
+def test_v3_non_streaming_includes_model_reasoning_in_think_block():
+    client = TestClient(_app_v3(thinking_expose=True))
+    resp = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "hierarchical_corrective_v3_1@fake-echo",
+            "messages": [{"role": "user", "content": "안녕"}],
+        },
+    )
+    body = resp.json()
+    content = body["choices"][0]["message"]["content"]
+    assert content.startswith("<think>") and "</think>" in content
+    think = content.split("</think>", 1)[0]
+    # v3.1 step narration present…
+    assert "Gate decision WEAK" in think
+    assert "Verification PARTIAL" in think
+    # …and the buffered generation-LLM reasoning is included as one block.
+    assert "Let me reason about the cited regulation." in think
+    # token body is not in <think>; it is the final answer.
+    answer_after = content.split("</think>", 1)[1].strip()
+    assert answer_after == "답변"

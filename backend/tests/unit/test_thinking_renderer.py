@@ -185,3 +185,102 @@ def test_token_and_reasoning_events_ignored():
 def test_unknown_step_returns_empty():
     assert _r(_step("not_a_real_step", "ok")) == []
     assert _r(_step("session_memory_update", "ok")) == []
+
+
+# --- v3.1 (hierarchical_corrective_v3_1) step vocabulary ------------------
+
+_V3 = "hierarchical_corrective_v3_1"
+_V2 = "sequential_tool_routed_v2"
+
+
+def test_v3_query_understanding():
+    lines = _r(_step("query_understanding", "ok", multi_intent=True, sub_questions=3),
+               variant_id=_V3)
+    assert "3 sub-question" in lines[0] and "multi-intent" in lines[0]
+
+
+def test_v3_retrieval_plan_and_execute():
+    plan = _r(_step("retrieval_plan", "ok", rule_id="R-7",
+                    plan_hash="abc", strategies=["bm25", "vector"]),
+              variant_id=_V3)
+    assert "R-7" in plan[0] and "bm25" in plan[0] and "vector" in plan[0]
+
+    ex = _r(_step("retrieval_execute", "ok", num_chunks=3, pool_size=20,
+                  strategies_ok=["bm25"], strategies_failed=["vector"]),
+            variant_id=_V3)
+    assert "Retrieved 3 of 20" in ex[0] and "vector" in ex[0]
+
+
+def test_v3_retrieval_evaluate_surfaces_gate_decision():
+    lines = _r(_step("retrieval_evaluate", "ok", overall="WEAK",
+                     regulatory_enforced=True, num_pass=2),
+               variant_id=_V3)
+    assert "WEAK" in lines[0] and "2 passage" in lines[0]
+    assert "regulatory" in lines[0]
+
+
+def test_v3_retrieval_recover_diagnostic_reasoning():
+    started = _r(_step("retrieval_recover", "started", round=0,
+                       diagnosis="low entity coverage", strategy="synonym_expand"),
+                 variant_id=_V3)
+    assert "low entity coverage" in started[0] and "synonym_expand" in started[0]
+    ok = _r(_step("retrieval_recover", "ok", round=0, outcome="PASS"), variant_id=_V3)
+    assert "round 0" in ok[0] and "PASS" in ok[0]
+    skipped = _r(_step("retrieval_recover", "skipped"), variant_id=_V3)
+    assert "no recovery" in skipped[0].lower()
+
+
+def test_v3_evidence_snippet_and_memory_inject():
+    snip = _r(_step("evidence_snippet", "ok", num_snippets=5, pack_hash="h"),
+              variant_id=_V3)
+    assert "5 evidence window" in snip[0]
+    inj = _r(_step("memory_inject", "ok", inject=True, num_memory_refs=2), variant_id=_V3)
+    assert "2 memory item" in inj[0]
+    # Transparent no-op steps are intentionally silent (kept out of the trace).
+    assert _r(_step("memory_inject", "ok", inject=False, num_memory_refs=0),
+              variant_id=_V3) == []
+    assert _r(_step("memory_inject", "started"), variant_id=_V3) == []
+
+
+def test_v3_claim_decompose_and_verify():
+    dec = _r(_step("claim_decompose", "ok", num_claims=4, method="llm"), variant_id=_V3)
+    assert "4 claim" in dec[0] and "llm" in dec[0]
+    ver = _r(_step("claim_verify", "ok", verification_status="PARTIAL",
+                   num_claims=4, contradicted=True, entailment_ran=True),
+             variant_id=_V3)
+    assert "PARTIAL" in ver[0] and "4 claim" in ver[0]
+    assert "contradicted" in ver[0] and "entailment" in ver[0]
+
+
+def test_v3_skipped_and_transparent_nodes_are_silent():
+    # No-op / skipped corrective steps add noise → not narrated.
+    assert _r(_step("multi_hop_expand", "skipped"), variant_id=_V3) == []
+    assert _r(_step("selective_regenerate", "skipped"), variant_id=_V3) == []
+    assert _r(_step("scenario_routing", "ok"), variant_id=_V3) == []
+    # …but when they actually do work, they are narrated.
+    assert "Regenerated 2" in _r(
+        _step("selective_regenerate", "ok", num_regenerated=2), variant_id=_V3)[0]
+    assert "2 hop" in _r(
+        _step("multi_hop_expand", "ok", num_hops=2), variant_id=_V3)[0]
+
+
+def test_variant_dispatch_isolation():
+    # v2-only step name is not narrated under the v3.1 table…
+    assert _r(_step("retrieval", "ok", num_chunks=2), variant_id=_V3) == []
+    assert _r(_step("verification", "ok", verification_status="PASS"), variant_id=_V3) == []
+    # …and v3.1-only step names are not narrated under the v2 table.
+    assert _r(_step("retrieval_evaluate", "ok", overall="PASS"), variant_id=_V2) == []
+    assert _r(_step("claim_verify", "ok", verification_status="PASS"), variant_id=_V2) == []
+
+
+def test_shared_steps_render_under_both_variants():
+    payload = dict(scenario_object="A", scenario_depth="L1", confidence=0.9)
+    v2 = _r(_step("intent_classification", "ok", **payload), variant_id=_V2)
+    v3 = _r(_step("intent_classification", "ok", **payload), variant_id=_V3)
+    assert v2 == v3 and "scenario A" in v2[0]
+
+
+def test_default_union_when_variant_unknown():
+    # No variant context → union table narrates both vocabularies.
+    assert "Retrieved 4" in _r(_step("retrieval", "ok", num_chunks=4))[0]
+    assert "WEAK" in _r(_step("retrieval_evaluate", "ok", overall="WEAK", num_pass=1))[0]

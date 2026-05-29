@@ -314,17 +314,45 @@ async def _run_collecting_thinking(
 ):
     """Drive `run_stream()` non-streaming side: return the final AgentResponse
     plus the list of human-readable thinking lines accumulated from step/tool
-    events. Mirrors the streaming path so the two surfaces stay in sync."""
+    events. Mirrors the streaming path so the two surfaces stay in sync.
+
+    Step/tool events are narrated per variant by the thinking renderer; the
+    generation LLM's native chain-of-thought (`reasoning` events) is buffered
+    into one contiguous block and interleaved in occurrence order so the
+    `<think>` block carries the model's reasoning alongside the workflow steps
+    (the streaming path passes reasoning through directly). `token` events are
+    the answer body and live in `response.answer_text`, not `<think>`."""
     response = None
     thinking: list[str] = []
+    variant_id = runner.spec.variant_id
+    reasoning_buf: list[str] = []
+
+    def _flush_reasoning() -> None:
+        if not reasoning_buf:
+            return
+        text = "".join(reasoning_buf).strip()
+        reasoning_buf.clear()
+        if text:
+            thinking.append(text)
+
     async for event in runner.run_stream(agent_request):
         if event.kind == "final":
             response = event.payload["response"]
             continue
         if event.kind == "error":
             raise RuntimeError(event.payload.get("message") or "agent error")
-        lines = render_thinking(event, content_mode=content_mode, max_items=max_items)
+        if event.kind == "reasoning":
+            reasoning_buf.append(event.payload.get("content", ""))
+            continue
+        if event.kind == "token":
+            continue
+        _flush_reasoning()
+        lines = render_thinking(
+            event, variant_id=variant_id,
+            content_mode=content_mode, max_items=max_items,
+        )
         thinking.extend(lines)
+    _flush_reasoning()
     if response is None:
         raise RuntimeError("runner produced no final response")
     return response, thinking
@@ -385,7 +413,8 @@ async def _sse_stream_from_runner(
             elif event.kind in ("step", "tool"):
                 if thinking_expose:
                     for line in render_thinking(
-                        event, content_mode=content_mode, max_items=max_items
+                        event, variant_id=runner.spec.variant_id,
+                        content_mode=content_mode, max_items=max_items,
                     ):
                         yield _frame(
                             interaction_id=interaction_id,
