@@ -117,6 +117,7 @@ class HierarchicalCorrectiveRunner:
         classification_threshold: float = 0.0,
         verification_citation_threshold: float = 0.5,
         verification_faithfulness_threshold: float = 0.5,
+        claim_verification_enabled: bool = True,
         summarizer: ConversationSummarizer | None = None,
         retriever_top_k: int = 3,
         retriever_min_score: float = 0.0,
@@ -149,6 +150,10 @@ class HierarchicalCorrectiveRunner:
         self._classification_threshold = classification_threshold
         self._cit_thr = verification_citation_threshold
         self._faith_thr = verification_faithfulness_threshold
+        # Phase D(Node 14/15) claim 검증 토글. False 면 사후 검증을 통째로 건너뛰고
+        # verification_status=SKIPPED 로 답변을 그대로 통과시킨다(생성-검증 결합
+        # 결함의 임시 우회 — streaming 에선 이미 전송된 텍스트라 되돌릴 수 없음).
+        self._claim_verification_enabled = claim_verification_enabled
         self._summarizer = summarizer
         self._top_k = retriever_top_k
         self._min_score = retriever_min_score
@@ -754,56 +759,74 @@ class HierarchicalCorrectiveRunner:
             ]
 
             # === Phase D ===================================================
-            utility = self._utility_llm or llm  # Node 14/15 LLM(temperature 0)
+            # 비활성(claim_verification_enabled=False) 시 SKIPPED 로 귀결될 기본값.
+            # 이 변수들은 아래 enabled 분기에서만 덮어쓴다(양쪽 분기에서 정의 보장).
+            claims: tuple = ()
+            verification_status = VerificationStatus.SKIPPED.value
+            entailment_model: str | None = None
+            decompose_method: str | None = None
+            citation_completeness = 0.0
+            faithfulness = 0.0
 
-            # Node 14 — claim_decompose
-            await emit_step("claim_decompose", "started")
-            decomposed = await ClaimDecomposer(utility).decompose(llm_result.text)
-            if decomposed.method == "llm":
-                llm_calls_used += 1
-            await emit_step("claim_decompose", "ok",
-                            num_claims=len(decomposed.claims),
-                            method=decomposed.method)
+            if not self._claim_verification_enabled:
+                # 사후 claim 검증 비활성 — 생성 텍스트가 streaming 으로 이미 전송된
+                # 구조에서 사후 검증이 답변을 되돌릴 수 없으므로 Node 14/15/16 skip.
+                # verification_status=SKIPPED → response_format 의 else 분기로 떨어져
+                # 답변·인용이 그대로 통과한다.
+                await emit_step("claim_decompose", "skipped")
+                await emit_step("claim_verify", "skipped")
+            else:
+                utility = self._utility_llm or llm  # Node 14/15 LLM(temperature 0)
 
-            # Node 15 — claim_verify (4-step per claim → 집계 status)
-            await emit_step("claim_verify", "started")
-            evidence_by_cite = {
-                s.citation_id: s.text
-                for s in evidence_pack.snippets
-                if s.citation_id
-            }
-            revision_by_cite = {
-                c.citation_id: c.revision for c in final_candidates if c.revision
-            }
-            verifier = ClaimVerifier(EntailmentChecker(utility))
-            verify_res = await verifier.verify(
-                list(decomposed.claims),
-                resolvable_citation_ids=set(resolvable_citation_ids),
-                candidate_citation_ids={c.citation_id for c in pack.citation_candidates},
-                evidence_by_cite=evidence_by_cite,
-                version_constraint=query_plan.version_constraint,
-                revision_by_cite=revision_by_cite,
-            )
-            if verify_res.entailment_ran:
-                llm_calls_used += 1
-            claims = verify_res.claims
-            verification_status = verify_res.status
-            entailment_model = (
-                EntailmentChecker(utility).model_id if verify_res.entailment_ran else None
-            )
-            # 이벤트 호환용 두 스칼라 — claim 집계에서 파생(구 _run_checks 대체).
-            n_claims = max(1, len(claims))
-            citation_completeness = sum(
-                1 for cv in claims if cv.checks.citation_resolves
-            ) / n_claims
-            faithfulness = sum(
-                1 for cv in claims if cv.status == ClaimStatus.SUPPORTED.value
-            ) / n_claims
-            await emit_step("claim_verify", "ok",
-                            verification_status=verification_status,
-                            num_claims=len(claims),
-                            contradicted=verify_res.contradicted,
-                            entailment_ran=verify_res.entailment_ran)
+                # Node 14 — claim_decompose
+                await emit_step("claim_decompose", "started")
+                decomposed = await ClaimDecomposer(utility).decompose(llm_result.text)
+                if decomposed.method == "llm":
+                    llm_calls_used += 1
+                decompose_method = decomposed.method
+                await emit_step("claim_decompose", "ok",
+                                num_claims=len(decomposed.claims),
+                                method=decomposed.method)
+
+                # Node 15 — claim_verify (4-step per claim → 집계 status)
+                await emit_step("claim_verify", "started")
+                evidence_by_cite = {
+                    s.citation_id: s.text
+                    for s in evidence_pack.snippets
+                    if s.citation_id
+                }
+                revision_by_cite = {
+                    c.citation_id: c.revision for c in final_candidates if c.revision
+                }
+                verifier = ClaimVerifier(EntailmentChecker(utility))
+                verify_res = await verifier.verify(
+                    list(decomposed.claims),
+                    resolvable_citation_ids=set(resolvable_citation_ids),
+                    candidate_citation_ids={c.citation_id for c in pack.citation_candidates},
+                    evidence_by_cite=evidence_by_cite,
+                    version_constraint=query_plan.version_constraint,
+                    revision_by_cite=revision_by_cite,
+                )
+                if verify_res.entailment_ran:
+                    llm_calls_used += 1
+                claims = verify_res.claims
+                verification_status = verify_res.status
+                entailment_model = (
+                    EntailmentChecker(utility).model_id if verify_res.entailment_ran else None
+                )
+                # 이벤트 호환용 두 스칼라 — claim 집계에서 파생(구 _run_checks 대체).
+                n_claims = max(1, len(claims))
+                citation_completeness = sum(
+                    1 for cv in claims if cv.checks.citation_resolves
+                ) / n_claims
+                faithfulness = sum(
+                    1 for cv in claims if cv.status == ClaimStatus.SUPPORTED.value
+                ) / n_claims
+                await emit_step("claim_verify", "ok",
+                                verification_status=verification_status,
+                                num_claims=len(claims),
+                                contradicted=verify_res.contradicted,
+                                entailment_ran=verify_res.entailment_ran)
 
             # Node 16 — selective_regenerate (PR-9 와 함께 배선). interim: partial/
             # unsupported 는 위에서 PARTIAL 로 귀결, contradicted 는 아래 response_format
@@ -950,7 +973,7 @@ class HierarchicalCorrectiveRunner:
                     claims=claims,
                     verifier_policy_hash=None,
                     entailment_model=entailment_model,
-                    decompose_method=decomposed.method,
+                    decompose_method=decompose_method,
                     regulatory_grounding=regulatory_grounding,
                     budget=budget,
                 )
@@ -1109,6 +1132,7 @@ def _build_hierarchical_corrective(
         classification_threshold=t.get("classification_threshold", 0.0),
         verification_citation_threshold=t.get("verification_citation_threshold", 0.5),
         verification_faithfulness_threshold=t.get("verification_faithfulness_threshold", 0.5),
+        claim_verification_enabled=t.get("claim_verification_enabled", True),
         summarizer=deps.summarizer,
         retriever_top_k=t.get("retriever_top_k", 3),
         retriever_min_score=t.get("retriever_min_score", 0.0),

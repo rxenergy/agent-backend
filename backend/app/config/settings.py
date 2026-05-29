@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     verification_citation_threshold: float = 0.9
     verification_faithfulness_threshold: float = 0.85
     verification_retry_on_fail: bool = True
+    # Phase D claim 검증(Node 14 decompose → 15 verify) 토글. streaming 출력에서는
+    # 생성 텍스트가 이미 사용자에게 전송된 뒤라 사후 claim 검증이 답변을 되돌릴 수
+    # 없으므로 임시 비활성 가능. False 면 verification_status=SKIPPED 로 통과.
+    # (Node 6 retrieval_evaluate 게이트와는 무관 — 그쪽은 항상 동작.)
+    claim_verification_enabled: bool = True
 
     # Multi-turn summary (option, 기획 doc §Multi-Turn Context Handling)
     multi_turn_summary_enabled: bool = True

@@ -414,6 +414,7 @@ async def build_container(settings: Settings) -> AppContainer:
             "verification_citation_threshold": settings.verification_citation_threshold,
             "verification_faithfulness_threshold": settings.verification_faithfulness_threshold,
             "verification_retry_on_fail": settings.verification_retry_on_fail,
+            "claim_verification_enabled": settings.claim_verification_enabled,
             "retriever_top_k": settings.retriever_top_k,
             "retriever_min_score": settings.retriever_min_score,
             "retrieval_fetch_k": settings.retrieval_fetch_k,

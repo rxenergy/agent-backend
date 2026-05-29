@@ -100,7 +100,7 @@ def _tool_registry_yaml(root: Path) -> Path:
 
 def _make_runner(
     tmp: Path, *, with_contract: bool = True, retrieval_planner=None, retriever_tool=None,
-    llm=None,
+    llm=None, claim_verification_enabled: bool = True,
 ) -> tuple[HierarchicalCorrectiveRunner, FilesystemEventSink]:
     prompts = tmp / "prompts"
     build_prompts(prompts)
@@ -131,6 +131,7 @@ def _make_runner(
         app_profile="local",
         citation_contract_path=str(_CONTRACT) if with_contract else None,
         retrieval_planner=retrieval_planner,
+        claim_verification_enabled=claim_verification_enabled,
     )
     return runner, sink
 
@@ -320,6 +321,31 @@ async def test_unsupported_claim_yields_partial() -> None:
         resp = await runner.run(req)
         assert resp.verification_status == "partial"
         assert resp.refusal_reason == "partial_answer"
+
+
+@pytest.mark.asyncio
+async def test_claim_verification_disabled_skips_phase_d_and_passes_answer() -> None:
+    """claim_verification_enabled=False 면 contradicted 를 낼 LLM 이라도 Phase D 를
+    건너뛰어 답변을 폐기하지 않는다 — SKIPPED 로 통과, 생성 텍스트·인용 유지,
+    decompose/entailment LLM 호출 미발생(budget 에 generation 1회만)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), llm=_ClaimAwareLLM(entailment_status="contradicted"),
+            claim_verification_enabled=False,
+        )
+        req = AgentRequest(interaction_id="hd", query_text="i-SMR ECCS 설계", session_id="sd")
+        resp = await runner.run(req)
+        assert resp.verification_status == "skipped"
+        assert resp.refusal_reason is None
+        assert len(resp.citations) >= 1
+        assert resp.claims == ()
+        rec = json.loads(
+            next((Path(tmp) / "events" / "t" / "interaction_events").rglob("*.jsonl"))
+            .read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert rec["budget"]["llm_calls_used"] == 1  # generation 만
+        assert rec["decompose_method"] is None
+        assert rec["entailment_model"] is None
 
 
 @pytest.mark.asyncio
