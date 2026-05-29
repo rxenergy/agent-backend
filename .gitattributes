@@ -1,0 +1,17 @@
+# Enforce LF line endings repo-wide so prompt-registry sha256 pins stay stable
+# across Windows / WSL2 checkouts. Without this, an editor saving CRLF silently
+# breaks LocalPromptSource boot validation (see prompts/registry.yaml).
+* text=auto eol=lf
+
+# Prompt fragments are sha256-pinned in prompts/registry.yaml — never CRLF.
+prompts/** text eol=lf
+
+# Binary assets: leave bytes untouched.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
