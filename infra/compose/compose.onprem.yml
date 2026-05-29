@@ -132,7 +132,7 @@ services:
 volumes:
   # onprem 전용: 사전 적재된 외부 볼륨을 마운트한다.
   # base compose.yml 의 `opensearch_data:` (자동 생성) 선언을 덮어쓰며,
-  # 실제 호스트 볼륨 `opensearch-data-single-gpu` (nrc-all-v3 색인 보유)
+  # 실제 호스트 볼륨 `opensearch-data-single-gpu` (nrc-all-v1 색인 보유)
   # 를 가리키도록 매핑한다. local 프로파일은 영향 없음.
   opensearch_data:
     external: true

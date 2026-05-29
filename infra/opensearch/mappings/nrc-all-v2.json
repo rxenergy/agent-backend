@@ -1,0 +1,643 @@
+{
+  "settings": {
+    "index": {
+      "number_of_shards": "1",
+      "number_of_replicas": "0",
+      "knn": true,
+      "knn.algo_param.ef_search": "100",
+      "refresh_interval": "30s"
+    },
+    "analysis": {
+      "analyzer": {
+        "nrc_text": {
+          "filter": [
+            "lowercase",
+            "asciifolding",
+            "stop"
+          ],
+          "type": "custom",
+          "tokenizer": "standard"
+        }
+      }
+    }
+  },
+  "mappings": {
+    "_meta": {
+      "schema_version": "nrc-all-v2",
+      "status": "planned",
+      "base": "nrc-all-v1",
+      "adds": ["clause_id", "authority_tier", "jurisdiction", "effective_on"],
+      "note": "v3.1 hierarchical_corrective G3 regulatory signals. NOT YET INGESTED — active index is nrc-all-v1. Populating these fields requires re-ingesting the corpus; until then RAG code runs on v1 and these read as null (authority_tier derived from collection at read time)."
+    },
+    "dynamic": "strict",
+    "properties": {
+      "block_count": {
+        "type": "integer"
+      },
+      "chunk_id": {
+        "type": "keyword"
+      },
+      "collection": {
+        "type": "keyword"
+      },
+      "clause_id": {
+        "type": "keyword"
+      },
+      "authority_tier": {
+        "type": "keyword"
+      },
+      "jurisdiction": {
+        "type": "keyword"
+      },
+      "effective_on": {
+        "type": "date",
+        "format": "yyyy-MM-dd||strict_date_optional_time"
+      },
+      "dense_e5": {
+        "type": "knn_vector",
+        "dimension": 1024,
+        "method": {
+          "engine": "lucene",
+          "space_type": "cosinesimil",
+          "name": "hnsw",
+          "parameters": {
+            "ef_construction": 256,
+            "m": 16
+          }
+        }
+      },
+      "dim": {
+        "type": "integer"
+      },
+      "doc_metadata": {
+        "dynamic": "true",
+        "properties": {
+          "AccessionNumber": {
+            "type": "keyword"
+          },
+          "AddresseeAffiliation": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "AddresseeName": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "AuthorAffiliation": {
+            "type": "keyword"
+          },
+          "AuthorName": {
+            "type": "keyword"
+          },
+          "Availability": {
+            "type": "keyword"
+          },
+          "CaseReferenceNumber": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "Comment": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "ContactPerson": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "DateAdded": {
+            "type": "date",
+            "format": "yyyy-MM-dd||strict_date_optional_time"
+          },
+          "DateAddedTimestamp": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "DistributionListCodes": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "DocketNumber": {
+            "type": "keyword"
+          },
+          "DocumentDate": {
+            "type": "date",
+            "format": "yyyy-MM-dd||strict_date_optional_time"
+          },
+          "DocumentReportNumber": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "DocumentTitle": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            },
+            "analyzer": "nrc_text"
+          },
+          "DocumentType": {
+            "type": "keyword"
+          },
+          "DocumentsFiledInPackage": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "EstimatedPageCount": {
+            "type": "integer"
+          },
+          "IsLegacy": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "IsPackage": {
+            "type": "keyword"
+          },
+          "ItemType": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "Keyword": {
+            "type": "keyword"
+          },
+          "LicenseNumber": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "MicroformAddresses": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "PackageNumber": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "PackagesFiledIn": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "Url": {
+            "type": "keyword",
+            "index": false
+          },
+          "_path": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "branch": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "category": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "chapter": {
+            "type": "keyword"
+          },
+          "chapter_title": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "collectionCode": {
+            "type": "keyword"
+          },
+          "collectionName": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "dateIssued": {
+            "type": "date",
+            "format": "yyyy-MM-dd||strict_date_optional_time"
+          },
+          "detailsLink": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "docClass": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "documentType": {
+            "type": "keyword"
+          },
+          "download": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "download_modsLink": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "download_pdfLink": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "download_premisLink": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "download_txtLink": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "download_xmlLink": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "download_zipLink": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "file_name": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "governmentAuthor1": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "governmentAuthor2": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "granulesLink": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "issue": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "lastModified": {
+            "type": "date"
+          },
+          "official_status": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "otherIdentifier": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "packageId": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "page_count": {
+            "type": "long"
+          },
+          "pages": {
+            "type": "integer"
+          },
+          "partRange_from": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "partRange_to": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "part_no": {
+            "type": "keyword"
+          },
+          "part_title": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "publisher": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "source_type": {
+            "type": "keyword"
+          },
+          "suDocClassNumber": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "title": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            },
+            "analyzer": "nrc_text"
+          },
+          "titleNumber": {
+            "type": "keyword"
+          },
+          "title_name": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "title_no": {
+            "type": "keyword"
+          },
+          "up_to_date_as_of": {
+            "type": "keyword"
+          },
+          "volume": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          },
+          "volumeCount": {
+            "type": "text",
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          }
+        }
+      },
+      "encoded_at": {
+        "type": "date"
+      },
+      "indexed_at": {
+        "type": "date"
+      },
+      "method": {
+        "type": "keyword"
+      },
+      "model_name": {
+        "type": "keyword"
+      },
+      "model_tag": {
+        "type": "keyword"
+      },
+      "normalized": {
+        "type": "boolean"
+      },
+      "page_end": {
+        "type": "integer"
+      },
+      "page_range": {
+        "type": "integer_range"
+      },
+      "page_start": {
+        "type": "integer"
+      },
+      "search_type": {
+        "type": "keyword"
+      },
+      "section_path": {
+        "type": "keyword"
+      },
+      "section_path_str": {
+        "type": "text",
+        "analyzer": "nrc_text"
+      },
+      "source_id": {
+        "type": "keyword"
+      },
+      "sparse_fermi": {
+        "type": "rank_features"
+      },
+      "sparse_model_name": {
+        "type": "keyword"
+      },
+      "sparse_model_tag": {
+        "type": "keyword"
+      },
+      "sparse_top_k": {
+        "type": "integer"
+      },
+      "text": {
+        "type": "text",
+        "analyzer": "nrc_text"
+      },
+      "text_sha256": {
+        "type": "keyword",
+        "index": false
+      },
+      "token_count": {
+        "type": "integer"
+      }
+    }
+  }
+}

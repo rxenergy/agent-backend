@@ -35,3 +35,20 @@ variants:
       - verification.faithfulness_check
     required_scenarios: [O1, O2, O3, O4]
     capability_tags: [retrieval, verification, memory, classification]
+
+  # v3.1 Hierarchical Corrective Workflow (PR-2 skeleton). Reuses the v2 tool
+  # set; the multi-strategy / claim-verification tools (search_bm25, …,
+  # verification.claim_verify) are added in later PRs as those nodes graduate
+  # from stub. compatible_llms stays pool-wide so the fake-echo unit path works.
+  hierarchical_corrective_v3_1:
+    compatible_llms: ["*"]
+    required_tools:
+      - retriever.search
+      - document.resolve_citation
+      - memory.session_load
+      - memory.session_update
+      - memory.approved_search
+      - verification.citation_check
+      - verification.faithfulness_check
+    required_scenarios: [O1, O2, O3, O4]
+    capability_tags: [hierarchical, corrective, claim_level_verify, retrieval, verification, memory]
