@@ -57,7 +57,9 @@ def _tool_registry_yaml(root: Path) -> Path:
     return p
 
 
-def _make_runner(tmp: Path, *, with_contract: bool = True) -> tuple[HierarchicalCorrectiveRunner, FilesystemEventSink]:
+def _make_runner(
+    tmp: Path, *, with_contract: bool = True, retrieval_planner=None,
+) -> tuple[HierarchicalCorrectiveRunner, FilesystemEventSink]:
     prompts = tmp / "prompts"
     build_prompts(prompts)
     registry = ToolRegistry.from_yaml(_tool_registry_yaml(tmp))
@@ -86,6 +88,7 @@ def _make_runner(tmp: Path, *, with_contract: bool = True) -> tuple[Hierarchical
         event_sink=sink,
         app_profile="local",
         citation_contract_path=str(_CONTRACT) if with_contract else None,
+        retrieval_planner=retrieval_planner,
     )
     return runner, sink
 
@@ -120,6 +123,52 @@ async def test_full_workflow_runs_and_records_v31_fields() -> None:
         assert rec["budget"]["llm_calls_used"] == 1
         assert rec["budget"]["total_llm_call_budget"] == 8
         assert rec["query_understanding"]["multi_intent"] is False
+
+
+@pytest.mark.asyncio
+async def test_event_records_regulatory_enforced_false_on_v1() -> None:
+    """Node 6 — 기본(v1) 경로는 regulatory hard gate 미강제. event 에
+    regulatory_enforced=false + 실제 신호값(s_lex 등)이 기록돼, v1 PASS 가
+    '규제 검증된 PASS'로 오인되지 않게 한다(advisor #2)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp))  # regulatory_hard_gates_enforced 기본 False
+        req = AgentRequest(interaction_id="hr", query_text="i-SMR ECCS 설계", session_id="sr")
+        resp = await runner.run(req)
+        assert resp.evaluation is not None
+        assert resp.evaluation.regulatory_enforced is False
+
+        rec = json.loads(
+            next((Path(tmp) / "events" / "t" / "interaction_events").rglob("*.jsonl"))
+            .read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert rec["regulatory_enforced"] is False
+        assert rec["evaluator_policy_hash"]
+        # per_chunk_signals 는 stub 상수가 아니라 실제 계산된 신호값을 담는다.
+        sig = rec["per_chunk_signals"][0]
+        assert "s_lex" in sig and "entity_coverage" in sig and "hard_gates_passed" in sig
+
+
+@pytest.mark.asyncio
+async def test_multi_strategy_plan_fans_out_and_records_each_call() -> None:
+    """With a 2-strategy plan, Node 5 must invoke retriever.search once per
+    strategy and record each as a separate tool_call (strategies_executed)."""
+    from app.application.retrieval.planner import RetrievalPlanner
+
+    planner = RetrievalPlanner(default_strategies=["hybrid", "bm25"], rules=[], rrf_k=60)
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), retrieval_planner=planner)
+        req = AgentRequest(interaction_id="hm", query_text="APR1400 비교", session_id="sm")
+        resp = await runner.run(req)
+        assert resp.refusal_reason is None
+
+        rec = json.loads(
+            next((Path(tmp) / "events" / "t" / "interaction_events").rglob("*.jsonl"))
+            .read_text(encoding="utf-8").splitlines()[0]
+        )
+        retr_calls = [tc for tc in rec["tool_calls"] if tc["name"] == "retriever.search"]
+        assert len(retr_calls) == 2, "both strategies must be recorded as tool_calls"
+        # The two calls have distinct input_hash (strategy is in the payload).
+        assert len({tc["input_hash"] for tc in retr_calls}) == 2
 
 
 @pytest.mark.asyncio
