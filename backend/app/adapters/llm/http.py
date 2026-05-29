@@ -12,7 +12,13 @@ from tenacity import (
     wait_exponential,
 )
 
-from app.ports.llm import LLMPort, LLMResult, LLMTokenDelta, LLMUnavailableError
+from app.ports.llm import (
+    GrammarSpec,
+    LLMPort,
+    LLMResult,
+    LLMTokenDelta,
+    LLMUnavailableError,
+)
 
 __all__ = ["HttpLLM", "LLMUnavailableError"]
 
@@ -54,6 +60,7 @@ class HttpLLM(LLMPort):
         prompt: str,
         *,
         model_options: dict[str, Any] | None = None,
+        grammar: GrammarSpec | None = None,
     ) -> LLMResult:
         opts = dict(model_options or {})
         max_tokens = int(opts.pop("max_tokens", 1024))
@@ -70,7 +77,9 @@ class HttpLLM(LLMPort):
             ):
                 with attempt:
                     if self._provider == "openai_compat":
-                        return await self._call_openai_compat(prompt, max_tokens, temperature)
+                        return await self._call_openai_compat(
+                            prompt, max_tokens, temperature, grammar
+                        )
                     return await self._call_anthropic(prompt, max_tokens, temperature)
         except (httpx.HTTPError, RetryError, _Retry5xx) as exc:
             raise LLMUnavailableError(str(exc)) from exc
@@ -82,6 +91,7 @@ class HttpLLM(LLMPort):
         prompt: str,
         *,
         model_options: dict[str, Any] | None = None,
+        grammar: GrammarSpec | None = None,
     ) -> AsyncIterator[LLMTokenDelta]:
         """Stream tokens for OpenAI-compatible and Anthropic providers.
 
@@ -108,7 +118,7 @@ class HttpLLM(LLMPort):
                 with attempt:
                     if self._provider == "openai_compat":
                         async for delta in self._stream_openai_compat(
-                            prompt, max_tokens, temperature
+                            prompt, max_tokens, temperature, grammar
                         ):
                             yield delta
                     else:
@@ -121,18 +131,20 @@ class HttpLLM(LLMPort):
             raise LLMUnavailableError(str(exc)) from exc
 
     async def _call_openai_compat(
-        self, prompt: str, max_tokens: int, temperature: float
+        self, prompt: str, max_tokens: int, temperature: float,
+        grammar: GrammarSpec | None = None,
     ) -> LLMResult:
         url = f"{self._endpoint}/chat/completions"
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        payload = {
+        payload: dict[str, Any] = {
             "model": self._model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        _apply_grammar_to_openai_payload(payload, grammar)
         async with httpx.AsyncClient(timeout=self._timeout_s) as client:
             resp = await client.post(url, json=payload, headers=headers)
         _raise_for_status(resp)
@@ -150,7 +162,8 @@ class HttpLLM(LLMPort):
         )
 
     async def _stream_openai_compat(
-        self, prompt: str, max_tokens: int, temperature: float
+        self, prompt: str, max_tokens: int, temperature: float,
+        grammar: GrammarSpec | None = None,
     ) -> AsyncIterator[LLMTokenDelta]:
         url = f"{self._endpoint}/chat/completions"
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -167,6 +180,7 @@ class HttpLLM(LLMPort):
             # streaming.
             "stream_options": {"include_usage": True},
         }
+        _apply_grammar_to_openai_payload(payload, grammar)
 
         finish_reason: str | None = None
         model_id_seen: str | None = None
@@ -434,6 +448,36 @@ def _map_anthropic_stop_reason(reason: str | None) -> str:
     if reason == "tool_use":
         return "tool_calls"
     return reason
+
+
+def _apply_grammar_to_openai_payload(
+    payload: dict[str, Any], grammar: GrammarSpec | None
+) -> None:
+    """Translate a `GrammarSpec` into vLLM guided-decoding kwargs.
+
+    vLLM accepts `guided_grammar` / `guided_regex` / `guided_json` /
+    `guided_choice` as top-level body fields (its OpenAI-compat server
+    forwards them to the sampling engine — XGrammar/Outlines).
+    Upstreams that don't recognise these keys ignore them harmlessly.
+
+    "json_schema" maps to the OpenAI `response_format` field *as well*
+    so cloud OpenAI honours it; vLLM accepts either form. Keeping both
+    sides covered means the same call works against both endpoints.
+    """
+    if grammar is None:
+        return
+    if grammar.kind == "grammar":
+        payload["guided_grammar"] = grammar.value
+    elif grammar.kind == "regex":
+        payload["guided_regex"] = grammar.value
+    elif grammar.kind == "json_schema":
+        payload["guided_json"] = grammar.value
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "guided", "schema": grammar.value},
+        }
+    elif grammar.kind == "choice":
+        payload["guided_choice"] = list(grammar.value)
 
 
 class _Retry5xx(Exception):

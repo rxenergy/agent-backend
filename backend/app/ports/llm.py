@@ -1,13 +1,37 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Protocol
+from typing import Any, AsyncIterator, Literal, Protocol
 
 
 class LLMUnavailableError(RuntimeError):
     """Raised by LLM adapters when the upstream endpoint is unreachable or
     returns a non-retryable failure. The runner maps this to
     refusal_reason='llm_unavailable'."""
+
+
+GrammarKind = Literal["grammar", "regex", "json_schema", "choice"]
+
+
+@dataclass(frozen=True)
+class GrammarSpec:
+    """Schema-constrained decoding directive (v3.1 §Node 13 hallucination
+    defense line 3). Adapters that support guided decoding (vLLM via
+    XGrammar/Outlines) enforce `value` at the sampling step so invalid
+    tokens never appear in the stream. Adapters without guided-decoding
+    support treat the spec as a no-op — the citation-contract prompt
+    fragment still steers behaviour, but enforcement falls to the
+    downstream Claim verifier.
+
+    `kind`:
+      - "grammar"     — GBNF / EBNF source (`value: str`)
+      - "regex"       — single regex (`value: str`)
+      - "json_schema" — JSON Schema dict (`value: dict`)
+      - "choice"      — list of allowed completions (`value: list[str]`)
+    """
+
+    kind: GrammarKind
+    value: Any
 
 
 @dataclass(frozen=True)
@@ -43,6 +67,7 @@ class LLMPort(Protocol):
         prompt: str,
         *,
         model_options: dict[str, Any] | None = None,
+        grammar: GrammarSpec | None = None,
     ) -> LLMResult: ...
 
     def generate_stream(
@@ -50,4 +75,5 @@ class LLMPort(Protocol):
         prompt: str,
         *,
         model_options: dict[str, Any] | None = None,
+        grammar: GrammarSpec | None = None,
     ) -> AsyncIterator[LLMTokenDelta]: ...
