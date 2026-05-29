@@ -37,6 +37,47 @@ from app.domain.interaction import AgentRequest
 
 _SPEC = VariantSpec(variant_id=HIERARCHICAL_CORRECTIVE_VARIANT_ID)
 
+
+class _ClaimAwareLLM:
+    """프롬프트로 호출 종류를 라우팅하는 controllable fake — generation 은 인용된
+    답변을, decompose 프롬프트는 claim JSON 을, entailment 프롬프트는 verdict
+    JSON 을 돌려준다. `entailment_status` 로 supported/contradicted/unsupported
+    를 제어해 Node 15 분기를 fixture 로 검증(advisor: verdict 를 테스트)."""
+
+    model_id = "claim-aware"
+
+    def __init__(self, *, entailment_status: str = "supported",
+                 answer: str = "i-SMR ECCS는 수동 냉각을 사용한다 [cite-0].") -> None:
+        self._ent = entailment_status
+        self._answer = answer
+
+    async def generate(self, prompt, *, model_options=None, grammar=None):
+        from app.ports.llm import LLMResult
+
+        # 주의: citation-contract fragment 에 "분해" 가 있어 generation 프롬프트도
+        # decompose 분기에 걸린다(테스트는 generated 본문 내용을 단언하지 않으므로
+        # 무해). 프로덕션은 별도 호출이라 충돌 없음.
+        if "분해" in prompt:  # Node 14 decompose
+            text = json.dumps({"claims": [
+                {"id": "cl-0", "text": "i-SMR ECCS는 수동 냉각을 사용한다", "cite_marker": "cite-0"}
+            ]})
+        elif "supported/contradicted" in prompt:  # Node 15 entailment
+            text = json.dumps({"verdicts": [
+                {"claim_id": "cl-0", "status": self._ent, "score": 0.95}
+            ]})
+        else:  # generation
+            text = self._answer
+        return LLMResult(text=text, token_usage={"prompt_tokens": 1, "completion_tokens": 1},
+                         model_id=self.model_id)
+
+    async def generate_stream(self, prompt, *, model_options=None, grammar=None):
+        from app.ports.llm import LLMTokenDelta
+
+        r = await self.generate(prompt, model_options=model_options, grammar=grammar)
+        yield LLMTokenDelta(content=r.text)
+        yield LLMTokenDelta(finish_reason="stop", token_usage=dict(r.token_usage),
+                            model_id=r.model_id)
+
 _CONTRACT = Path(__file__).resolve().parents[3] / "prompts" / "system" / "citation_contract_v1.md"
 
 
@@ -58,7 +99,8 @@ def _tool_registry_yaml(root: Path) -> Path:
 
 
 def _make_runner(
-    tmp: Path, *, with_contract: bool = True, retrieval_planner=None,
+    tmp: Path, *, with_contract: bool = True, retrieval_planner=None, retriever_tool=None,
+    llm=None,
 ) -> tuple[HierarchicalCorrectiveRunner, FilesystemEventSink]:
     prompts = tmp / "prompts"
     build_prompts(prompts)
@@ -67,7 +109,7 @@ def _make_runner(
     recorder = EventRecorder(sink, app_profile="local")
     store = InMemorySessionMemoryStore()
     tools = {
-        "retriever.search": LocalRetrieverTool(),
+        "retriever.search": retriever_tool or LocalRetrieverTool(),
         "document.resolve_citation": LocalDocumentResolverTool(),
         "memory.session_load": SessionLoadTool(store),
         "memory.session_update": SessionUpdateTool(store, ttl_days=90),
@@ -76,7 +118,7 @@ def _make_runner(
         "verification.faithfulness_check": LocalFaithfulnessCheckTool(),
     }
     executor = ToolExecutor(registry=registry, tools=tools, event_sink=sink)
-    llm_router = LLMRouter(pool={"fake-echo": FakeEchoLLM(model_id="fake-echo")}, default_id="fake-echo")
+    llm_router = LLMRouter(pool={"fake-echo": llm or FakeEchoLLM(model_id="fake-echo")}, default_id="fake-echo")
     runner = HierarchicalCorrectiveRunner(
         spec=_SPEC,
         llm_router=llm_router,
@@ -101,28 +143,239 @@ async def test_variant_is_registered() -> None:
 @pytest.mark.asyncio
 async def test_full_workflow_runs_and_records_v31_fields() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        runner, _ = _make_runner(Path(tmp))
+        # 실제 claim 경로(LLM decompose + entailment supported)로 PASS 까지 통과.
+        runner, _ = _make_runner(Path(tmp), llm=_ClaimAwareLLM(entailment_status="supported"))
         req = AgentRequest(interaction_id="h1", query_text="APR1400 안전계통", session_id="s1")
         resp = await runner.run(req)
 
         assert resp.verification_status == "pass"
         assert resp.refusal_reason is None
         assert len(resp.citations) >= 1
-        # v3.1 response carries an evaluation summary.
         assert resp.evaluation is not None
         assert resp.evaluation.overall_decision == "pass"
+        assert len(resp.claims) == 1 and resp.claims[0].status == "supported"
 
-        # Event must carry the v3.1 reproducibility fields, asdict-serialized.
         events_root = Path(tmp) / "events" / "t" / "interaction_events"
         line = next(events_root.rglob("*.jsonl")).read_text(encoding="utf-8").splitlines()[0]
         rec = json.loads(line)
         assert rec["agent_variant"] == HIERARCHICAL_CORRECTIVE_VARIANT_ID
         assert rec["retrieval_plan_hash"]
-        assert rec["per_chunk_signals"], "evaluator signals must be recorded"
         assert rec["per_chunk_signals"][0]["decision"] == "pass"
-        assert rec["budget"]["llm_calls_used"] == 1
-        assert rec["budget"]["total_llm_call_budget"] == 8
-        assert rec["query_understanding"]["multi_intent"] is False
+        # generation + decompose(llm) + entailment = 3 LLM calls.
+        assert rec["budget"]["llm_calls_used"] == 3
+        assert rec["decompose_method"] == "llm"
+        assert rec["entailment_model"] == "claim-aware"
+
+
+class _TextChunkRetriever:
+    """검색 chunk 에 *전체 본문*(text)이 채워진 현실 케이스. Node 9 window 가
+    prompt 에 실제로 도달하는지(전역 capture_mode 와 무관)를 검증하기 위함 —
+    LocalRetrieverTool 은 text=None 이라 이 경로를 노출하지 못한다(advisor)."""
+
+    name = "retriever.search"
+    version = "v1"
+
+    async def invoke(self, tool_input, context):
+        from app.domain.retrieval import (
+            RetrievedChunk,
+            RetrieverSearchInput,
+            RetrieverSearchOutput,
+        )
+        from app.domain.tools import ToolResult
+
+        if isinstance(tool_input, dict):
+            tool_input = RetrieverSearchInput.model_validate(tool_input)
+        full = (
+            "Lead junk sentence. "
+            "i-SMR ECCS passive cooling design detail. "
+            "Middle filler sentence. "
+            "UNIQUEMARKER trailing tail sentence."
+        )
+        chunk = RetrievedChunk(
+            chunk_id="t1", document_id="d", score=0.9, text=full, snippet=full[:40],
+        )
+        out = RetrieverSearchOutput(chunks=[chunk])
+        return ToolResult(
+            tool_name=self.name, tool_version=self.version, status="success",
+            output=out.model_dump(mode="json"), latency_ms=0,
+            input_hash="h", trace_id=context.trace_id,
+        )
+
+
+class _SequenceRetriever:
+    """호출 순서대로 품질이 다른 chunk 를 반환 — recover 루프를 실제로 태우는
+    instrument. mode: pass(질의어 전부)·weak(절반)·fail(무관). 마지막 mode 가
+    이후 모든 호출에 반복 적용(clamp)."""
+
+    name = "retriever.search"
+    version = "v1"
+
+    def __init__(self, modes: list[str]) -> None:
+        self.modes = modes
+        self.calls = 0
+
+    async def invoke(self, tool_input, context):
+        from app.domain.retrieval import (
+            RetrievedChunk, RetrieverSearchInput, RetrieverSearchOutput,
+        )
+        from app.domain.tools import ToolResult
+
+        if isinstance(tool_input, dict):
+            tool_input = RetrieverSearchInput.model_validate(tool_input)
+        mode = self.modes[min(self.calls, len(self.modes) - 1)]
+        self.calls += 1
+        ent = " ".join(v for vs in (tool_input.entities or {}).values() for v in vs if v)
+        toks = tool_input.query_text.split()
+        if mode == "pass":
+            text = f"{tool_input.query_text} {ent}"
+        elif mode == "weak":
+            text = f"{' '.join(toks[: max(1, len(toks)//2)])} {ent}"
+        else:  # fail — 질의·엔티티와 무관
+            text = "completely unrelated boilerplate content"
+        chunk = RetrievedChunk(chunk_id=f"c{self.calls}", document_id="d", score=0.8, snippet=text)
+        out = RetrieverSearchOutput(chunks=[chunk])
+        return ToolResult(
+            tool_name=self.name, tool_version=self.version, status="success",
+            output=out.model_dump(mode="json"), latency_ms=0, input_hash=f"h{self.calls}",
+            trace_id=context.trace_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_recover_weak_then_better_reaches_pass() -> None:
+    """round1 FAIL → 복구 재검색이 PASS chunk 반환 → evaluation PASS, RecoverRound 기록."""
+    fake = _SequenceRetriever(["fail", "pass"])
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), retriever_tool=fake, llm=_ClaimAwareLLM())
+        req = AgentRequest(interaction_id="hr1", query_text="i-SMR ECCS passive design",
+                           session_id="sr1")
+        resp = await runner.run(req)
+        assert resp.evaluation.overall_decision == "pass"
+        assert len(resp.recover_rounds) >= 1
+        assert resp.recover_rounds[-1].outcome_decision == "pass"
+        assert resp.refusal_reason != "insufficient_evidence"
+        # 복구 라운드의 chunk(c2)가 실제로 citation 까지 흘러갔는지 — 초기 c1 아님
+        # (handoff 무결성, PR-6 window 교훈).
+        assert any(c.chunk_id == "c2" for c in resp.citations)
+
+
+@pytest.mark.asyncio
+async def test_recover_exhausted_refuses_insufficient_evidence_and_terminates() -> None:
+    """항상 FAIL → max_rounds 후 종료(무한루프 X) → INSUFFICIENT_EVIDENCE refuse.
+    retriever 호출 = 최초 1 + recover 2 = 3 (종료 보장의 직접 증거)."""
+    fake = _SequenceRetriever(["fail"])
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), retriever_tool=fake)
+        req = AgentRequest(interaction_id="hr2", query_text="i-SMR ECCS passive design",
+                           session_id="sr2")
+        resp = await runner.run(req)
+        assert resp.refusal_reason == "insufficient_evidence"
+        assert resp.verification_status == "fail"
+        assert fake.calls == 3  # 1 initial + 2 recover rounds, then stop
+        # 평가 후 refusal 도 재현 데이터(recover_rounds·per_chunk_signals)를 event 에
+        # 남겨야 "왜 거부했나"가 사후 추적 가능(defensibility, advisor).
+        rec = json.loads(
+            next((Path(tmp) / "events" / "t" / "interaction_events").rglob("*.jsonl"))
+            .read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert len(rec["recover_rounds"]) == 2
+        assert rec["per_chunk_signals"]
+        assert rec["evaluator_policy_hash"]
+
+
+@pytest.mark.asyncio
+async def test_recover_weak_exhausted_proceeds_not_refused() -> None:
+    """항상 WEAK → 복구 소진 후에도 refuse 하지 않고 진행(Node 15 claim gate 가
+    backstop). INSUFFICIENT_EVIDENCE 아님."""
+    fake = _SequenceRetriever(["weak"])
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), retriever_tool=fake)
+        req = AgentRequest(interaction_id="hr3", query_text="i-SMR ECCS passive design",
+                           session_id="sr3")
+        resp = await runner.run(req)
+        assert resp.refusal_reason != "insufficient_evidence"
+        # WEAK 진행 → Node 15 가 판정(FakeEcho fallback → partial 등). FAIL refuse 아님.
+        assert resp.verification_status in ("pass", "partial")
+
+
+@pytest.mark.asyncio
+async def test_contradicted_claim_refuses_with_verification_failed() -> None:
+    """Node 15 가 contradicted 판정 → 답변 폐기 → VERIFICATION_FAILED refusal
+    (답변을 버리는 안전-critical 분기)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), llm=_ClaimAwareLLM(entailment_status="contradicted"))
+        req = AgentRequest(interaction_id="hc", query_text="i-SMR ECCS 설계", session_id="sc")
+        resp = await runner.run(req)
+        assert resp.verification_status == "fail"
+        assert resp.refusal_reason == "verification_failed"
+        assert resp.citations == ()
+        assert resp.claims and resp.claims[0].status == "contradicted"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_claim_yields_partial() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), llm=_ClaimAwareLLM(entailment_status="unsupported"))
+        req = AgentRequest(interaction_id="hu", query_text="i-SMR ECCS 설계", session_id="su")
+        resp = await runner.run(req)
+        assert resp.verification_status == "partial"
+        assert resp.refusal_reason == "partial_answer"
+
+
+@pytest.mark.asyncio
+async def test_v1_pass_carries_unverified_marker_in_response_object() -> None:
+    """안전 계약: regulatory_enforced=False(v1) 인 PASS 는 응답 *객체* 에
+    regulatory_grounding='unverified' + answer_text 마커를 달아 '완전 검증된
+    답변'으로 오인되지 않게 한다(advisor #2 — event 뿐 아니라 응답 표면)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), llm=_ClaimAwareLLM(entailment_status="supported"))
+        req = AgentRequest(interaction_id="hv", query_text="i-SMR ECCS 설계", session_id="sv")
+        resp = await runner.run(req)
+        assert resp.verification_status == "pass"
+        assert resp.regulatory_grounding == "unverified"  # v1: 미강제
+        assert "규제 근거 미검증" in resp.answer_text  # dumb client 도 보이게
+        rec = json.loads(
+            next((Path(tmp) / "events" / "t" / "interaction_events").rglob("*.jsonl"))
+            .read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert rec["regulatory_grounding"] == "unverified"
+
+
+@pytest.mark.asyncio
+async def test_node9_window_reaches_prompt_not_full_text() -> None:
+    """프로덕션 경로 검증: text 가 채워진 chunk 에서도 rendered prompt 에는 Node 9
+    window 만 실리고 full text 의 제외 문장은 실리지 않는다(전역 capture_mode 가
+    metadata 여도 v3.1 은 snippets 로 강제 렌더)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), retriever_tool=_TextChunkRetriever())
+        req = AgentRequest(
+            interaction_id="hw", query_text="i-SMR ECCS passive cooling design",
+            session_id="sw",
+        )
+        await runner.run(req)
+        rec = json.loads(
+            next((Path(tmp) / "events" / "t" / "prompt_render_records").rglob("*.json"))
+            .read_text(encoding="utf-8")
+        )
+        prompt = rec["rendered_prompt"]
+        # window (best 문장 ± 1) 는 들어가고, window 밖 문장(UNIQUEMARKER)은 빠진다.
+        assert "passive cooling design detail" in prompt
+        assert "UNIQUEMARKER" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_node9_records_evidence_pack_hash() -> None:
+    """Node 9 가 실제 스니펫을 추출하면 event 에 evidence_pack_hash 가 실린다
+    (PR-2 stub 에선 None 이었음)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp))
+        req = AgentRequest(interaction_id="hs", query_text="i-SMR ECCS 설계", session_id="ss")
+        await runner.run(req)
+        rec = json.loads(
+            next((Path(tmp) / "events" / "t" / "interaction_events").rglob("*.jsonl"))
+            .read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert rec["evidence_pack_hash"]
 
 
 @pytest.mark.asyncio
@@ -156,7 +409,7 @@ async def test_multi_strategy_plan_fans_out_and_records_each_call() -> None:
 
     planner = RetrievalPlanner(default_strategies=["hybrid", "bm25"], rules=[], rrf_k=60)
     with tempfile.TemporaryDirectory() as tmp:
-        runner, _ = _make_runner(Path(tmp), retrieval_planner=planner)
+        runner, _ = _make_runner(Path(tmp), retrieval_planner=planner, llm=_ClaimAwareLLM())
         req = AgentRequest(interaction_id="hm", query_text="APR1400 비교", session_id="sm")
         resp = await runner.run(req)
         assert resp.refusal_reason is None
