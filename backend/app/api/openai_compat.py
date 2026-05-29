@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from typing import Any, AsyncIterator
@@ -105,6 +106,44 @@ def _last_user_query(messages: list[ChatMessage]) -> str:
     return ""
 
 
+# OpenWebUI 보조 task(follow-up / title / tags / autocomplete 생성)는 일반 채팅과
+# 같은 /v1/chat/completions 로 들어오며, 지시문 + 대화 전문을 `<chat_history>…
+# </chat_history>` 블록에 싸서 단일 user 메시지로 보낸다. 이 메타 프롬프트를 그대로
+# retriever 질의로 쓰면 지시문 토큰("suggest follow-up questions", "JSON" 등)과
+# 직전 답변 전문이 BM25/임베딩을 오염시킨다(분류·검색이 의미 없는 질의를 돈다).
+# 검색·분류에 의미 있는 *마지막 실제 사용자 발화*로 환원한다. 서명(`<chat_history>`)이
+# 없으면 일반 질의이므로 원문 그대로 둔다(no-op).
+_CHAT_HISTORY_RE = re.compile(
+    r"<chat_history>\s*(.*?)\s*</chat_history>", re.DOTALL | re.IGNORECASE
+)
+_TURN_RE = re.compile(r"^\s*(USER|ASSISTANT|SYSTEM)\s*:\s*(.*)$", re.IGNORECASE)
+
+
+def _strip_task_scaffolding(text: str) -> str:
+    """OpenWebUI task 메타 프롬프트를 검색·분류용 질의로 환원한다.
+
+    `<chat_history>` 블록이 있으면 그 안의 마지막 USER 턴을 반환한다(가장 깨끗한
+    검색 앵커). USER 턴이 없으면 지시문 scaffolding 을 제거한 대화 본문으로,
+    그래도 비면 원문으로 폴백. 서명이 없으면 원문 그대로(일반 질의)."""
+    m = _CHAT_HISTORY_RE.search(text)
+    if not m:
+        return text
+    body = m.group(1)
+    turns: list[tuple[str, list[str]]] = []
+    for line in body.splitlines():
+        tm = _TURN_RE.match(line)
+        if tm:
+            turns.append((tm.group(1).upper(), [tm.group(2)]))
+        elif turns:
+            turns[-1][1].append(line)
+    for role, buf in reversed(turns):
+        if role == "USER":
+            joined = "\n".join(buf).strip()
+            if joined:
+                return joined
+    return body.strip() or text
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest, request: Request):
     container = request.app.state.container
@@ -156,7 +195,9 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         )
 
     interaction_id = str(uuid.uuid4())
-    query_text = _last_user_query(req.messages)
+    # OpenWebUI task 메타 프롬프트는 검색을 오염시키므로 마지막 실제 사용자 발화로
+    # 환원한다(일반 질의는 no-op). 분류·검색·생성이 모두 이 정제된 질의로 동작한다.
+    query_text = _strip_task_scaffolding(_last_user_query(req.messages))
     history = tuple(ChatTurn(role=m.role, content=m.content) for m in req.messages[:-1])
 
     model_options: dict[str, Any] = {}
