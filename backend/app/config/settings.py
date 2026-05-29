@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     retriever_k_dense: int = 50
     opensearch_endpoint: str = "http://opensearch:9200"
     opensearch_index: str = "nrc-all-v1"
+    # 적재 데이터가 따르는 인덱스 스키마 버전의 *선언적* 단일 출처.
+    # 인덱스 이름과 분리한다 — 이름은 임의(`nrc-smr-2026` 등)일 수 있으므로
+    # 능력 판단을 네이밍 관습에 의존하지 않는다. v3.1 G3 규제 신호
+    # (clause_id/jurisdiction/effective_on)는 v2 에서만 신뢰 가능하며,
+    # v1 에서는 authority_tier(collection 유도)만 부분 동작한다. 운영자가
+    # 코퍼스를 v2 스키마로 재적재한 뒤 이 값을 "v2" 로 올린다.
+    opensearch_schema_version: Literal["v1", "v2"] = "v1"
     opensearch_search_pipeline: str = "nrc-hybrid-search"
     opensearch_dense_field: str = "dense_e5"
     opensearch_sparse_field: str = "sparse_fermi"

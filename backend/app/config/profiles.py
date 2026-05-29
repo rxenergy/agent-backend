@@ -237,17 +237,18 @@ async def build_container(settings: Settings) -> AppContainer:
         if settings.retriever_backend == "opensearch":
             preflight_severity = _resolve_preflight_severity(settings)
             # v3.1: the G3 evaluator reads regulatory-meta fields. These exist
-            # only in the *planned* nrc-all-v2 schema — the active nrc-all-v1
-            # data has not been re-ingested with them. So require the fields
-            # only when BOTH the hierarchical_corrective variant is enabled AND
-            # the target index is the v2 schema; while pointed at v1 we ask for
-            # nothing so boot is unaffected (the adapter reads the fields as
-            # null / derives authority_tier from collection). See
-            # infra/opensearch/mappings/README.md.
+            # only in the v2 schema — the active v1 data has not been
+            # re-ingested with them. The judgment of "is v2 usable" is the
+            # *declared* `opensearch_schema_version` flag (single source of
+            # truth), NOT the index name — the name is arbitrary and tells
+            # nothing about populated data. Require the fields only when BOTH
+            # the hierarchical_corrective variant is enabled AND the deployment
+            # declares schema v2; on v1 we ask for nothing so boot is
+            # unaffected. See infra/opensearch/mappings/README.md.
             required_fields: tuple[str, ...] = ()
             if (
                 "hierarchical_corrective_v3_1" in settings.agent_variants_enabled
-                and settings.opensearch_index.endswith("v2")
+                and settings.opensearch_schema_version == "v2"
             ):
                 required_fields = (
                     "clause_id", "authority_tier", "jurisdiction", "effective_on",
