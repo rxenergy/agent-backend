@@ -3,6 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.domain.agents import Budget
+from app.domain.retrieval import (
+    ChunkSignals,
+    EvaluationResult,
+    HopEdge,
+    RecoverRound,
+    SubQuestionDecision,
+)
+from app.domain.verification import ClaimVerification
+
 
 @dataclass(frozen=True)
 class ChatTurn:
@@ -53,6 +63,13 @@ class AgentResponse:
     entities: dict[str, list[str]] = field(default_factory=dict)
     llm_id: str | None = None
     model_id: str | None = None
+    # --- v3.1 (hierarchical_corrective) optional outputs ---
+    # Default empty so v2 responses are unchanged. Surfaced to the client as
+    # OpenAI-compat custom fields (the standard chat body is untouched).
+    claims: tuple[ClaimVerification, ...] = ()
+    evaluation: EvaluationResult | None = None
+    recover_rounds: tuple[RecoverRound, ...] = ()
+    hops: tuple[HopEdge, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,3 +138,20 @@ class InteractionEvent:
 
     refusal_reason: str | None = None
     error_code: str | None = None
+
+    # --- v3.1 (hierarchical_corrective) reproducibility extensions ---
+    # All default empty/None so v2 events are byte-identical except for the
+    # absence of populated values. Embedded models are frozen dataclasses so
+    # `dataclasses.asdict()` recurses cleanly (spec Appendix B).
+    query_understanding: dict[str, Any] | None = None
+    retrieval_plan_hash: str | None = None
+    evaluator_policy_hash: str | None = None
+    per_chunk_signals: tuple[ChunkSignals, ...] = ()
+    per_sub_question_decisions: tuple[SubQuestionDecision, ...] = ()
+    recover_rounds: tuple[RecoverRound, ...] = ()
+    hops: tuple[HopEdge, ...] = ()
+    evidence_pack_hash: str | None = None
+    claims: tuple[ClaimVerification, ...] = ()
+    verifier_policy_hash: str | None = None
+    entailment_model: str | None = None
+    budget: Budget | None = None

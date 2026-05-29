@@ -3,15 +3,24 @@ from __future__ import annotations
 import hashlib
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 from opentelemetry import trace
 
+from app.domain.agents import Budget
 from app.domain.interaction import (
     AgentRequest,
     AgentResponse,
     InteractionEvent,
     ToolCallRecord,
 )
+from app.domain.retrieval import (
+    ChunkSignals,
+    HopEdge,
+    RecoverRound,
+    SubQuestionDecision,
+)
+from app.domain.verification import ClaimVerification
 from app.ports.event_sink import EventSinkPort
 
 SCHEMA_VERSION = "interaction_event/v2"
@@ -66,6 +75,20 @@ class EventRecorder:
         memory_retrieval_scores: dict[str, float] | None = None,
         memory_review_statuses: dict[str, str] | None = None,
         memory_staleness_statuses: dict[str, str] | None = None,
+        # --- v3.1 (hierarchical_corrective) reproducibility (default empty;
+        # v2 callers omit these and get an unchanged event) ---
+        query_understanding: dict[str, Any] | None = None,
+        retrieval_plan_hash: str | None = None,
+        evaluator_policy_hash: str | None = None,
+        per_chunk_signals: tuple[ChunkSignals, ...] = (),
+        per_sub_question_decisions: tuple[SubQuestionDecision, ...] = (),
+        recover_rounds: tuple[RecoverRound, ...] = (),
+        hops: tuple[HopEdge, ...] = (),
+        evidence_pack_hash: str | None = None,
+        claims: tuple[ClaimVerification, ...] = (),
+        verifier_policy_hash: str | None = None,
+        entailment_model: str | None = None,
+        budget: Budget | None = None,
     ) -> InteractionEvent:
         latency_ms = (
             int((time.monotonic() - started_at) * 1000)
@@ -110,6 +133,18 @@ class EventRecorder:
             token_usage=dict(response.token_usage),
             refusal_reason=response.refusal_reason,
             error_code=error_code,
+            query_understanding=query_understanding,
+            retrieval_plan_hash=retrieval_plan_hash,
+            evaluator_policy_hash=evaluator_policy_hash,
+            per_chunk_signals=per_chunk_signals,
+            per_sub_question_decisions=per_sub_question_decisions,
+            recover_rounds=recover_rounds,
+            hops=hops,
+            evidence_pack_hash=evidence_pack_hash,
+            claims=claims,
+            verifier_policy_hash=verifier_policy_hash,
+            entailment_model=entailment_model,
+            budget=budget,
         )
 
     async def persist(self, event: InteractionEvent) -> None:

@@ -13,6 +13,9 @@ class RefusalReason(str, Enum):
     UNKNOWN_SCENARIO = "unknown_scenario"
     DATA_LIMITATION = "data_limitation"
     LLM_UNAVAILABLE = "llm_unavailable"
+    # v3.1 (hierarchical_corrective)
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"  # Node 7 recover exhausted (WEAK gate)
+    BUDGET_EXCEEDED = "budget_exceeded"  # LLM-call budget cap hit (spec §2.3)
 
 
 class VerificationStatus(str, Enum):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,3 +38,17 @@ class VariantSpec(BaseModel):
         if not self.compatible_llms or "*" in self.compatible_llms:
             return True
         return llm_id in self.compatible_llms
+
+
+@dataclass(frozen=True)
+class Budget:
+    """v3.1 (hierarchical_corrective) LLM-call budget (spec §2.3, Appendix B
+    `budgets`). The conductor increments `llm_calls_used` per LLM call and
+    refuses with `RefusalReason.BUDGET_EXCEEDED` once the cap is hit. Frozen
+    dataclass so it serializes into `InteractionEvent.budget` via asdict; the
+    conductor tracks the live count separately and snapshots a Budget at the
+    end. `budget_hit` records which node(s) tried to exceed the cap."""
+
+    llm_calls_used: int = 0
+    total_llm_call_budget: int = 8
+    budget_hit: tuple[str, ...] = field(default_factory=tuple)
