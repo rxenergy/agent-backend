@@ -32,7 +32,11 @@ class Settings(BaseSettings):
     service_version: str = "0.2.0"
 
     # Agent variant pool + default selection
-    agent_variants_enabled: list[str] = ["sequential_tool_routed_v2", "fake_echo_v0"]
+    agent_variants_enabled: list[str] = [
+        "sequential_tool_routed_v2",
+        "hierarchical_corrective_v3_1",
+        "fake_echo_v0",
+    ]
     default_variant: str = "sequential_tool_routed_v2"
 
     # Classifier (Node 1)

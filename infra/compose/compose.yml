@@ -32,6 +32,7 @@ services:
       - ../../prompts:/app/prompts:ro
       - ../../tools:/app/tools:ro
       - ../../variants:/app/variants:ro
+      - ../../data:/app/data:ro   # v3.1 Node 7 recover 동의어 사전(data/synonyms/)
       - ../../scripts:/app/scripts:ro
       - ../../datasets:/app/datasets:ro
       - ../../infra/opensearch:/app/infra/opensearch:ro
