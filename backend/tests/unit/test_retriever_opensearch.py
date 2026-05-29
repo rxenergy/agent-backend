@@ -234,6 +234,30 @@ def test_retriever_endpoint_required():
 
 
 @pytest.mark.parametrize(
+    "strategy,expected_pipeline",
+    [
+        ("hybrid", "nrc-hybrid-search"),       # default constructor pipeline
+        ("bm25", "nrc-hybrid-bm25-only"),
+        ("vector", "nrc-hybrid-dense-only"),
+        ("dense", "nrc-hybrid-dense-only"),
+        ("sparse", "nrc-hybrid-sparse-only"),
+        ("unknown-xyz", "nrc-hybrid-search"),  # fallback to default
+    ],
+)
+async def test_strategy_selects_search_pipeline(monkeypatch, strategy, expected_pipeline):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"hits": {"hits": []}})
+
+    _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
+    tool = _retriever()  # search_pipeline="nrc-hybrid-search"
+    await tool.invoke({"query_text": "q", "top_k": 1, "strategy": strategy}, _ctx())
+    assert f"search_pipeline={expected_pipeline}" in captured["url"]
+
+
+@pytest.mark.parametrize(
     "collection,expected",
     [
         ("10CFR", "primary"),
