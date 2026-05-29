@@ -1,0 +1,36 @@
+# v3.1 Node 4 — retrieval_plan_template (docs/plans/hierarchical_corrective_workflow.v1.md §5).
+#
+# 코드(RetrievalPlanner)가 (scenario_object, scenario_depth, entities, intents)를
+# 보고 첫 매칭 룰의 strategies[] 를 채택한다. LLM 미사용. 매칭 안 되면
+# default_strategies. plan_hash = sha256(rule_id || entity_hash) 로 재현 단위.
+#
+# strategy 값은 retriever.search 의 `strategy` 입력으로 전달된다:
+#   hybrid | bm25 | vector | sparse  (OpenSearch 어댑터가 search_pipeline 으로 매핑)
+#
+# `when` 조건(모두 AND):
+#   scenario_object_in: [..]   — scenario_object 가 목록에 포함
+#   intents_any:        [..]   — intents 중 하나라도 목록에 포함
+#   has_entity_kinds:   [..]   — entities 에 해당 종류가 모두 존재
+
+default_strategies: [hybrid]
+fusion: rrf
+rrf_k: 60
+
+rules:
+  # 비교 질의 — lexical(조문/노형명 정확) + hybrid 둘 다 띄워 RRF.
+  - id: comparison_multi_strategy
+    when:
+      intents_any: [comparison, compare]
+    strategies: [hybrid, bm25]
+
+  # 규제 조문 대상 — clause/규제 ID 는 lexical 신뢰도가 높음.
+  - id: regulation_clause
+    when:
+      scenario_object_in: [O2, regulation, kins, nrc]
+    strategies: [hybrid, bm25]
+
+  # 규제 ID 엔티티가 명시된 질의 — 동일.
+  - id: has_regulation_id
+    when:
+      has_entity_kinds: [regulation_id]
+    strategies: [hybrid, bm25]

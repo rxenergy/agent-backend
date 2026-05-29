@@ -1,0 +1,41 @@
+# v3.1 Node 6 — retrieval_evaluate 정책 (docs/plans/hierarchical_corrective_workflow.v1.md §6).
+#
+# 모든 임계값·가중치는 코드 밖 이 파일에 둔다. RetrievalEvaluator 가 이 문서의
+# canonical JSON 을 sha256 해 `evaluator_policy_hash` 로 재현 단위에 박는다.
+# 변경 시 hash 가 바뀌므로 어떤 정책으로 게이팅했는지 사후 추적 가능.
+
+# 가중 합산 가중치. evaluator 가 (활성) 가중치 합으로 정규화하므로 합이 1이
+# 아니어도 됨 — semantic(G2 cross-encoder)은 PR-5 미구현(spec roadmap P5)이라
+# weight 0. 나중에 재추가하면 자동 재정규화된다.
+weights:
+  lexical: 0.40      # G1 — query term coverage
+  semantic: 0.0      # G2 — cross-encoder (P5)
+  regulatory: 0.40   # G3 — clause/version/authority/jurisdiction
+  ensemble: 0.20     # G4 — cross-strategy agreement (RRF). 단일 전략 경로에선 거의 무력.
+
+thresholds:
+  tau_pass: 0.5
+  tau_weak: 0.3
+
+sub_question:
+  k_min: 1           # sub_q 가 PASS 되려면 PASS chunk 최소 개수
+
+# Hard gate (tri-state: pass / fail / not-applicable). *명확한 negative* 만 FAIL.
+# 입력 부재(v1 의 clause_id/effective_on=None)는 not-applicable → 차단 안 함.
+hard_gates:
+  entity_coverage_min: 0.3      # entities 존재 시에만 적용. 미만이면 FAIL.
+  min_authority_tier: secondary # authority_tier 게이트 임계. 단, enforce 플래그가 켜질 때만 적용.
+  # enforce_authority_tier 는 런타임에 주입(opensearch_schema_version=="v2" 일 때 true).
+  # v1 은 false — collection-유도 tier 라 vendor(tertiary) 를 차단하면 NuScale 등
+  # 정당한 답변까지 거부됨. (장기: 시나리오별 — O2 규제는 ≥secondary, O1 vendor 는
+  # tertiary 허용. PR 계산 시 vendor-거부 기본값을 v2 에 굳히지 말 것.)
+
+# authority_tier 순위/점수 (1차 법령 > 2차 가이드 > 3차 해설/벤더).
+authority_tier_rank:
+  primary: 3
+  secondary: 2
+  tertiary: 1
+authority_tier_score:
+  primary: 1.0
+  secondary: 0.6
+  tertiary: 0.3
