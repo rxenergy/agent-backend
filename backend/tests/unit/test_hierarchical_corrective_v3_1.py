@@ -516,3 +516,104 @@ async def test_citation_contract_changes_prompt_hash() -> None:
         )
 
     assert rec_with["rendered_prompt_hash"] != rec_without["rendered_prompt_hash"]
+
+
+# ----------------------------------------------------------------------
+# Phoenix(OTel) span emission — 무엇이 트레이스에 닿는가를 직접 검증한다.
+# no-op 트레이서 아래선 set_attribute 가 silent no-op 이므로(그리고 OTel 은
+# None/dict/mixed-seq attr 를 경고만 하고 *드롭*하므로) 실제 provider 를 꽂고
+# 종료된 span 을 수집해 이름·attribute 존재를 단언해야 의미가 있다(advisor).
+# ----------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def span_exporter():
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    # set_tracer_provider 는 최초 1회만 적용(이후 경고+무시). 유닛 스위트는 아무도
+    # provider 를 설치하지 않으므로 여기서 이긴다. 모듈 import 시 캡처된 _TRACER
+    # proxy 는 provider 설치 후 첫 span 생성에서 실제 tracer 로 lazily resolve 된다.
+    trace.set_tracer_provider(provider)
+    return exporter
+
+
+def _spans_by_name(exporter) -> dict[str, list]:
+    out: dict[str, list] = {}
+    for sp in exporter.get_finished_spans():
+        out.setdefault(sp.name, []).append(sp)
+    return out
+
+
+@pytest.mark.asyncio
+async def test_phoenix_spans_emitted_on_pass_path(span_exporter) -> None:
+    """PASS 경로: v3.1 의 Phase B/D 노드 + Phase D LLM 2회가 모두 span 으로
+    Phoenix 에 닿는지 — 이름과 핵심 attribute 존재로 검증."""
+    span_exporter.clear()
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), llm=_ClaimAwareLLM(entailment_status="supported"))
+        req = AgentRequest(interaction_id="hp1", query_text="APR1400 안전계통", session_id="sp1")
+        resp = await runner.run(req)
+        assert resp.verification_status == "pass"
+
+    by_name = _spans_by_name(span_exporter)
+
+    # (1) Phase D LLM 호출 2개가 LLM span 으로 보인다(가장 심각했던 누락).
+    for name in ("verify.claim_decompose", "verify.entailment", "llm.generation"):
+        assert name in by_name, f"missing LLM span: {name}"
+    ent = by_name["verify.entailment"][0]
+    assert ent.attributes.get("openinference.span.kind") == "LLM"
+    assert ent.attributes.get("llm.model_name") == "claim-aware"
+    assert ent.attributes.get("entailment.ran") is True
+    dec = by_name["verify.claim_decompose"][0]
+    assert dec.attributes.get("decompose.method") == "llm"
+
+    # (2) Phase B 결정론 노드들이 span 으로 그룹화된다.
+    for name in ("agent.retrieval_execute", "agent.retrieval_evaluate",
+                 "agent.evidence_snippet"):
+        assert name in by_name, f"missing node span: {name}"
+    ev = by_name["agent.retrieval_evaluate"][0]
+    # 존재-단언이 dropped attr(None/wrong-type) 까지 잡는다.
+    assert ev.attributes.get("evaluate.overall_decision") == "pass"
+    assert "evaluate.num_pass" in ev.attributes
+    assert "evaluate.policy_hash" in ev.attributes
+    snip = by_name["agent.evidence_snippet"][0]
+    assert "snippet.pack_hash" in snip.attributes  # None 이면 OTel 이 드롭 → 실패
+
+    # (3) context_build RETRIEVER 타일에 chunk 가 실린다(v2 parity 회귀 복원).
+    cb = by_name["agent.context_build"][0]
+    assert cb.attributes.get("retrieval.documents.0.document.id")
+
+
+@pytest.mark.asyncio
+async def test_phoenix_recover_round_spans_distinguishable(span_exporter) -> None:
+    """recover 라운드마다 별도 span 이 생기고 진단/결과 attribute 를 담아
+    Phoenix 에서 어느 복구 라운드인지 구분된다(문제 #2 의 직접 검증)."""
+    span_exporter.clear()
+    fake = _SequenceRetriever(["fail", "pass"])
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), retriever_tool=fake, llm=_ClaimAwareLLM())
+        req = AgentRequest(interaction_id="hp2", query_text="i-SMR ECCS passive design",
+                           session_id="sp2")
+        resp = await runner.run(req)
+        assert len(resp.recover_rounds) >= 1
+
+    rounds = _spans_by_name(span_exporter).get("agent.retrieval_recover", [])
+    assert rounds, "recover round span not emitted"
+    r0 = rounds[0]
+    assert r0.attributes.get("recover.round") == 0
+    assert r0.attributes.get("recover.diagnosis")  # str, non-empty
+    assert r0.attributes.get("recover.outcome")  # 재평가 결과 기록
+    # 재-dispatch 의 tool.retriever.search span 이 이 라운드 span 아래 nest 된다.
+    tool_spans = [
+        sp for sp in span_exporter.get_finished_spans()
+        if sp.name.endswith("retriever.search")
+        and sp.parent is not None
+        and sp.parent.span_id == r0.context.span_id
+    ]
+    assert tool_spans, "recover round's retriever.search did not nest under round span"
