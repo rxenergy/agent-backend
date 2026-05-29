@@ -79,6 +79,12 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
                                 "source_id": "ML15355A364",
                                 "collection": "DSRS",
                                 "search_type": "manual",
+                                # v3.1 규제 메타가 인덱스에 명시된 hit (v2 스키마로
+                                # 재적재된 문서를 시뮬레이션 — v1 데이터엔 부재).
+                                "clause_id": "DSRS_3_5_1_3",
+                                "authority_tier": "secondary",
+                                "jurisdiction": "NRC",
+                                "effective_on": "2016-07-22",
                                 "section_path": ["3.5 Missile Protection", "3.5.1.3 Turbine Missiles"],
                                 "section_path_str": "3.5 Missile Protection > 3.5.1.3 Turbine Missiles",
                                 "page_start": 7,
@@ -106,6 +112,7 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
                                 "doc_metadata": {
                                     "AccessionNumber": "ML15355A364",
                                     "DocumentTitle": "NuScale DSRS 3.5.1.3 Turbine Missiles",
+                                    "DocumentDate": "2016-07-22",
                                 },
                             },
                         },
@@ -135,6 +142,21 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
     assert chunks[0]["doc_type"] == "DSRS"  # NRC 도메인에서 collection 으로 매핑
     assert chunks[0]["response_date"] == "2016-07-22"
     assert chunks[0]["title"] == "NuScale DSRS 3.5.1.3 Turbine Missiles"
+    # v3.1 regulatory meta — hit 1 has them explicit in _source.
+    assert chunks[0]["clause_id"] == "DSRS_3_5_1_3"
+    assert chunks[0]["authority_tier"] == "secondary"
+    assert chunks[0]["jurisdiction"] == "NRC"
+    assert chunks[0]["effective_on"] == "2016-07-22"
+    # hit 2 has no explicit regulatory meta: authority_tier derived from
+    # collection (DSRS → secondary); clause_id/jurisdiction not guessed.
+    # effective_on stays None even though DocumentDate(=response_date) is
+    # present — a filing date is NOT an effective date, so no proxy is made
+    # (PR-5 version_match must see unknown as unknown).
+    assert chunks[1]["authority_tier"] == "secondary"
+    assert chunks[1]["clause_id"] is None
+    assert chunks[1]["jurisdiction"] is None
+    assert chunks[1]["response_date"] == "2016-07-22"
+    assert chunks[1]["effective_on"] is None
 
     assert "/nrc-all-v1/_search" in captured["url"]
     assert "search_pipeline=nrc-hybrid-search" in captured["url"]
@@ -209,6 +231,26 @@ def test_retriever_endpoint_required():
             dense_encoder=_FakeDense(),
             sparse_encoder=_FakeSparse(),
         )
+
+
+@pytest.mark.parametrize(
+    "collection,expected",
+    [
+        ("10CFR", "primary"),
+        ("FR", "primary"),
+        ("RG", "secondary"),
+        ("DSRS", "secondary"),
+        ("SRP", "secondary"),
+        ("nuscale_dcd", "tertiary"),
+        ("nuscale", "tertiary"),
+        ("UNKNOWN", None),
+        (None, None),
+    ],
+)
+def test_derive_authority_tier(collection, expected):
+    from app.adapters.tools.retriever_opensearch import _derive_authority_tier
+
+    assert _derive_authority_tier(collection) == expected
 
 
 async def test_retriever_maps_timeout_to_domain_error(monkeypatch):

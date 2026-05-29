@@ -45,6 +45,13 @@ class OpenSearchRetrieverTool:
             ...
           }
         }
+
+    v3.1 규제 메타 (``clause_id`` / ``authority_tier`` / ``jurisdiction`` /
+    ``effective_on``) 는 *예정* 스키마 ``nrc-all-v2`` 에서만 존재한다. 현행
+    적재 데이터는 v1 이므로 이 어댑터는 해당 필드를 *있으면 읽고 없으면 None*
+    으로 처리하며 (``authority_tier`` 만 v1 의 ``collection`` 에서 read-time
+    유도), v1/v2 양쪽에서 동일하게 동작한다. 자세한 전환 배경은
+    ``infra/opensearch/mappings/README.md`` 참고.
     """
 
     name = "retriever.search"
@@ -164,6 +171,18 @@ class OpenSearchRetrieverTool:
         response_date = meta.get("DocumentDate") or meta.get("dateIssued")
         title = meta.get("DocumentTitle") or meta.get("title")
 
+        # v3.1 규제 메타 (Node 6 G3). 인덱스 _source 에 명시 필드가 있으면 그대로
+        # 사용하고, 없으면 가능한 범위에서 유도 — 재인덱싱 이전에도 G3 가 동작하도록.
+        collection = src.get("collection")
+        authority_tier = src.get("authority_tier") or _derive_authority_tier(collection)
+        # effective_on 은 *발효/개정 기준일*이며 문서 *제출일*(response_date)과
+        # 의미가 다르다. 인덱스에 명시값이 없으면 None 으로 둔다 — response_date 로
+        # bridge 하면 PR-5 version_match hard gate 가 제출일을 발효일로 오인해
+        # 모든 chunk 에 대해 잘못된 버전 충돌을 계산하게 된다 (false answer ≫
+        # false refusal 비대칭에 반함). unknown 은 unknown 으로 전달.
+        # clause_id / jurisdiction 도 동일하게 추측하지 않는다.
+        effective_on = src.get("effective_on")
+
         return RetrievedChunk(
             chunk_id=chunk_id,
             document_id=source_id,
@@ -171,12 +190,39 @@ class OpenSearchRetrieverTool:
             page=src.get("page_start"),
             section=section,
             snippet=text[:512],
-            doc_type=src.get("collection"),
+            doc_type=collection,
             revision=None,  # NRC 스키마에 대응 필드 없음
             response_date=response_date,
-            collection=src.get("collection"),
+            collection=collection,
             search_type=src.get("search_type"),
             source_id=source_id if src.get("source_id") else None,
             page_end=src.get("page_end"),
             title=title,
+            clause_id=src.get("clause_id"),
+            authority_tier=authority_tier,
+            jurisdiction=src.get("jurisdiction"),
+            effective_on=effective_on,
         )
+
+
+# NRC 코퍼스의 collection → authority_tier 유도표 (1차 법령 > 2차 가이드 > 3차 해설).
+# 명시 `authority_tier` 필드가 인덱스에 들어오기 전까지의 read-time 기본값.
+# 10CFR/FR = 연방규정·관보(법령) → primary; RG/DSRS/SRP = NRC 가이드 → secondary;
+# nuscale_* = 벤더 제출문서 → tertiary. 미지 collection 은 None (hard gate 가 판단).
+_AUTHORITY_TIER_BY_COLLECTION: dict[str, str] = {
+    "10CFR": "primary",
+    "FR": "primary",
+    "RG": "secondary",
+    "DSRS": "secondary",
+    "SRP": "secondary",
+}
+
+
+def _derive_authority_tier(collection: str | None) -> str | None:
+    if not collection:
+        return None
+    if collection in _AUTHORITY_TIER_BY_COLLECTION:
+        return _AUTHORITY_TIER_BY_COLLECTION[collection]
+    if collection.startswith("nuscale"):
+        return "tertiary"
+    return None

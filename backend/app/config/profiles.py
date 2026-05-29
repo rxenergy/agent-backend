@@ -236,12 +236,29 @@ async def build_container(settings: Settings) -> AppContainer:
 
         if settings.retriever_backend == "opensearch":
             preflight_severity = _resolve_preflight_severity(settings)
+            # v3.1: the G3 evaluator reads regulatory-meta fields. These exist
+            # only in the *planned* nrc-all-v2 schema — the active nrc-all-v1
+            # data has not been re-ingested with them. So require the fields
+            # only when BOTH the hierarchical_corrective variant is enabled AND
+            # the target index is the v2 schema; while pointed at v1 we ask for
+            # nothing so boot is unaffected (the adapter reads the fields as
+            # null / derives authority_tier from collection). See
+            # infra/opensearch/mappings/README.md.
+            required_fields: tuple[str, ...] = ()
+            if (
+                "hierarchical_corrective_v3_1" in settings.agent_variants_enabled
+                and settings.opensearch_index.endswith("v2")
+            ):
+                required_fields = (
+                    "clause_id", "authority_tier", "jurisdiction", "effective_on",
+                )
             preflight_checks: list[PreflightCheck] = [
                 OpenSearchPreflight(
                     endpoint=settings.opensearch_endpoint,
                     index=settings.opensearch_index,
                     severity=preflight_severity,
                     search_pipeline=settings.opensearch_search_pipeline or None,
+                    required_fields=required_fields,
                     verify_certs=settings.opensearch_verify_certs,
                 )
             ]
@@ -370,6 +387,11 @@ async def build_container(settings: Settings) -> AppContainer:
             "retriever_top_k": settings.retriever_top_k,
             "retriever_min_score": settings.retriever_min_score,
             "active_cells_mode": settings.active_cells_mode,
+            # v3.1 (hierarchical_corrective). Ignored by other variants.
+            "llm_call_budget": getattr(settings, "llm_call_budget", 8),
+            "citation_contract_path": str(
+                Path(settings.prompt_local_dir) / "system" / "citation_contract_v1.md"
+            ),
         },
     )
     runners: dict[str, AgentRunner] = {

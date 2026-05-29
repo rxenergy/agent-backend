@@ -19,6 +19,12 @@ class RetrievedChunk(BaseModel):
     doc_type: str | None = None  # NRC 도메인: collection 값 (10CFR/DSRS/FR/RG/SRP/nuscale_*)
     revision: str | None = None
     response_date: str | None = None  # ADAMS DocumentDate 또는 govinfo dateIssued
+    # v3.1 규제 구조 메타 (Node 6 G3 Regulatory Structural 신호의 입력).
+    # 인덱스 _source 에 존재하면 그대로, 없으면 어댑터가 collection 등에서 유도.
+    clause_id: str | None = None  # 조문 ID (예: RG_1_157, 10CFR50.46) — exact-match 게이트용
+    authority_tier: str | None = None  # primary > secondary > tertiary (authority_tier ≥ secondary hard gate)
+    jurisdiction: str | None = None  # KINS | NRC | IAEA
+    effective_on: str | None = None  # 발효/개정 기준일 — version_match 게이트용 (YYYY-MM-DD)
     # NRC nrc-all-v1 스키마 전용 필드 (선택, 다운스트림 인용/필터링용)
     collection: str | None = None
     search_type: str | None = None  # "manual" | "nuscale"
