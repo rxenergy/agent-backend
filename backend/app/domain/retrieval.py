@@ -32,6 +32,10 @@ class RetrievedChunk(BaseModel):
     source_id: str | None = None  # ADAMS Accession Number 또는 govinfo packageId
     page_end: int | None = None
     title: str | None = None  # doc_metadata.DocumentTitle 또는 doc_metadata.title
+    # v3.1 Section auto-merge(P1) join 키 — 인덱스 section_path(keyword 배열) 원본.
+    # `section`(문자열)은 표시용이고 section_path_str 은 analyzed text 라 exact-match
+    # 불가하므로, 형제 fetch 는 이 배열의 최말단 원소를 term 필터로 쓴다.
+    section_path: list[str] | None = None
     # v3.1 노이즈 floor(Layer 2) 입력 — chunk 본문 토큰 수. 인덱스 _source 의
     # token_count 를 그대로 싣는다(목차·헤더·단어 fragment 는 작다). local 어댑터는
     # snippet 단어수로 근사. min_token_count 필터/포스트필터가 이 값을 읽는다.
@@ -66,6 +70,32 @@ class RetrieverSearchInput(BaseModel):
 
 class RetrieverSearchOutput(BaseModel):
     """v2 §8 — `retriever.search` 출력 스키마. ToolResult.output에 dump되어 실린다."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chunks: list[RetrievedChunk] = Field(default_factory=list)
+
+
+class DocumentFetchSectionInput(BaseModel):
+    """v3.1 P1 `document.fetch_section` 입력 — 한 Section 의 형제 문단 일괄 fetch.
+
+    relevance 검색이 아니라 메타 표적 조회다: `source_id` + `section_key`(해당
+    chunk section_path 의 최말단 원소) 로 같은 Section 의 모든 chunk 를 가져온다.
+    Node 8 다홉도 같은 도구로 §N.M 참조 섹션을 fetch 한다."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_id: str
+    section_key: str
+    max_chunks: int = 50
+    # "term"  = section_path 원소 exact 매칭(P1a — chunk 자신의 full 경로 원소).
+    # "prefix"= section_path 원소 prefix 매칭(P2 다홉 — "§3.2" 같은 번호만 알 때
+    #            "3.2 Title" 류 원소를 매칭). keyword 필드라 prefix 쿼리 사용.
+    match: str = "term"
+
+
+class DocumentFetchSectionOutput(BaseModel):
+    """`document.fetch_section` 출력 — chunk_id ordinal 순 정렬된 형제 chunk."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -126,6 +156,9 @@ class ChunkSignals:
     entity_coverage: float = 0.0
     hard_gates_passed: bool = False
     decision: str = GateDecision.FAIL.value
+    # v3.1 P1 — Section auto-merge 승격 대상으로 표시됐는지(decision≠PASS 등).
+    # 점수에는 영향 없고 event 기록용: "왜 이 문단을 Section 으로 키웠나".
+    promote: bool = False
 
 
 @dataclass(frozen=True)

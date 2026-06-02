@@ -15,8 +15,14 @@ from app.adapters.llm.fake import FakeEchoLLM
 from app.adapters.llm.http import HttpLLM
 from app.adapters.postgres.client import create_pool
 from app.adapters.postgres.session_memory_store import PostgresSessionMemoryStore
-from app.adapters.tools.document_local import LocalDocumentResolverTool
-from app.adapters.tools.document_opensearch import OpenSearchDocumentResolverTool
+from app.adapters.tools.document_local import (
+    LocalDocumentFetchSectionTool,
+    LocalDocumentResolverTool,
+)
+from app.adapters.tools.document_opensearch import (
+    OpenSearchDocumentFetchSectionTool,
+    OpenSearchDocumentResolverTool,
+)
 from app.adapters.tools.memory_approved_stub import ApprovedSearchStubTool
 from app.adapters.tools.memory_session_local import SessionLoadTool, SessionUpdateTool
 from app.adapters.tools.opensearch_preflight import OpenSearchPreflight
@@ -343,6 +349,7 @@ async def build_container(settings: Settings) -> AppContainer:
                 )
                 retriever_tool = LocalRetrieverTool()
                 document_tool = LocalDocumentResolverTool()
+                fetch_section_tool = LocalDocumentFetchSectionTool()
                 dense_encoder = None  # type: ignore[assignment]
 
             if dense_encoder is not None:
@@ -367,13 +374,22 @@ async def build_container(settings: Settings) -> AppContainer:
                     password=settings.opensearch_password or None,
                     verify_certs=settings.opensearch_verify_certs,
                 )
+                fetch_section_tool = OpenSearchDocumentFetchSectionTool(
+                    endpoint=settings.opensearch_endpoint,
+                    index=settings.opensearch_index,
+                    username=settings.opensearch_username or None,
+                    password=settings.opensearch_password or None,
+                    verify_certs=settings.opensearch_verify_certs,
+                )
         else:
             retriever_tool = LocalRetrieverTool()
             document_tool = LocalDocumentResolverTool()
+            fetch_section_tool = LocalDocumentFetchSectionTool()
 
         tools = {
             "retriever.search": retriever_tool,
             "document.resolve_citation": document_tool,
+            "document.fetch_section": fetch_section_tool,
             "memory.session_load": SessionLoadTool(session_store),
             "memory.session_update": SessionUpdateTool(
                 session_store, ttl_days=settings.memory_session_ttl_days
@@ -438,6 +454,9 @@ async def build_container(settings: Settings) -> AppContainer:
             "retrieval_scope_tau_high": settings.retrieval_scope_tau_high,
             "retrieval_scope_tau_low": settings.retrieval_scope_tau_low,
             "retriever_min_token_count": settings.retriever_min_token_count,
+            # v3.1 P1 Section auto-merge + 예산 거버너.
+            "section_merge_max_chunks": settings.section_merge_max_chunks,
+            "context_token_budget": settings.context_token_budget,
             "active_cells_mode": settings.active_cells_mode,
             # v3.1 (hierarchical_corrective). Ignored by other variants.
             "llm_call_budget": getattr(settings, "llm_call_budget", 8),

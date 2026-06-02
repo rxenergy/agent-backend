@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     # v3.1 Layer 2 노이즈 floor 기본값 — corpus_map.chunk_quality 가 우선,
     # 맵 미배치 시에만 이 값 적용(0=비활성).
     retriever_min_token_count: int = 0
+    # v3.1 P1 Section auto-merge — 승격 chunk 의 형제 fetch 상한(섹션 폭주 방지).
+    section_merge_max_chunks: int = 50
+    # v3.1 P1b 예산 거버너 — 컨텍스트 Σ token_count 캡. **기본 0=off(opt-in)**:
+    # 모델 context window 가 프로파일마다 다르고, 잘못된 캡이 규제 근거를 과도
+    # 축소(false refusal)할 위험이 있어, 운영자가 프로파일별로 확인 후 켠다.
+    # 0 이면 거버너(drop/demote/재배치) 전체 비활성 → 기존 동작과 byte-identical.
+    context_token_budget: int = 0
     opensearch_endpoint: str = "http://opensearch:9200"
     opensearch_index: str = "nrc-all-v1"
     # 적재 데이터가 따르는 인덱스 스키마 버전의 *선언적* 단일 출처.

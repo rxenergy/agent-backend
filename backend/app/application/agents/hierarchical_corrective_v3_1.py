@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -56,7 +57,12 @@ from app.application.verification.entailment import EntailmentChecker
 from app.domain.verification import ClaimStatus
 from app.domain.memory import MemoryRef, MemoryReviewStatus, StalenessStatus
 from app.domain.query import QueryPlan
-from app.domain.retrieval import GateDecision, RecoverRound
+from app.domain.retrieval import (
+    GateDecision,
+    HopEdge,
+    RecoverRound,
+    RetrieverSearchOutput,
+)
 from app.observability import openinference as oi
 from app.observability.otel import get_tracer
 from app.ports.event_sink import EventSinkPort
@@ -70,6 +76,23 @@ HIERARCHICAL_CORRECTIVE_VARIANT_ID = "hierarchical_corrective_v3_1"
 
 def _sha16(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+# Node 8 다홉 — 같은-문서 섹션 cross-reference 결정론 추출(LLM 미사용).
+# "§3.2", "Section 3.5.1.3" → 섹션 번호. 외부문서(RG 1.X)·clause_id 는 v1 에서
+# 추적 불가(clause_id null)라 여기서 잡지 않는다(v2-gated).
+# ≥1 dot 요구 — 맨숫자("section 3")는 prefix 가 한 장 전체(3.x)를 끌어와 노이즈가
+# 크므로 다단계 번호(3.2, 3.5.1.3)만 hop 대상으로 본다.
+_SECTION_REF_RE = re.compile(r"(?:§|[Ss]ection\s+)(\d+(?:\.\d+){1,3})")
+# 다홉 fetch 호출 상한(폭주·예산 방지).
+_MAX_HOPS = 8
+
+
+def _chunk_ordinal(chunk_id: str) -> int:
+    """`..._cNNNN` 의 trailing int(섹션 내 문단 순서). zero-pad 가 9999 를 넘으면
+    사전식 정렬이 깨지므로 정수로 정렬. 못 찾으면 0."""
+    m = re.search(r"_c(\d+)$", chunk_id or "")
+    return int(m.group(1)) if m else 0
 
 
 # Node 6/7 진단 라벨(RetrievalRecoverer.diagnose) → 생성 LLM 이 사용자에게 설명할
@@ -144,6 +167,8 @@ class HierarchicalCorrectiveRunner:
         scope_tau_high: float = 0.6,
         scope_tau_low: float = 0.3,
         scope_min_token_count: int = 0,
+        section_merge_max_chunks: int = 50,
+        context_token_budget: int = 0,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
@@ -193,6 +218,14 @@ class HierarchicalCorrectiveRunner:
         self._scope_tau_high = scope_tau_high
         self._scope_tau_low = scope_tau_low
         self._scope_min_token_count = scope_min_token_count
+        # P1 Section auto-merge(수직) + P1b 예산 거버너. 거버너는 budget>0 일 때만
+        # 활성(기본 0 → drop/demote/재배치 없음 → 기존 동작 보존).
+        self._section_merge_max_chunks = section_merge_max_chunks
+        self._context_token_budget = context_token_budget
+        # 병합 정책 재현 단위 — 섹션 깊이(최말단)·상한·승격 규칙을 핀.
+        self._section_merge_policy_hash = _sha16(
+            f"deepest|max={section_merge_max_chunks}|promote=non_pass"
+        )
         # Node 12 — citation contract preamble (PR-7 fragment). Loaded once;
         # prepended to the context block so it rides in the rendered prompt and
         # its presence is reflected in `rendered_prompt_hash`.
@@ -569,8 +602,20 @@ class HierarchicalCorrectiveRunner:
                     scope=scope,
                 )
 
-            # Node 8 — multi_hop_expand (STUB: skipped; 별도 PR — fetch 도구 필요)
-            await emit_step("multi_hop_expand", "skipped")
+            # Node 8 — multi_hop_expand (수평 cross-ref, 결정론 regex, LLM 미사용).
+            # leaf 텍스트의 §N.M 같은 같은-문서 섹션 참조를 추적해 fetch_section 으로
+            # 가져온다. Node 9 *앞*에 둔다(좁히기 전 전체 텍스트가 ref recall 에 필요).
+            # 가져온 hop chunk 는 컨텍스트 전용 추가(재게이트 없음). clause_id·외부문서
+            # 참조는 v1 에서 clause_id 가 null 이라 v2-gated(미구현).
+            await emit_step("multi_hop_expand", "started")
+            hop_edges: list[HopEdge] = []
+            hop_chunks = await self._multi_hop(chunks, ctx=ctx, record=record,
+                                               edges_out=hop_edges)
+            if hop_chunks:
+                chunks = chunks + hop_chunks
+            await emit_step("multi_hop_expand",
+                            "ok" if hop_edges else "skipped",
+                            num_hops=len(hop_edges), num_hop_chunks=len(hop_chunks))
 
             # Node 9 — evidence_snippet (문장 window 추출; LLM 미사용)
             await emit_step("evidence_snippet", "started")
@@ -597,6 +642,44 @@ class HierarchicalCorrectiveRunner:
             await emit_step("evidence_snippet", "ok",
                             num_snippets=len(evidence_pack.snippets),
                             pack_hash=evidence_pack.pack_hash)
+
+            # P1a Section auto-merge(수직) — Node 6 가 *불충분*(decision≠PASS) 으로
+            # 본 leaf 를 그 Section 의 형제 문단으로 확장한다. 점수·게이트는 leaf 그대로
+            # (재게이트 없음 — §4.1 분모 트랩 회피), snippet 만 Section 본문으로 치환.
+            # leaf window 는 demote 복원용으로 스태시. local fetch 는 빈 결과라 no-op.
+            await emit_step("section_merge", "started")
+            chunks, leaf_window_stash, promoted_ids = await self._section_merge(
+                chunks, evaluation, ctx=ctx, record=record,
+            )
+            # 승격 flag·정책 해시는 *실제로 병합된* chunk(=형제 fetch 성공, stash 존재)에만
+            # 기록한다. promoted_ids(=non-PASS) 만으로 기록하면 local/형제부재 경로에서
+            # "Section 병합이 일어났다"고 event 가 거짓 보고한다(감사 신뢰성).
+            merged_ids = set(leaf_window_stash)
+            if merged_ids:
+                evaluation = replace(
+                    evaluation,
+                    per_chunk=tuple(
+                        replace(sig, promote=(sig.chunk_id in merged_ids))
+                        for sig in evaluation.per_chunk
+                    ),
+                )
+            await emit_step("section_merge",
+                            "ok" if merged_ids else "skipped",
+                            num_promoted=len(promoted_ids),
+                            num_merged=len(merged_ids))
+
+            # P1b 예산 거버너 — context_token_budget>0 일 때만 활성(기본 0 → no-op,
+            # 기존 동작 보존). 강등 순서: 승격→leaf 복원 → 최하위 drop → (Node 9 window).
+            # 이후 lost-in-the-middle 재배치. 모든 강등·drop 은 로그(silent 금지).
+            budget_log: list[str] = []
+            if self._context_token_budget > 0:
+                chunks = self._apply_context_budget(
+                    chunks, leaf_window_stash, budget_log=budget_log,
+                )
+                if budget_log:
+                    await emit_step("context_budget", "ok",
+                                    budget=self._context_token_budget,
+                                    actions=len(budget_log))
 
             # === Phase C ===================================================
             # Node 5 pre-step approved memory search + Node 10 decision.
@@ -858,10 +941,24 @@ class HierarchicalCorrectiveRunner:
 
                 # Node 15 — claim_verify (4-step per claim → 집계 status)
                 await emit_step("claim_verify", "started")
+                # 근거 매핑은 *위치(cite-i)*가 아니라 chunk_id 로, 그리고 *최종 chunk 의
+                # snippet*(=프롬프트가 실제로 실은 텍스트)에서 가져온다. 두 가지를 동시에
+                # 바로잡는다:
+                #  (1) 위치 desync — citation_id 는 Node 9/ pack.build 에서 위치로 산출되어
+                #      Section 병합·예산 drop·재배치·다홉 append 가 순서를 바꾸면 깨진다.
+                #  (2) 근거 staleness — evidence_pack 은 Node 9 시점(leaf window)이라
+                #      Section 병합 후 chunk.snippet(섹션 본문)과 어긋난다. 그대로 쓰면
+                #      모델은 섹션을 보고 검증기는 window 를 봐서 형제-근거 claim 이 거짓
+                #      unsupported 로 떨어진다. render_for_prompt 는 chunk.snippet 을 싣고
+                #      (runner 는 capture_mode="snippets" 강제), 그 snippet 이 곧 모델이 본
+                #      근거이므로 최종 chunks 에서 직접 만든다(hop chunk 포함).
+                cite_by_chunk = {
+                    c.chunk_id: c.citation_id for c in pack.citation_candidates
+                }
                 evidence_by_cite = {
-                    s.citation_id: s.text
-                    for s in evidence_pack.snippets
-                    if s.citation_id
+                    cite_by_chunk[c.chunk_id]: (c.snippet or c.text or "")
+                    for c in chunks
+                    if c.chunk_id in cite_by_chunk and (c.snippet or c.text)
                 }
                 revision_by_cite = {
                     c.citation_id: c.revision for c in final_candidates if c.revision
@@ -975,7 +1072,7 @@ class HierarchicalCorrectiveRunner:
                     claims=claims,
                     evaluation=evaluation,
                     recover_rounds=tuple(recover_rounds),
-                    hops=(),
+                    hops=tuple(hop_edges),
                     regulatory_grounding=regulatory_grounding,
                 )
                 oi.set_kind(_rfmt, oi.KIND_CHAIN)
@@ -1038,8 +1135,11 @@ class HierarchicalCorrectiveRunner:
                     per_chunk_signals=evaluation.per_chunk,
                     per_sub_question_decisions=evaluation.per_sub_question,
                     recover_rounds=tuple(recover_rounds),
-                    hops=(),
+                    hops=tuple(hop_edges),
                     evidence_pack_hash=evidence_pack.pack_hash,
+                    section_merge_policy_hash=(
+                        self._section_merge_policy_hash if merged_ids else None
+                    ),
                     claims=claims,
                     verifier_policy_hash=None,
                     entailment_model=entailment_model,
@@ -1055,6 +1155,137 @@ class HierarchicalCorrectiveRunner:
             oi.set_io(root, output_value=response.answer_text)
 
         return response
+
+    # ------------------------------------------------------------------
+    # P1/P2 helpers — Section auto-merge(수직) · multi-hop(수평) · 예산 거버너.
+    # 공통 계약: leaf 가 점수·게이트·인용의 단위. Section 병합은 snippet 치환(재게이트
+    # 없음), hop 은 컨텍스트 전용 추가, 예산은 budget>0 일 때만.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _chunk_tokens(c) -> int:
+        if getattr(c, "token_count", None):
+            return int(c.token_count)
+        body = getattr(c, "snippet", None) or getattr(c, "text", None) or ""
+        return len(body.split())
+
+    async def _multi_hop(self, chunks, *, ctx, record, edges_out):
+        """leaf 텍스트의 같은-문서 §N.M 참조를 fetch_section(prefix)으로 추적해
+        새 chunk 를 모은다(컨텍스트 전용, 재게이트 없음). 호출 _MAX_HOPS 상한."""
+        existing = {c.chunk_id for c in chunks}
+        seen: set[tuple[str, str]] = set()
+        hop_chunks: list = []
+        for c in chunks:
+            src = getattr(c, "source_id", None) or c.document_id
+            if not src:
+                continue
+            body = (getattr(c, "text", None) or c.snippet or "")
+            for m in _SECTION_REF_RE.finditer(body):
+                if len(seen) >= _MAX_HOPS:
+                    break
+                sec = m.group(1)
+                if (src, sec) in seen:
+                    continue
+                seen.add((src, sec))
+                try:
+                    res = await self._tools.invoke(
+                        "document.fetch_section",
+                        {"source_id": src, "section_key": sec,
+                         "max_chunks": self._section_merge_max_chunks, "match": "prefix"},
+                        ctx,
+                    )
+                except RequiredToolFailed:
+                    continue  # required:false — 방어적.
+                record(res)
+                for fc in RetrieverSearchOutput.model_validate(res.output or {}).chunks:
+                    if fc.chunk_id in existing:
+                        continue  # 자기 자신·중복 제외.
+                    existing.add(fc.chunk_id)
+                    hop_chunks.append(fc)
+                    edges_out.append(
+                        HopEdge(from_chunk_id=c.chunk_id, ref_kind="section",
+                                target_id=sec)
+                    )
+        return hop_chunks
+
+    async def _section_merge(self, chunks, evaluation, *, ctx, record):
+        """decision≠PASS 인 leaf 를 그 Section 형제 문단으로 *컨텍스트* 확장.
+        snippet 만 Section 본문으로 치환(점수·인용 단위는 leaf 유지, 재게이트 없음).
+        반환: (갱신 chunks, demote 복원용 leaf window stash, 승격 chunk_id 집합)."""
+        promoted = {
+            sig.chunk_id for sig in evaluation.per_chunk
+            if sig.decision != GateDecision.PASS.value
+        }
+        if not promoted:
+            return chunks, {}, set()
+        stash: dict[str, tuple] = {}
+        out: list = []
+        for c in chunks:
+            src = getattr(c, "source_id", None) or c.document_id
+            if c.chunk_id not in promoted or not src or not getattr(c, "section_path", None):
+                out.append(c)
+                continue
+            try:
+                res = await self._tools.invoke(
+                    "document.fetch_section",
+                    {"source_id": src, "section_key": c.section_path[-1],
+                     "max_chunks": self._section_merge_max_chunks, "match": "term"},
+                    ctx,
+                )
+            except RequiredToolFailed:
+                out.append(c)
+                continue
+            record(res)
+            sibs = RetrieverSearchOutput.model_validate(res.output or {}).chunks
+            if len(sibs) <= 1:
+                out.append(c)  # 형제 없음(또는 자기 1건) → 확장 안 함.
+                continue
+            sibs = sorted(sibs, key=lambda s: _chunk_ordinal(s.chunk_id))
+            assembled = "\n".join(
+                (s.snippet or s.text or "") for s in sibs if (s.snippet or s.text)
+            )
+            if not assembled:
+                out.append(c)
+                continue
+            stash[c.chunk_id] = (c.snippet, c.token_count)  # demote 복원용.
+            out.append(
+                c.model_copy(update={
+                    "snippet": assembled,
+                    "token_count": sum(self._chunk_tokens(s) for s in sibs),
+                })
+            )
+        return out, stash, promoted
+
+    def _apply_context_budget(self, chunks, stash, *, budget_log):
+        """budget>0 일 때만 호출. 강등 순서: 승격→leaf 복원 → 최하위 drop →
+        (Node 9 window 는 이미 적용). 이후 lost-in-the-middle 재배치(핵심 양끝)."""
+        budget = self._context_token_budget
+        chunks = list(chunks)
+        total = sum(self._chunk_tokens(c) for c in chunks)
+        # 1) 승격 chunk 를 stash 한 leaf window 로 복원(Section coherence 우선 양보).
+        if total > budget:
+            for i, c in enumerate(chunks):
+                if total <= budget:
+                    break
+                if c.chunk_id in stash:
+                    before = self._chunk_tokens(c)
+                    leaf_snip, leaf_tok = stash[c.chunk_id]
+                    chunks[i] = c.model_copy(
+                        update={"snippet": leaf_snip, "token_count": leaf_tok}
+                    )
+                    total -= before - self._chunk_tokens(chunks[i])
+                    budget_log.append(f"demote:{c.chunk_id}")
+        # 2) 최하위(tail = 낮은 RRF / hop)부터 drop.
+        while total > budget and len(chunks) > 1:
+            dropped = chunks.pop()
+            total -= self._chunk_tokens(dropped)
+            budget_log.append(f"drop:{dropped.chunk_id}")
+        # 3) lost-in-the-middle 재배치 — best 를 앞, 차선을 끝, 약한 것을 가운데.
+        if len(chunks) > 2:
+            head = chunks[::2]
+            tail = chunks[1::2][::-1]
+            chunks = head + tail
+            budget_log.append("reorder:litm")
+        return chunks
 
     # ------------------------------------------------------------------
     def _retrieval_quality_note(
@@ -1274,4 +1505,6 @@ def _build_hierarchical_corrective(
         scope_tau_high=t.get("retrieval_scope_tau_high", 0.6),
         scope_tau_low=t.get("retrieval_scope_tau_low", 0.3),
         scope_min_token_count=t.get("retriever_min_token_count", 0),
+        section_merge_max_chunks=t.get("section_merge_max_chunks", 50),
+        context_token_budget=t.get("context_token_budget", 0),
     )

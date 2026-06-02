@@ -162,6 +162,8 @@ class InteractionEvent:
     per_chunk_signals: tuple[ChunkSignals, ...] = ()
     per_sub_question_decisions: tuple[SubQuestionDecision, ...] = ()
     recover_rounds: tuple[RecoverRound, ...] = ()
+    # v3.1 P1 Section auto-merge 정책 sha(승격·조립이 실행된 경우만). None=미실행.
+    section_merge_policy_hash: str | None = None
     hops: tuple[HopEdge, ...] = ()
     evidence_pack_hash: str | None = None
     claims: tuple[ClaimVerification, ...] = ()
