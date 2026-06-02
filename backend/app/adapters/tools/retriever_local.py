@@ -42,6 +42,7 @@ class LocalRetrieverTool:
                     score=round(0.9 - i * 0.1, 3),
                     page=10 + i,
                     section=f"§{i + 1}",
+                    section_path=[f"§{i + 1}"],  # 자기일관 join 키(local fake)
                     snippet=snippet,
                     # 노이즈 floor 가 fake 경로에서도 작동하도록 token_count 부여
                     # (본문 토큰 수 근사 = snippet 단어수).

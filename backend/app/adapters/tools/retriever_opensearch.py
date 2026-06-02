@@ -222,6 +222,7 @@ class OpenSearchRetrieverTool:
             jurisdiction=src.get("jurisdiction"),
             effective_on=effective_on,
             token_count=src.get("token_count"),
+            section_path=list(section_path) if section_path else None,
         )
 
 
