@@ -32,6 +32,7 @@ def build_hybrid_query(
     text_field: str = "text",
     k_dense: int = 50,
     source_includes: list[str] | None = None,
+    scope_boost: float = 4.0,
 ) -> HybridQuery:
     """Build an OpenSearch 3.x ``hybrid`` query DSL for a retriever input.
 
@@ -52,6 +53,17 @@ def build_hybrid_query(
         for v in vals:
             if v:
                 bm25_should.append({"match": {text_field: {"query": v, "boost": 1.5}}})
+    # v3.1 범위 boost-scope(target) — in-scope 문서에 가산하되 배제하지 않는다.
+    # hybrid.queries 에 4번째 sub-query 를 더하면 search_pipeline 의 3-weight
+    # ([.2,.3,.5]) 와 desync 되므로, boost 는 BM25 should 안에만 둔다(min_max
+    # 정규화에서 BM25 컴포넌트 내 reorder 로 반영, kNN/sparse 가 out-of-scope 도
+    # 독립 표면화 → recall-safe).
+    for field_name, values in (ti.target or {}).items():
+        vals = [v for v in (values or []) if v]
+        if vals:
+            bm25_should.append(
+                {"terms": {field_name: vals, "boost": scope_boost}}
+            )
     bm25_query: dict[str, Any] = {
         "bool": {
             "must": [{"match": {text_field: {"query": ti.query_text}}}],
@@ -86,6 +98,24 @@ def build_hybrid_query(
         st = _scenario_to_search_type(ti.scenario_object)
         if st:
             filter_clauses.append({"term": {"search_type": st}})
+    # v3.1 hard-scope(filters) — corpus_map 이 high-confidence 일 때만 채운다.
+    # 단일 값은 term, 리스트는 terms. 모든 sub-query 에 공통 적용(hybrid.filter).
+    for field_name, value in (ti.filters or {}).items():
+        if value is None or value == [] or value == "":
+            continue
+        if isinstance(value, (list, tuple, set)):
+            vals = [v for v in value if v not in (None, "")]
+            if vals:
+                filter_clauses.append({"terms": {field_name: list(vals)}})
+        else:
+            filter_clauses.append({"term": {field_name: value}})
+    # v3.1 노이즈 floor(Layer 2) — 본문 토큰 < N 인 chunk(목차·헤더·단어 fragment)
+    # 를 검색 모집단에서 제외. range 는 hybrid.filter 와 합성 가능(function_score
+    # 미사용 — hybrid nesting 제약 회피).
+    if ti.min_token_count and ti.min_token_count > 0:
+        filter_clauses.append(
+            {"range": {"token_count": {"gte": int(ti.min_token_count)}}}
+        )
 
     hybrid_body: dict[str, Any] = {
         "queries": [

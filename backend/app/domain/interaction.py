@@ -150,6 +150,11 @@ class InteractionEvent:
     # `dataclasses.asdict()` recurses cleanly (spec Appendix B).
     query_understanding: dict[str, Any] | None = None
     retrieval_plan_hash: str | None = None
+    # Layer 1 범위 한정(corpus_map) 재현 단위. scope_mode∈{filter,boost,off}.
+    # "scope 가 막다른 벽으로 좁혔나"는 RETRIEVAL_NO_RESULT/INSUFFICIENT_EVIDENCE
+    # refusal 의 핵심 감사 질문이라 refusal 경로에도 실린다.
+    corpus_map_hash: str | None = None
+    scope_mode: str | None = None
     evaluator_policy_hash: str | None = None
     # 규제 hard gate 가 실제로 강제됐는지(v1=false). false 인 PASS 는 규제 근거가
     # *검증된* PASS 가 아님 — 감사/defensibility 가 이 둘을 구분해야 한다.

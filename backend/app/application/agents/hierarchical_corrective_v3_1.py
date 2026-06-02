@@ -44,6 +44,7 @@ from app.domain.interaction import (
     Citation,
     ToolCallRecord,
 )
+from app.application.retrieval.corpus_map import CorpusMap, ScopeDecision
 from app.application.retrieval.dispatcher import RetrievalDispatcher
 from app.application.retrieval.evaluator import RetrievalEvaluator
 from app.application.retrieval.planner import RetrievalPlanner
@@ -139,6 +140,10 @@ class HierarchicalCorrectiveRunner:
         retrieval_evaluator: RetrievalEvaluator | None = None,
         retrieval_recoverer: RetrievalRecoverer | None = None,
         regulatory_hard_gates_enforced: bool = False,
+        corpus_map: CorpusMap | None = None,
+        scope_tau_high: float = 0.6,
+        scope_tau_low: float = 0.3,
+        scope_min_token_count: int = 0,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
@@ -182,6 +187,12 @@ class HierarchicalCorrectiveRunner:
         self._recoverer = retrieval_recoverer or RetrievalRecoverer.default()
         # Node 9 — 문장 window 추출기(결정론 정규식 splitter 기본).
         self._snippet_extractor = SnippetExtractor()
+        # Layer 1 범위 한정(corpus_map) — confidence-게이트 scope. 미주입 시 빈 맵
+        # (scope off, noise floor 0). tau_high/low 가 filter/boost/off 분기를 정함.
+        self._corpus_map = corpus_map or CorpusMap.default()
+        self._scope_tau_high = scope_tau_high
+        self._scope_tau_low = scope_tau_low
+        self._scope_min_token_count = scope_min_token_count
         # Node 12 — citation contract preamble (PR-7 fragment). Loaded once;
         # prepended to the context block so it rides in the rendered prompt and
         # its presence is reflected in `rendered_prompt_hash`.
@@ -355,9 +366,24 @@ class HierarchicalCorrectiveRunner:
                 entities=entities,
                 intents=query_plan.intents,
             )
+            # Layer 1 범위 한정 — corpus_map 이 (scenario_object/entities/intents)와
+            # 분류 confidence 로 scope 를 해석. high→filter / mid→boost / low→off.
+            # 잘못된 hard scope 의 recall 절벽을 confidence 게이트로 방어한다.
+            scope = self._corpus_map.resolve_scope(
+                scenario_object=scenario_object,
+                scenario_depth=scenario_depth,
+                intents=query_plan.intents,
+                entities=entities,
+                confidence=conf,
+                tau_high=self._scope_tau_high,
+                tau_low=self._scope_tau_low,
+                settings_min_token_count=self._scope_min_token_count,
+            )
             await emit_step("retrieval_plan", "ok", rule_id=plan.rule_id,
                             plan_hash=plan.plan_hash,
-                            strategies=[s.name for s in plan.strategies])
+                            strategies=[s.name for s in plan.strategies],
+                            scope_mode=scope.mode,
+                            scope_min_token_count=scope.min_token_count)
 
             # Node 3 pre-step memory.session_load (needed by Node 10 decision).
             session_load = await self._tools.invoke(
@@ -389,11 +415,16 @@ class HierarchicalCorrectiveRunner:
                         entities=entities,
                         ctx=ctx,
                         min_score=self._min_score,  # raw 필터는 dispatcher 가 융합 전 적용
+                        # Layer 1/2 — 첫 검색엔 scope 전부(boost/filter) + noise floor.
+                        target=scope.target,
+                        filters=scope.filters,
+                        min_token_count=scope.min_token_count,
                     )
                 except RequiredToolFailed as e:
                     return await self._refuse(
                         request, started, tool_calls, scenario_object, scenario_depth,
                         RefusalReason.RETRIEVAL_NO_RESULT, conf, error_code=e.code.value,
+                        scope=scope,
                     )
                 for r in dispatch.tool_results:
                     record(r)
@@ -408,6 +439,7 @@ class HierarchicalCorrectiveRunner:
                     return await self._refuse(
                         request, started, tool_calls, scenario_object, scenario_depth,
                         RefusalReason.RETRIEVAL_NO_RESULT, conf, error_code="tool_empty_result",
+                        scope=scope,
                     )
                 s.set_attribute("retrieval.num_chunks", len(chunks))
                 s.set_attribute("retrieval.pool_size", len(pool))
@@ -484,11 +516,18 @@ class HierarchicalCorrectiveRunner:
                     rs.set_attribute("recover.strategy", action.strategy_id)
                     rs.set_attribute("recover.fetch_k", cur_fetch_k)
                     rs.set_attribute("recover.min_score", cur_min_score)
+                    rs.set_attribute("recover.scope_filters_dropped", bool(scope.filters))
                     try:
+                        # 복구는 *모집단을 넓히는* 행위 — high-confidence hard scope 가
+                        # 정답을 배제했을 1순위 의심(recall 절벽)이므로 filters 를 해제한다.
+                        # boost(target)는 recall-safe 라 유지, noise floor 는 품질이라 유지.
                         dispatch = await self._dispatcher.execute(
                             plan, query_text=request.query_text, fetch_k=cur_fetch_k,
                             scenario_object=scenario_object, scenario_depth=scenario_depth,
                             entities=cur_entities, ctx=ctx, min_score=cur_min_score,
+                            target=scope.target,
+                            filters={},
+                            min_token_count=scope.min_token_count,
                         )
                     except RequiredToolFailed:
                         rs.set_attribute("recover.aborted", True)
@@ -527,6 +566,7 @@ class HierarchicalCorrectiveRunner:
                     RefusalReason.INSUFFICIENT_EVIDENCE, conf,
                     error_code="evaluate_fail_after_recover",
                     evaluation=evaluation, recover_rounds=recover_rounds,
+                    scope=scope,
                 )
 
             # Node 8 — multi_hop_expand (STUB: skipped; 별도 PR — fetch 도구 필요)
@@ -686,7 +726,7 @@ class HierarchicalCorrectiveRunner:
                         request, started, tool_calls, scenario_object, scenario_depth,
                         RefusalReason.UNKNOWN_SCENARIO, conf,
                         verification_status=VerificationStatus.SKIPPED,
-                        error_code="prompt_profile_not_found",
+                        error_code="prompt_profile_not_found", scope=scope,
                     )
                 context_block = self._context_builder.render_for_prompt(pack)
                 if self._citation_contract:
@@ -764,6 +804,7 @@ class HierarchicalCorrectiveRunner:
                 return await self._refuse(
                     request, started, tool_calls, scenario_object, scenario_depth,
                     RefusalReason.VERIFICATION_FAILED, conf, error_code=e.code.value,
+                    scope=scope,
                 )
             record(resolve)
             resolved_by_cid: dict[str, dict[str, Any]] = {
@@ -990,6 +1031,8 @@ class HierarchicalCorrectiveRunner:
                         "citation_contract_sha": self._citation_contract_sha,
                     },
                     retrieval_plan_hash=plan.plan_hash,
+                    corpus_map_hash=scope.corpus_map_hash,
+                    scope_mode=scope.mode,
                     evaluator_policy_hash=evaluation.evaluator_policy_hash,
                     regulatory_enforced=evaluation.regulatory_enforced,
                     per_chunk_signals=evaluation.per_chunk,
@@ -1118,7 +1161,8 @@ class HierarchicalCorrectiveRunner:
                       scenario_depth, reason: RefusalReason, conf, *,
                       error_code: str | None,
                       verification_status: VerificationStatus = VerificationStatus.FAIL,
-                      evaluation=None, recover_rounds=()):
+                      evaluation=None, recover_rounds=(),
+                      scope: ScopeDecision | None = None):
         # 평가 *후* refusal(예: INSUFFICIENT_EVIDENCE)은 per_chunk_signals·
         # recover_rounds·policy_hash 가 이미 존재하므로 event 에 실어야 한다 —
         # "왜 거부했나"가 규제 도메인 defensibility 의 핵심 질문(CLAUDE.md §5).
@@ -1143,12 +1187,18 @@ class HierarchicalCorrectiveRunner:
             evaluation=evaluation,
             recover_rounds=tuple(recover_rounds),
         )
+        scope_kwargs: dict[str, Any] = {}
+        if scope is not None:
+            # scope 적용 *후* 의 refusal(RETRIEVAL_NO_RESULT/INSUFFICIENT_EVIDENCE)
+            # 은 "scope 가 막다른 벽으로 좁혔나"를 event 가 단독 설명하게 한다.
+            scope_kwargs = dict(corpus_map_hash=scope.corpus_map_hash, scope_mode=scope.mode)
         event = self._recorder.build(
             request=request, response=response, agent_variant=self.spec.variant_id,
             started_at=started, tool_calls=tuple(tool_calls),
             classification_confidence=conf, error_code=error_code,
             recover_rounds=tuple(recover_rounds),
             **evaluation_kwargs,
+            **scope_kwargs,
         )
         await self._recorder.persist(event)
         return response
@@ -1220,4 +1270,8 @@ def _build_hierarchical_corrective(
         retrieval_evaluator=deps.retrieval_evaluator,
         retrieval_recoverer=deps.retrieval_recoverer,
         regulatory_hard_gates_enforced=t.get("regulatory_hard_gates_enforced", False),
+        corpus_map=deps.corpus_map,
+        scope_tau_high=t.get("retrieval_scope_tau_high", 0.6),
+        scope_tau_low=t.get("retrieval_scope_tau_low", 0.3),
+        scope_min_token_count=t.get("retriever_min_token_count", 0),
     )

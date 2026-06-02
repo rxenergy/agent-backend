@@ -221,6 +221,7 @@ class OpenSearchRetrieverTool:
             authority_tier=authority_tier,
             jurisdiction=src.get("jurisdiction"),
             effective_on=effective_on,
+            token_count=src.get("token_count"),
         )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,6 +32,10 @@ class RetrievedChunk(BaseModel):
     source_id: str | None = None  # ADAMS Accession Number 또는 govinfo packageId
     page_end: int | None = None
     title: str | None = None  # doc_metadata.DocumentTitle 또는 doc_metadata.title
+    # v3.1 노이즈 floor(Layer 2) 입력 — chunk 본문 토큰 수. 인덱스 _source 의
+    # token_count 를 그대로 싣는다(목차·헤더·단어 fragment 는 작다). local 어댑터는
+    # snippet 단어수로 근사. min_token_count 필터/포스트필터가 이 값을 읽는다.
+    token_count: int | None = None
 
 
 class RetrieverSearchInput(BaseModel):
@@ -47,6 +52,16 @@ class RetrieverSearchInput(BaseModel):
     # OpenSearch 어댑터는 이 값을 search_pipeline 선택에 사용(동일 hybrid DSL에
     # weight 변종 pipeline 적용). local 어댑터는 무시. 미지정 시 hybrid.
     strategy: str = "hybrid"
+    # v3.1 범위 한정(Layer 1) — corpus_map 이 confidence-게이트로 산출.
+    #   target  : boost-scope. {"collection": ["SRP","DSRS"]} → in-scope 문서 가산
+    #             (BM25 should boost). 배제하지 않음 → recall-safe.
+    #   filters : hard-scope. {"collection": ["10CFR"], "search_type": "manual"} →
+    #             hybrid.filter term/terms 로 모집단 제한. 복구 라운드에선 해제됨.
+    #   min_token_count : 노이즈 floor(Layer 2). 본문 토큰 < N 인 chunk 제외.
+    # 셋 다 빈/0 기본값 → 비울 때 DSL 불변(sequential_tool_routed_v2·local 무영향).
+    target: dict[str, list[str]] = Field(default_factory=dict)
+    filters: dict[str, Any] = Field(default_factory=dict)
+    min_token_count: int = 0
 
 
 class RetrieverSearchOutput(BaseModel):

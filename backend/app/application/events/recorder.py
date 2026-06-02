@@ -79,6 +79,8 @@ class EventRecorder:
         # v2 callers omit these and get an unchanged event) ---
         query_understanding: dict[str, Any] | None = None,
         retrieval_plan_hash: str | None = None,
+        corpus_map_hash: str | None = None,
+        scope_mode: str | None = None,
         evaluator_policy_hash: str | None = None,
         regulatory_enforced: bool | None = None,
         per_chunk_signals: tuple[ChunkSignals, ...] = (),
@@ -138,6 +140,8 @@ class EventRecorder:
             error_code=error_code,
             query_understanding=query_understanding,
             retrieval_plan_hash=retrieval_plan_hash,
+            corpus_map_hash=corpus_map_hash,
+            scope_mode=scope_mode,
             evaluator_policy_hash=evaluator_policy_hash,
             regulatory_enforced=regulatory_enforced,
             per_chunk_signals=per_chunk_signals,

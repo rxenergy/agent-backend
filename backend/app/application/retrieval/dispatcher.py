@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.application.retrieval.rrf import reciprocal_rank_fusion, rrf_scores
 from app.domain.retrieval import (
@@ -58,6 +59,9 @@ class RetrievalDispatcher:
         ctx: ToolExecutionContext,
         min_score: float = 0.0,
         top_k: int | None = None,
+        target: dict[str, list[str]] | None = None,
+        filters: dict[str, Any] | None = None,
+        min_token_count: int = 0,
     ) -> DispatchResult:
         """전략별로 `fetch_k` 깊이로 검색 → raw min_score 전략별 필터 → RRF 융합.
 
@@ -76,6 +80,10 @@ class RetrievalDispatcher:
                     "scenario_depth": scenario_depth,
                     "entities": entities,
                     "strategy": strategy,
+                    # v3.1 범위·노이즈(Layer 1/2) — 전 strategy leg 공통.
+                    "target": target or {},
+                    "filters": filters or {},
+                    "min_token_count": min_token_count,
                 },
                 ctx,
             )

@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     retrieval_max_recover_rounds: int = 2
     retriever_min_score: float = 0.0
     retriever_k_dense: int = 50
+    # v3.1 Layer 1 범위 한정(corpus_map) — confidence 게이트 임계.
+    #   conf >= tau_high → hard filter / tau_low <= conf < tau_high → boost /
+    #   conf < tau_low → off. 잘못된 hard scope 의 recall 절벽을 confidence 로 방어.
+    retrieval_scope_tau_high: float = 0.6
+    retrieval_scope_tau_low: float = 0.3
+    # v3.1 Layer 2 노이즈 floor 기본값 — corpus_map.chunk_quality 가 우선,
+    # 맵 미배치 시에만 이 값 적용(0=비활성).
+    retriever_min_token_count: int = 0
     opensearch_endpoint: str = "http://opensearch:9200"
     opensearch_index: str = "nrc-all-v1"
     # 적재 데이터가 따르는 인덱스 스키마 버전의 *선언적* 단일 출처.

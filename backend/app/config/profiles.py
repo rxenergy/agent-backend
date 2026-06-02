@@ -226,6 +226,7 @@ async def build_container(settings: Settings) -> AppContainer:
     retrieval_planner: Any = None
     retrieval_evaluator: Any = None
     retrieval_recoverer: Any = None
+    corpus_map: Any = None
 
     if needs_tool_stack:
         session_store: SessionMemoryStore
@@ -258,6 +259,17 @@ async def build_container(settings: Settings) -> AppContainer:
         _syn_dir = Path(settings.tool_registry_path).parent.parent / "data" / "synonyms"
         retrieval_recoverer = RetrievalRecoverer.from_yaml_dir(
             _syn_dir, max_rounds=settings.retrieval_max_recover_rounds
+        )
+
+        # v3.1 Layer 1 범위 한정 — `corpus_map.yaml` (tools/ sibling). 없으면
+        # 빈 맵(scope off, noise floor 0) 폴백.
+        from app.application.retrieval.corpus_map import CorpusMap
+
+        _corpus_path = Path(settings.tool_registry_path).parent / "corpus_map.yaml"
+        corpus_map = (
+            CorpusMap.from_yaml(_corpus_path)
+            if _corpus_path.is_file()
+            else CorpusMap.default()
         )
 
         if settings.retriever_backend == "opensearch":
@@ -409,6 +421,7 @@ async def build_container(settings: Settings) -> AppContainer:
         retrieval_planner=retrieval_planner,
         retrieval_evaluator=retrieval_evaluator,
         retrieval_recoverer=retrieval_recoverer,
+        corpus_map=corpus_map,
         tunables={
             "classification_threshold": settings.classification_threshold,
             "verification_citation_threshold": settings.verification_citation_threshold,
@@ -421,6 +434,10 @@ async def build_container(settings: Settings) -> AppContainer:
             # 규제 hard gate(authority_tier) 강제는 v2 스키마 선언 시에만 — v1 은
             # collection-유도 tier 라 vendor(tertiary) 를 차단하면 안 됨.
             "regulatory_hard_gates_enforced": settings.opensearch_schema_version == "v2",
+            # v3.1 Layer 1/2 — 범위 confidence 게이트 + 노이즈 floor 기본값.
+            "retrieval_scope_tau_high": settings.retrieval_scope_tau_high,
+            "retrieval_scope_tau_low": settings.retrieval_scope_tau_low,
+            "retriever_min_token_count": settings.retriever_min_token_count,
             "active_cells_mode": settings.active_cells_mode,
             # v3.1 (hierarchical_corrective). Ignored by other variants.
             "llm_call_budget": getattr(settings, "llm_call_budget", 8),

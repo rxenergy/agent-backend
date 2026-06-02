@@ -46,6 +46,9 @@ class AgentDeps:
     retrieval_evaluator: Any = None
     # v3.1 Node 7 결정론 recover. None 이면 변형이 RetrievalRecoverer.default().
     retrieval_recoverer: Any = None
+    # v3.1 Layer 1 범위 한정(corpus_map). None 이면 변형이 CorpusMap.default()
+    # (scope off, noise floor 0) 폴백.
+    corpus_map: Any = None
     # Pass-through tunables — runners read what they care about.
     tunables: dict[str, Any] = field(default_factory=dict)
 
