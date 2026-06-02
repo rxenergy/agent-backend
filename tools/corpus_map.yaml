@@ -1,0 +1,83 @@
+# v3.1 Layer 1 — 문서 구조 사전지식(corpus_map). 범위 한정 scope 라우팅 + 노이즈 floor.
+# (docs/plans/retrieval_optimization_noise_scoping.v1.md §5)
+#
+# 코드(CorpusMap.resolve_scope)가 (scenario_object, entities, intents)를 보고
+# 첫 매칭 룰의 scope 를 채택한다. LLM 미사용. confidence-게이트:
+#   conf >= tau_high  → filter(모집단 제한, hard-scope)
+#   tau_low <= conf   → boost(가산만, 전 코퍼스 유지)
+#   conf <  tau_low   → off
+# noise floor(chunk_quality.min_token_count)는 mode 와 무관하게 항상 적용.
+#
+# seed 수준: collection 라우팅(SRP/DSRS/10CFR/RG/FR). 장(chapter) 단위 상세
+# 라우팅은 후속(Open Q). scope 값은 nrc-all-v1 keyword 필드(collection/search_type).
+
+# 문서 카테고리·표준 구조(사전지식). routes_topics 는 운영 문서화용 메모.
+collections:
+  SRP:                              # NUREG-0800 Standard Review Plan (19 chapters, 장=공학분야)
+    doc_kind: review_plan
+    search_type: manual
+    authority_tier: secondary
+    routes_topics: [design_review, acceptance_criteria, safety_analysis]
+  DSRS:                             # Design-Specific Review Standard (NuScale 등)
+    doc_kind: review_standard
+    search_type: nuscale
+    authority_tier: secondary
+    routes_topics: [nuscale_design_review]
+  10CFR:                            # Code of Federal Regulations Title 10 (법령)
+    doc_kind: regulation
+    search_type: manual
+    authority_tier: primary
+    routes_topics: [legal_requirement]
+  RG:                               # Regulatory Guide (acceptable method)
+    doc_kind: guidance
+    search_type: manual
+    authority_tier: secondary
+    routes_topics: [acceptable_method]
+  FR:                               # Federal Register (관보)
+    doc_kind: federal_register
+    search_type: manual
+    authority_tier: primary
+
+# topic → scope 라우팅. when(AND): scenario_object_in / has_entity_kinds / intents_any.
+# 룰은 scenario_object/entities 기준으로 작성(Node 3 stub 동안 intents 는 비어 inert —
+# intents_any 룰은 forward-compatible 표기용).
+topic_routing:
+  # 규제 ID 가 명시된 질의 — 법령·가이드 컬렉션으로 좁힘.
+  - id: regulation_clause
+    when:
+      has_entity_kinds: [regulation_id]
+    scope:
+      collection: [10CFR, RG, SRP]
+
+  # NuScale 등 노형 설계 질의 — SRP/DSRS 로 좁힘.
+  - id: smr_design_review
+    when:
+      scenario_object_in: [nuscale, vendor, design]
+      has_entity_kinds: [reactor_type]
+    scope:
+      collection: [SRP, DSRS]
+      search_type: nuscale
+
+  # 규제/심사 일반(O2 등) — 매뉴얼 컬렉션 군으로 boost/limit.
+  - id: regulation_general
+    when:
+      scenario_object_in: [O2, regulation, kins, nrc]
+    scope:
+      collection: [SRP, RG, 10CFR]
+
+  # forward-compatible(현재 inert) — multi-intent 분해 후 intents 채워지면 발동.
+  - id: comparison_intent
+    when:
+      intents_any: [comparison, compare]
+    scope:
+      collection: [SRP, RG]
+
+# 노이즈 floor(Layer 2) — 본문 토큰 < N 인 chunk(목차·헤더·단어 fragment) 제외.
+# **기본 0(비활성) — 의도적 opt-in 튜닝 노브.** 0 보다 올리기 전 두 전제를 확인:
+#   1) 운영 인덱스의 *모든 본문 chunk* 에 token_count 가 채워져 있을 것
+#      (OpenSearch range 필터는 필드 부재 chunk 를 *조용히 누락*시킨다).
+#   2) local 백엔드(fake)는 짧은 합성 snippet 이라 nonzero floor 시 전량 누락됨 —
+#      floor 는 opensearch 백엔드 + gold-set 튜닝 후에만 올린다.
+# (false refusal > false answer 비대칭 회피: 검증 전엔 floor 를 켜지 않는다.)
+chunk_quality:
+  min_token_count: 0
