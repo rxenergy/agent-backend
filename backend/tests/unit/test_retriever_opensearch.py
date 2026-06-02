@@ -175,6 +175,60 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
     }
 
 
+async def test_retriever_scope_filters_and_noise_floor_in_dsl(monkeypatch):
+    """v3.1 Layer 1/2: filters→term/terms, min_token_count→range(token_count),
+    target→boosted terms in BM25 should. hybrid.queries 는 여전히 3개여야
+    search_pipeline 의 3-weight 와 sync 가 유지된다(plan 결정 #1)."""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.read().decode("utf-8"))
+        return httpx.Response(200, json={"hits": {"hits": []}})
+
+    _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
+    tool = _retriever()
+    await tool.invoke(
+        {
+            "query_text": "ECCS acceptance criteria",
+            "top_k": 3,
+            "filters": {"collection": ["10CFR", "RG"], "search_type": "manual"},
+            "target": {"collection": ["SRP"]},
+            "min_token_count": 12,
+        },
+        _ctx(),
+    )
+    hybrid = captured["body"]["query"]["hybrid"]
+    # 4번째 sub-query 를 더하지 않는다 — 파이프라인 weight 배열과 desync 방지.
+    assert len(hybrid["queries"]) == 3
+    fclauses = hybrid["filter"]["bool"]["filter"]
+    assert {"terms": {"collection": ["10CFR", "RG"]}} in fclauses
+    assert {"term": {"search_type": "manual"}} in fclauses
+    assert {"range": {"token_count": {"gte": 12}}} in fclauses
+    # boost-scope(target)는 BM25 should 안의 terms-boost 로만 들어간다.
+    bm25_should = hybrid["queries"][0]["bool"]["should"]
+    assert any(
+        "terms" in cl and cl["terms"].get("collection") == ["SRP"]
+        and cl["terms"].get("boost")
+        for cl in bm25_should
+    )
+
+
+async def test_retriever_no_scope_keeps_dsl_unchanged(monkeypatch):
+    """빈 scope → filter 절 미생성(기존 동작 보존, sequential_v2 무영향)."""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.read().decode("utf-8"))
+        return httpx.Response(200, json={"hits": {"hits": []}})
+
+    _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
+    tool = _retriever()
+    await tool.invoke({"query_text": "q", "top_k": 3}, _ctx())
+    hybrid = captured["body"]["query"]["hybrid"]
+    assert len(hybrid["queries"]) == 3
+    assert "filter" not in hybrid  # scenario_object 도 없으니 filter 절 자체가 없음
+
+
 async def test_retriever_empty_results(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"hits": {"hits": []}})

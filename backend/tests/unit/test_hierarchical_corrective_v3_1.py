@@ -101,6 +101,8 @@ def _tool_registry_yaml(root: Path) -> Path:
 def _make_runner(
     tmp: Path, *, with_contract: bool = True, retrieval_planner=None, retriever_tool=None,
     llm=None, claim_verification_enabled: bool = True,
+    corpus_map=None, scope_tau_high: float = 0.6, scope_tau_low: float = 0.3,
+    scope_min_token_count: int = 0,
 ) -> tuple[HierarchicalCorrectiveRunner, FilesystemEventSink]:
     prompts = tmp / "prompts"
     build_prompts(prompts)
@@ -132,6 +134,10 @@ def _make_runner(
         citation_contract_path=str(_CONTRACT) if with_contract else None,
         retrieval_planner=retrieval_planner,
         claim_verification_enabled=claim_verification_enabled,
+        corpus_map=corpus_map,
+        scope_tau_high=scope_tau_high,
+        scope_tau_low=scope_tau_low,
+        scope_min_token_count=scope_min_token_count,
     )
     return runner, sink
 
@@ -161,6 +167,9 @@ async def test_full_workflow_runs_and_records_v31_fields() -> None:
         rec = json.loads(line)
         assert rec["agent_variant"] == HIERARCHICAL_CORRECTIVE_VARIANT_ID
         assert rec["retrieval_plan_hash"]
+        # 성공 경로에도 scope 가 기록된다(corpus_map 미주입 → default → off, 단 해시는 존재).
+        assert rec["scope_mode"] == "off"
+        assert rec["corpus_map_hash"]
         assert rec["per_chunk_signals"][0]["decision"] == "pass"
         # generation + decompose(llm) + entailment = 3 LLM calls.
         assert rec["budget"]["llm_calls_used"] == 3
@@ -680,3 +689,86 @@ async def test_phoenix_recover_round_spans_distinguishable(span_exporter) -> Non
         and sp.parent.span_id == r0.context.span_id
     ]
     assert tool_spans, "recover round's retriever.search did not nest under round span"
+
+
+class _ScopeCapturingRetriever:
+    """검색 호출마다 받은 scope(filters/target/min_token_count)를 기록하고,
+    게이트를 FAIL 시키는 빈약 chunk 를 반환한다(질의어 무관 → s_lex≈0). recover
+    루프를 강제로 태워 '복구 라운드에서 hard filter 가 해제되는가'(plan 결정 #2)
+    와 refusal event 의 scope 기록을 함께 검증한다."""
+
+    name = "retriever.search"
+    version = "v1"
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def invoke(self, tool_input, context):
+        from app.domain.retrieval import (
+            RetrievedChunk,
+            RetrieverSearchInput,
+            RetrieverSearchOutput,
+        )
+        from app.domain.tools import ToolResult
+
+        if isinstance(tool_input, dict):
+            tool_input = RetrieverSearchInput.model_validate(tool_input)
+        self.calls.append(
+            {"filters": dict(tool_input.filters), "target": dict(tool_input.target),
+             "min_token_count": tool_input.min_token_count}
+        )
+        # 질의어와 무관한 본문 → lexical/regulatory 신호 0 → 게이트 FAIL.
+        chunk = RetrievedChunk(
+            chunk_id="z1", document_id="d", score=0.05,
+            text="zzz unrelated boilerplate zzz", snippet="zzz unrelated boilerplate zzz",
+            token_count=4,
+        )
+        out = RetrieverSearchOutput(chunks=[chunk])
+        return ToolResult(
+            tool_name=self.name, tool_version=self.version, status="success",
+            output=out.model_dump(mode="json"), latency_ms=0,
+            input_hash="h", trace_id=context.trace_id,
+        )
+
+
+def _scope_corpus_map():
+    from app.application.retrieval.corpus_map import CorpusMap
+
+    # 분류기 미주입 시 shim 이 scenario_object=DEFAULT(O4), confidence=0.5 를 준다.
+    # tau_high=0.4 로 0.5>=0.4 → filter mode. 룰은 scenario_object_in:[O4] 로 매칭.
+    return CorpusMap(
+        topic_routing=[
+            {"id": "t-o4", "when": {"scenario_object_in": ["O4"]},
+             "scope": {"collection": ["SRP"]}}
+        ],
+        chunk_quality={"min_token_count": 0},  # floor 0 — recover 검증과 분리
+    )
+
+
+@pytest.mark.asyncio
+async def test_scope_filter_applied_then_dropped_on_recover() -> None:
+    fake = _ScopeCapturingRetriever()
+    cm = _scope_corpus_map()
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), retriever_tool=fake, corpus_map=cm,
+            scope_tau_high=0.4, scope_tau_low=0.3,
+        )
+        req = AgentRequest(interaction_id="sc1", query_text="APR1400 안전계통", session_id="ss1")
+        resp = await runner.run(req)
+
+        # 빈약 chunk → 복구 소진 후 INSUFFICIENT_EVIDENCE refusal.
+        assert resp.refusal_reason == "insufficient_evidence"
+        assert len(fake.calls) >= 2  # 최초 1 + recover N
+        # 최초 검색엔 hard filter 적용(scope=filter).
+        assert fake.calls[0]["filters"] == {"collection": ["SRP"]}
+        # 복구 라운드는 filter 해제(recall 절벽 방어), boost(target)은 유지·비어있음.
+        assert fake.calls[1]["filters"] == {}
+
+        # refusal event 에도 scope 가 기록된다("scope 가 막다른 벽으로 좁혔나").
+        events_root = Path(tmp) / "events" / "t" / "interaction_events"
+        rec = json.loads(
+            next(events_root.rglob("*.jsonl")).read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert rec["scope_mode"] == "filter"
+        assert rec["corpus_map_hash"]

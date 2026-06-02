@@ -112,6 +112,57 @@ async def test_dispatch_tolerates_partial_failure():
     assert [s.name for s in res.executed] == ["bm25"]
 
 
+class _InputCapturingExecutor:
+    """검색 입력을 전부 기록 — scope(target/filters/min_token_count) passthrough 검증."""
+
+    def __init__(self) -> None:
+        self.inputs: list[RetrieverSearchInput] = []
+
+    async def invoke(self, name, tool_input, context) -> ToolResult:
+        ti = RetrieverSearchInput.model_validate(tool_input)
+        self.inputs.append(ti)
+        out = RetrieverSearchOutput(
+            chunks=[RetrievedChunk(chunk_id=f"{ti.strategy}-c", document_id="d", score=0.7)]
+        )
+        return ToolResult(
+            tool_name=name, tool_version="v1", status="success",
+            output=out.model_dump(mode="json"), latency_ms=0,
+            input_hash="h", trace_id=context.trace_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_threads_scope_into_every_leg():
+    ex = _InputCapturingExecutor()
+    disp = RetrievalDispatcher(ex, rrf_k=60)
+    await disp.execute(
+        _plan("hybrid", "bm25"),
+        query_text="q", fetch_k=10, scenario_object="O1", scenario_depth="D1",
+        entities={}, ctx=_ctx(),
+        target={"collection": ["SRP"]},
+        filters={"collection": ["10CFR"], "search_type": "manual"},
+        min_token_count=12,
+    )
+    assert len(ex.inputs) == 2  # 전 strategy leg 에 공통 전달
+    for ti in ex.inputs:
+        assert ti.target == {"collection": ["SRP"]}
+        assert ti.filters == {"collection": ["10CFR"], "search_type": "manual"}
+        assert ti.min_token_count == 12
+
+
+@pytest.mark.asyncio
+async def test_dispatch_scope_defaults_are_empty():
+    ex = _InputCapturingExecutor()
+    disp = RetrievalDispatcher(ex, rrf_k=60)
+    await disp.execute(
+        _plan("hybrid"),
+        query_text="q", fetch_k=5, scenario_object=None, scenario_depth=None,
+        entities={}, ctx=_ctx(),
+    )
+    ti = ex.inputs[0]
+    assert ti.target == {} and ti.filters == {} and ti.min_token_count == 0
+
+
 @pytest.mark.asyncio
 async def test_dispatch_all_fail_reraises():
     disp = RetrievalDispatcher(_AllFailExecutor(), rrf_k=60)
