@@ -20,6 +20,15 @@ tools:
     retry: 0
     required: true
 
+  # v3.1 P1 Section auto-merge / P2 다홉 — 한 Section 형제 문단 메타 표적 fetch.
+  # required:false — 컨텍스트 *보강*용이라 실패해도 답변을 막지 않는다(leaf 로 진행).
+  document.fetch_section:
+    version: v1
+    adapter: env:RETRIEVER_BACKEND   # opensearch | local — wired in profiles.py
+    timeout_ms: 3000
+    retry: 0
+    required: false
+
   memory.session_load:
     version: v1
     adapter: postgres

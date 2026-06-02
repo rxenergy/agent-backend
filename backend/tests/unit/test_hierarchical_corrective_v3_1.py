@@ -86,6 +86,7 @@ def _tool_registry_yaml(root: Path) -> Path:
         "tools": {
             "retriever.search": {"version": "v1", "adapter": "local", "timeout_ms": 5000, "retry": 1, "required": True},
             "document.resolve_citation": {"version": "v1", "adapter": "local", "timeout_ms": 2000, "retry": 0, "required": True},
+            "document.fetch_section": {"version": "v1", "adapter": "local", "timeout_ms": 3000, "retry": 0, "required": False},
             "memory.session_load": {"version": "v1", "adapter": "postgres", "timeout_ms": 1000, "retry": 0, "required": False},
             "memory.session_update": {"version": "v1", "adapter": "postgres", "timeout_ms": 1000, "retry": 0, "required": False},
             "memory.approved_search": {"version": "v1", "adapter": "postgres_pgvector", "timeout_ms": 1000, "retry": 0, "required": False},
@@ -102,7 +103,8 @@ def _make_runner(
     tmp: Path, *, with_contract: bool = True, retrieval_planner=None, retriever_tool=None,
     llm=None, claim_verification_enabled: bool = True,
     corpus_map=None, scope_tau_high: float = 0.6, scope_tau_low: float = 0.3,
-    scope_min_token_count: int = 0,
+    scope_min_token_count: int = 0, fetch_section_tool=None,
+    context_token_budget: int = 0, section_merge_max_chunks: int = 50,
 ) -> tuple[HierarchicalCorrectiveRunner, FilesystemEventSink]:
     prompts = tmp / "prompts"
     build_prompts(prompts)
@@ -110,9 +112,11 @@ def _make_runner(
     sink = FilesystemEventSink(root=str(tmp / "events"), prefix="t")
     recorder = EventRecorder(sink, app_profile="local")
     store = InMemorySessionMemoryStore()
+    from app.adapters.tools.document_local import LocalDocumentFetchSectionTool
     tools = {
         "retriever.search": retriever_tool or LocalRetrieverTool(),
         "document.resolve_citation": LocalDocumentResolverTool(),
+        "document.fetch_section": fetch_section_tool or LocalDocumentFetchSectionTool(),
         "memory.session_load": SessionLoadTool(store),
         "memory.session_update": SessionUpdateTool(store, ttl_days=90),
         "memory.approved_search": ApprovedSearchStubTool(),
@@ -138,6 +142,8 @@ def _make_runner(
         scope_tau_high=scope_tau_high,
         scope_tau_low=scope_tau_low,
         scope_min_token_count=scope_min_token_count,
+        context_token_budget=context_token_budget,
+        section_merge_max_chunks=section_merge_max_chunks,
     )
     return runner, sink
 
@@ -772,3 +778,292 @@ async def test_scope_filter_applied_then_dropped_on_recover() -> None:
         )
         assert rec["scope_mode"] == "filter"
         assert rec["corpus_map_hash"]
+
+
+# ---- P1/P2 (Section auto-merge · multi-hop · budget) ----------------------
+from app.domain.retrieval import (  # noqa: E402
+    ChunkSignals,
+    EvaluationResult,
+    RetrievedChunk,
+    RetrieverSearchOutput,
+)
+from app.domain.tools import ToolResult  # noqa: E402
+from app.ports.tool import ToolExecutionContext  # noqa: E402
+
+
+class _FakeFetchSection:
+    """document.fetch_section fake — 입력을 기록하고 구성된 형제/홉 chunk 반환."""
+
+    name = "document.fetch_section"
+    version = "v1"
+
+    def __init__(self, chunks_by_key=None) -> None:
+        # key=(source_id, section_key) → list[RetrievedChunk]
+        self._by_key = chunks_by_key or {}
+        self.calls: list[dict] = []
+
+    async def invoke(self, tool_input, context):
+        from app.domain.retrieval import DocumentFetchSectionInput
+
+        if isinstance(tool_input, dict):
+            tool_input = DocumentFetchSectionInput.model_validate(tool_input)
+        self.calls.append({"source_id": tool_input.source_id,
+                           "section_key": tool_input.section_key,
+                           "match": tool_input.match})
+        out = RetrieverSearchOutput(
+            chunks=self._by_key.get((tool_input.source_id, tool_input.section_key), [])
+        )
+        return ToolResult(
+            tool_name=self.name, tool_version=self.version, status="success",
+            output=out.model_dump(mode="json"), latency_ms=0, input_hash="h",
+            trace_id=context.trace_id,
+        )
+
+
+def _ctx_t() -> ToolExecutionContext:
+    return ToolExecutionContext(interaction_id="i", trace_id="t", app_profile="local",
+                               agent_variant=HIERARCHICAL_CORRECTIVE_VARIANT_ID)
+
+
+@pytest.mark.asyncio
+async def test_section_merge_expands_promoted_leaf_without_regate() -> None:
+    sibs = [
+        RetrievedChunk(chunk_id="S1_c0002", document_id="S1", score=0.4,
+                       snippet="sibling two", token_count=20),
+        RetrievedChunk(chunk_id="S1_c0001", document_id="S1", score=0.4,
+                       snippet="sibling one", token_count=15),
+    ]
+    fake = _FakeFetchSection({("S1", "3.5.1 Sub"): sibs})
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), fetch_section_tool=fake)
+        chunks = [
+            RetrievedChunk(chunk_id="A", document_id="S1", source_id="S1", score=0.5,
+                           snippet="A leaf window", token_count=5,
+                           section_path=["3.5", "3.5.1 Sub"]),
+            RetrievedChunk(chunk_id="B", document_id="S2", source_id="S2", score=0.5,
+                           snippet="B leaf", token_count=5, section_path=["9.9 Other"]),
+        ]
+        evaluation = EvaluationResult(per_chunk=(
+            ChunkSignals(chunk_id="A", decision="weak"),
+            ChunkSignals(chunk_id="B", decision="pass"),
+        ))
+        out, stash, promoted = await runner._section_merge(
+            chunks, evaluation, ctx=_ctx_t(), record=lambda r: None,
+        )
+        by_id = {c.chunk_id: c for c in out}
+        # 승격된 A 는 형제(ordinal 순)로 확장, token_count 재합산. 인용 단위(chunk_id) 보존.
+        assert by_id["A"].snippet == "sibling one\nsibling two"
+        assert by_id["A"].token_count == 35
+        # B(PASS)는 fetch 안 함, 그대로.
+        assert by_id["B"].snippet == "B leaf"
+        assert promoted == {"A"}
+        assert stash["A"] == ("A leaf window", 5)   # demote 복원용 스태시
+        # term 매칭(자기 full 경로 원소)으로만 호출(B 미호출).
+        assert fake.calls == [{"source_id": "S1", "section_key": "3.5.1 Sub", "match": "term"}]
+
+
+@pytest.mark.asyncio
+async def test_section_merge_noop_when_all_pass() -> None:
+    fake = _FakeFetchSection()
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), fetch_section_tool=fake)
+        chunks = [RetrievedChunk(chunk_id="A", document_id="S1", source_id="S1",
+                                 score=0.9, section_path=["1"])]
+        evaluation = EvaluationResult(per_chunk=(ChunkSignals(chunk_id="A", decision="pass"),))
+        out, stash, promoted = await runner._section_merge(
+            chunks, evaluation, ctx=_ctx_t(), record=lambda r: None)
+        assert promoted == set() and stash == {} and out == chunks
+        assert fake.calls == []   # PASS 면 fetch 안 함
+
+
+@pytest.mark.asyncio
+async def test_multi_hop_follows_section_ref() -> None:
+    hop = RetrievedChunk(chunk_id="S1_c0099", document_id="S1", score=0.3,
+                         snippet="referenced section body", token_count=10)
+    fake = _FakeFetchSection({("S1", "3.2"): [hop]})
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), fetch_section_tool=fake)
+        chunks = [RetrievedChunk(chunk_id="A", document_id="S1", source_id="S1",
+                                 score=0.8, snippet="as defined in §3.2 of the rule")]
+        edges: list = []
+        hop_chunks = await runner._multi_hop(
+            chunks, ctx=_ctx_t(), record=lambda r: None, edges_out=edges)
+        assert [c.chunk_id for c in hop_chunks] == ["S1_c0099"]
+        assert len(edges) == 1
+        assert edges[0].from_chunk_id == "A" and edges[0].target_id == "3.2"
+        assert fake.calls[0]["match"] == "prefix"   # 번호 prefix 매칭
+
+
+@pytest.mark.asyncio
+async def test_context_budget_demotes_then_drops_then_reorders() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), context_token_budget=10)
+        chunks = [
+            RetrievedChunk(chunk_id="c0", document_id="d", score=0.9,
+                           snippet="merged section big", token_count=8),
+            RetrievedChunk(chunk_id="c1", document_id="d", score=0.5,
+                           snippet="x", token_count=8),
+            RetrievedChunk(chunk_id="c2", document_id="d", score=0.2,
+                           snippet="y", token_count=8),
+        ]
+        stash = {"c0": ("leaf", 2)}   # c0 는 승격된 것 → leaf 복원 시 2 토큰
+        log: list = []
+        out = runner._apply_context_budget(chunks, stash, budget_log=log)
+        ids = {c.chunk_id for c in out}
+        # demote c0(8→2): 총 24→18, drop tail c2(8): 18→10 ≤ budget. c2 제거.
+        assert "c2" not in ids
+        assert any(a.startswith("demote:c0") for a in log)
+        assert any(a.startswith("drop:c2") for a in log)
+        # c0 는 leaf 로 강등(snippet/token 복원).
+        c0 = next(c for c in out if c.chunk_id == "c0")
+        assert c0.snippet == "leaf" and c0.token_count == 2
+
+
+@pytest.mark.asyncio
+async def test_context_budget_off_by_default_is_noop() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp))   # context_token_budget=0
+        assert runner._context_token_budget == 0
+
+
+class _RefChunkRetriever:
+    """검색 chunk 가 §참조를 포함하는 현실 케이스 — Node 8 다홉 end-to-end 검증.
+    질의어를 snippet 에 실어 게이트 PASS(진행)시키고, source_id + §3.2 를 둔다."""
+
+    name = "retriever.search"
+    version = "v1"
+
+    async def invoke(self, tool_input, context):
+        from app.domain.retrieval import (
+            RetrievedChunk,
+            RetrieverSearchInput,
+            RetrieverSearchOutput,
+        )
+        from app.domain.tools import ToolResult
+
+        if isinstance(tool_input, dict):
+            tool_input = RetrieverSearchInput.model_validate(tool_input)
+        snip = f"{tool_input.query_text} acceptance criteria; see §3.2 of the rule [cite-0]."
+        chunk = RetrievedChunk(
+            chunk_id="D1_c0007", document_id="D1", source_id="D1", score=0.9,
+            snippet=snip, section_path=["3.5 Missile", "3.5.1 Turbine"], token_count=12,
+        )
+        out = RetrieverSearchOutput(chunks=[chunk])
+        return ToolResult(
+            tool_name=self.name, tool_version=self.version, status="success",
+            output=out.model_dump(mode="json"), latency_ms=0, input_hash="h",
+            trace_id=context.trace_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_records_hops_from_section_ref_end_to_end() -> None:
+    hop = RetrievedChunk(chunk_id="D1_c0030", document_id="D1", score=0.4,
+                         snippet="section 3.2 body text", token_count=10)
+    fake_fetch = _FakeFetchSection({("D1", "3.2"): [hop]})
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), retriever_tool=_RefChunkRetriever(),
+            fetch_section_tool=fake_fetch, claim_verification_enabled=False,
+        )
+        req = AgentRequest(interaction_id="mh1", query_text="APR1400 safety",
+                           session_id="mhs1")
+        resp = await runner.run(req)
+        # 다홉이 §3.2 를 추적했고(답변은 거부되지 않음) event 에 hops 가 기록된다.
+        assert resp.refusal_reason is None
+        assert fake_fetch.calls and fake_fetch.calls[0]["match"] == "prefix"
+
+        events_root = Path(tmp) / "events" / "t" / "interaction_events"
+        rec = json.loads(
+            next(events_root.rglob("*.jsonl")).read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert rec["hops"], "hop edge not recorded in event"
+        assert rec["hops"][0]["ref_kind"] == "section"
+        assert rec["hops"][0]["target_id"] == "3.2"
+
+
+class _EntailmentCapturingLLM(_ClaimAwareLLM):
+    """_ClaimAwareLLM + entailment 프롬프트를 캡처해 검증기가 *무슨 근거*를 받았는지
+    단언할 수 있게 한다(Finding 1: Section 병합 후 검증기가 leaf window 가 아니라
+    섹션 본문을 봐야 한다)."""
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self.entail_prompts: list[str] = []
+
+    async def generate(self, prompt, *, model_options=None, grammar=None):
+        if "supported/contradicted" in prompt:
+            self.entail_prompts.append(prompt)
+        return await super().generate(prompt, model_options=model_options, grammar=grammar)
+
+
+class _TwoChunkRetriever:
+    """chunk0=FAIL(질의 무관, 승격 대상) + chunk1=PASS(질의 일치, overall 진행).
+    chunk0 에 source_id+section_path 를 둬 Section 병합 대상이 되게 한다."""
+
+    name = "retriever.search"
+    version = "v1"
+
+    async def invoke(self, tool_input, context):
+        from app.domain.retrieval import (
+            RetrievedChunk,
+            RetrieverSearchInput,
+            RetrieverSearchOutput,
+        )
+        from app.domain.tools import ToolResult
+
+        if isinstance(tool_input, dict):
+            tool_input = RetrieverSearchInput.model_validate(tool_input)
+        chunks = [
+            RetrievedChunk(chunk_id="W_c0001", document_id="W", source_id="W", score=0.9,
+                           snippet="unrelated boilerplate fragment [cite-0]",
+                           section_path=["3.5", "3.5.1 Sub"], token_count=6),
+            RetrievedChunk(chunk_id="P_c0001", document_id="P", source_id="P", score=0.8,
+                           snippet=f"{tool_input.query_text} acceptance criteria",
+                           section_path=["1 Intro"], token_count=6),
+        ]
+        out = RetrieverSearchOutput(chunks=chunks)
+        return ToolResult(
+            tool_name=self.name, tool_version=self.version, status="success",
+            output=out.model_dump(mode="json"), latency_ms=0, input_hash="h",
+            trace_id=context.trace_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_section_merge_evidence_reaches_verifier_with_claims_on() -> None:
+    """Finding 1 회귀 가드: Section 병합이 발동하고 claim 검증이 켜진 production 경로.
+    검증기(entailment)가 받는 근거가 leaf window 가 아니라 *병합된 섹션 본문*이어야
+    한다(아니면 형제-근거 claim 이 거짓 unsupported)."""
+    sibs = [
+        RetrievedChunk(chunk_id="W_c0001", document_id="W", score=0.4,
+                       snippet="SIBLINGMARKER passive cooling detail", token_count=20),
+        RetrievedChunk(chunk_id="W_c0002", document_id="W", score=0.4,
+                       snippet="SIBLINGMARKER injection criteria", token_count=18),
+    ]
+    fetch = _FakeFetchSection({("W", "3.5.1 Sub"): sibs})
+    llm = _EntailmentCapturingLLM(entailment_status="supported")
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), retriever_tool=_TwoChunkRetriever(), fetch_section_tool=fetch,
+            llm=llm,  # claims ON (기본)
+        )
+        req = AgentRequest(interaction_id="sm-e2e", query_text="reactor safety",
+                           session_id="sm-e2e-s")
+        resp = await runner.run(req)
+
+        # 병합된 cite-0(=W_c0001)의 근거가 섹션 본문(SIBLINGMARKER)으로 검증기에 전달됨.
+        assert llm.entail_prompts, "entailment did not run"
+        assert "SIBLINGMARKER" in llm.entail_prompts[0], (
+            "verifier got stale leaf window, not merged section text (Finding 1)"
+        )
+        assert resp.refusal_reason is None  # 형제-근거 claim 이 거짓 거부되지 않음
+
+        events_root = Path(tmp) / "events" / "t" / "interaction_events"
+        rec = json.loads(
+            next(events_root.rglob("*.jsonl")).read_text(encoding="utf-8").splitlines()[0]
+        )
+        # 실제 병합이 일어났으므로 정책 해시·promote 기록(Finding 2: 병합 시에만).
+        assert rec["section_merge_policy_hash"]
+        promoted = [s for s in rec["per_chunk_signals"] if s.get("promote")]
+        assert promoted and promoted[0]["chunk_id"] == "W_c0001"
