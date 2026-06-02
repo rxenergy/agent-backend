@@ -107,6 +107,24 @@ def _resolve_preflight_severity(settings: Settings) -> "str":
     return "warn" if settings.app_profile == "local" else "strict"
 
 
+# OpenSearch hybrid 가중치는 *operating point*(최종 결과 개수 = retriever_top_k)에
+# 종속된 속성이다. 벤치마크가 [bm25, dense, sparse] 가중치를 고정 k 에 맞춰 튜닝한다.
+# 어댑터의 per-call top_k 는 fetch 깊이(fetch_k≈20)라 operating point 가 아니므로,
+# pipeline 선택은 반드시 여기(config)에서 결정한다. 미벤치마크 k 는 폴백을 쓴다.
+_HYBRID_K_PIPELINES: dict[int, str] = {
+    5: "nrc-hybrid-search-k5",   # weights=[0.4, 0.3, 0.3]
+    10: "nrc-hybrid-search-k10",  # weights=[0.4, 0.2, 0.4]
+}
+
+
+def _resolve_hybrid_pipeline(retriever_top_k: int, fallback: str | None) -> str | None:
+    """operating point(`retriever_top_k`) → 벤치마크 hybrid pipeline.
+
+    벤치마크된 k(5/10)면 전용 pipeline, 그 외엔 `fallback`
+    (`opensearch_search_pipeline`). 빈 문자열은 None 으로 정규화."""
+    return _HYBRID_K_PIPELINES.get(retriever_top_k, fallback) or None
+
+
 def _build_event_sink(settings: Settings) -> EventSinkPort:
     if settings.event_sink == "filesystem":
         return FilesystemEventSink(
@@ -280,6 +298,11 @@ async def build_container(settings: Settings) -> AppContainer:
 
         if settings.retriever_backend == "opensearch":
             preflight_severity = _resolve_preflight_severity(settings)
+            # Hybrid 가중치 pipeline 은 operating point(retriever_top_k)에 연동.
+            # 자세한 근거는 _resolve_hybrid_pipeline / _HYBRID_K_PIPELINES 참조.
+            active_search_pipeline = _resolve_hybrid_pipeline(
+                settings.retriever_top_k, settings.opensearch_search_pipeline or None
+            )
             # v3.1: the G3 evaluator reads regulatory-meta fields. These exist
             # only in the v2 schema — the active v1 data has not been
             # re-ingested with them. The judgment of "is v2 usable" is the
@@ -302,7 +325,7 @@ async def build_container(settings: Settings) -> AppContainer:
                     endpoint=settings.opensearch_endpoint,
                     index=settings.opensearch_index,
                     severity=preflight_severity,
-                    search_pipeline=settings.opensearch_search_pipeline or None,
+                    search_pipeline=active_search_pipeline,
                     required_fields=required_fields,
                     verify_certs=settings.opensearch_verify_certs,
                 )
@@ -358,7 +381,7 @@ async def build_container(settings: Settings) -> AppContainer:
                     index=settings.opensearch_index,
                     dense_encoder=dense_encoder,
                     sparse_encoder=sparse_encoder,
-                    search_pipeline=settings.opensearch_search_pipeline or None,
+                    search_pipeline=active_search_pipeline,
                     dense_field=settings.opensearch_dense_field,
                     sparse_field=settings.opensearch_sparse_field,
                     text_field=settings.opensearch_text_field,

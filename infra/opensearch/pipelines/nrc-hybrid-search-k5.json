@@ -1,0 +1,22 @@
+{
+  "description": "hybrid search pipeline tuned for operating point top_k=5 (weights=[0.4, 0.3, 0.3], order=[bm25, dense, sparse])",
+  "phase_results_processors": [
+    {
+      "normalization-processor": {
+        "normalization": {
+          "technique": "min_max"
+        },
+        "combination": {
+          "technique": "arithmetic_mean",
+          "parameters": {
+            "weights": [
+              0.4,
+              0.3,
+              0.3
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

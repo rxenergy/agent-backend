@@ -73,6 +73,11 @@ class Settings(BaseSettings):
 
     # Retriever backend (W1)
     retriever_backend: Literal["local", "opensearch"] = "local"
+    # 최종 결과 개수(operating point). 벤치마크가 가중치를 이 k 에 맞춰 튜닝하므로
+    # OpenSearch hybrid pipeline 선택도 이 값에 연동된다(profiles.py):
+    #   k=5  → nrc-hybrid-search-k5  (weights=[0.4, 0.3, 0.3])
+    #   k=10 → nrc-hybrid-search-k10 (weights=[0.4, 0.2, 0.4])
+    #   그 외 → opensearch_search_pipeline 폴백
     retriever_top_k: int = 3
     # v3.1 Node 5 — 전략별 후보 풀 fetch 깊이 (spec ~20). 최종 top_k 와 분리:
     # 깊게 fetch 해 RRF 융합해야 더 나은 상위 top_k 를 고른다.
@@ -105,6 +110,8 @@ class Settings(BaseSettings):
     # v1 에서는 authority_tier(collection 유도)만 부분 동작한다. 운영자가
     # 코퍼스를 v2 스키마로 재적재한 뒤 이 값을 "v2" 로 올린다.
     opensearch_schema_version: Literal["v1", "v2"] = "v1"
+    # hybrid pipeline 폴백. retriever_top_k 가 벤치마크 operating point(5/10)면
+    # profiles.py 가 k-전용 pipeline 으로 오버라이드하고, 그 외 k 에서만 이 값을 쓴다.
     opensearch_search_pipeline: str = "nrc-hybrid-search"
     opensearch_dense_field: str = "dense_e5"
     opensearch_sparse_field: str = "sparse_fermi"
