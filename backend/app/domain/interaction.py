@@ -75,6 +75,11 @@ class AgentResponse:
     # "verified". 비규제 시나리오는 "n_a". 응답 객체·answer_text·custom field
     # 모두에 노출돼 v1 PASS 가 규제검증된 답으로 오인되지 않게 한다(PR-5 안전 계약).
     regulatory_grounding: str = "n_a"  # verified | unverified | n_a
+    # Node 1 LLM 분류기의 open-world 신호(비-LLM backend 는 None). intent=답변
+    # 내용 facet(taxonomy plan §5), scope_tier=T1–T4 처리 계층(§4). custom field
+    # 로 클라이언트에 노출 + event 재현 단위.
+    classifier_intent: str | None = None
+    scope_tier: str | None = None
 
 
 @dataclass(frozen=True)
@@ -174,3 +179,7 @@ class InteractionEvent:
     budget: Budget | None = None
     # Node 1 분류 정책 재현 핀(원칙 5) — rule 어휘/정규식/부스트, llm 프롬프트 등.
     classifier_policy_hash: str | None = None
+    # Node 1 LLM 분류기 open-world 신호(원칙 5) — intent(12+unknown)·scope_tier
+    # (T1–T4). 비-LLM backend·v2 경로는 None(이벤트 byte 영향 없음).
+    classifier_intent: str | None = None
+    scope_tier: str | None = None

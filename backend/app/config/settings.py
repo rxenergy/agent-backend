@@ -93,7 +93,7 @@ class Settings(BaseSettings):
     retrieval_scope_tau_low: float = 0.3
     # v3.1 Layer 2 노이즈 floor 기본값 — corpus_map.chunk_quality 가 우선,
     # 맵 미배치 시에만 이 값 적용(0=비활성).
-    retriever_min_token_count: int = 0
+    retriever_min_token_count: int = 10
     # v3.1 P1 Section auto-merge — 승격 chunk 의 형제 fetch 상한(섹션 폭주 방지).
     section_merge_max_chunks: int = 50
     # v3.1 P1b 예산 거버너 — 컨텍스트 Σ token_count 캡. **기본 0=off(opt-in)**:

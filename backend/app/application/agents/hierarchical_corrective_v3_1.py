@@ -363,23 +363,44 @@ class HierarchicalCorrectiveRunner:
                             scenario_depth=scenario_depth, confidence=conf)
 
             # Node 2 — scenario_routing
+            # scope_tier(LLM 분류기 산출)가 처리 계층을 먼저 가른다(taxonomy plan §4
+            # 우선순위). T3 메타·T4 deflect/거부는 검색 전 단락(short-circuit)이고,
+            # T1/T2 만 기존 O×D 검색 경로로 진행한다. None(비-LLM backend)은 T1 취급.
             await emit_step("scenario_routing", "started")
+            scope_tier = classification.scope_tier
+            if scope_tier == "T3":
+                # 메타/역량 질의 — 검색·인용 없이 고정 역량·범위 서술로 응답.
+                await emit_step("scenario_routing", "ok", scope_tier=scope_tier)
+                return await self._meta_answer(
+                    request, started, tool_calls, classification, conf,
+                )
+            if scope_tier == "T4":
+                # 무해 잡담·역할 과이탈 — 정중 거부(deflect 메시지로 도메인 재안내).
+                await emit_step("scenario_routing", "ok", scope_tier=scope_tier)
+                return await self._refuse(
+                    request, started, tool_calls, scenario_object, scenario_depth,
+                    RefusalReason.OUT_OF_SCOPE, conf,
+                    verification_status=VerificationStatus.SKIPPED,
+                    error_code="out_of_scope", classification=classification,
+                )
             if self._classifier is not None and conf < self._classification_threshold:
                 return await self._refuse(
                     request, started, tool_calls, scenario_object, scenario_depth,
                     RefusalReason.CLARIFICATION_REQUIRED, conf,
                     verification_status=VerificationStatus.SKIPPED,
                     error_code="classification_low_confidence",
+                    classification=classification,
                 )
-            if not is_active(scenario_object, scenario_depth, mode=self._active_cells_mode):
-                return await self._refuse(
-                    request, started, tool_calls, scenario_object, scenario_depth,
-                    RefusalReason.UNSUPPORTED_SCENARIO, conf,
-                    verification_status=VerificationStatus.SKIPPED,
-                    error_code="inactive_cell",
-                )
+            # is_active 정교화(taxonomy plan W-S2): 비활성 셀이라도 도메인/인접
+            # (T1·T2·미상)이면 일률 UNSUPPORTED_SCENARIO 거부하지 않고 기존 O×D
+            # 경로로 강등 진행한다(전 12 셀에 fragment 존재). scope_tier 가 명시적
+            # T3/T4 인 경우는 위에서 이미 단락 처리됨.
+            inactive_cell = not is_active(
+                scenario_object, scenario_depth, mode=self._active_cells_mode
+            )
             ctx = replace(ctx, scenario_object=scenario_object, scenario_depth=scenario_depth)
-            await emit_step("scenario_routing", "ok")
+            await emit_step("scenario_routing", "ok",
+                            scope_tier=scope_tier, inactive_cell=inactive_cell)
 
             # Node 3 — query_understanding (STUB: no NER/normalize/sub-Q yet)
             await emit_step("query_understanding", "started")
@@ -1096,6 +1117,8 @@ class HierarchicalCorrectiveRunner:
                     recover_rounds=tuple(recover_rounds),
                     hops=tuple(hop_edges),
                     regulatory_grounding=regulatory_grounding,
+                    classifier_intent=classification.intent,
+                    scope_tier=classification.scope_tier,
                 )
                 oi.set_kind(_rfmt, oi.KIND_CHAIN)
                 oi.set_io(
@@ -1127,6 +1150,8 @@ class HierarchicalCorrectiveRunner:
                     context_hash=pack.context_hash,
                     classification_confidence=conf,
                     classifier_policy_hash=classification.classifier_policy_hash,
+                    classifier_intent=classification.intent,
+                    scope_tier=classification.scope_tier,
                     citation_completeness=citation_completeness,
                     faithfulness=faithfulness,
                     started_at=started,
@@ -1416,7 +1441,8 @@ class HierarchicalCorrectiveRunner:
                       error_code: str | None,
                       verification_status: VerificationStatus = VerificationStatus.FAIL,
                       evaluation=None, recover_rounds=(),
-                      scope: ScopeDecision | None = None):
+                      scope: ScopeDecision | None = None,
+                      classification: ClassificationResult | None = None):
         # 거부는 가장 의미 있는 모먼트인데 thinking 트레이스가 무음 종료되면 사용자는
         # "왜 답이 안 나왔나"를 알 수 없다 → 요약 채널에 거부 사유 1줄을 종결로 남긴다
         # (거부 메시지 본문은 answer_text 로 별도 전달).
@@ -1444,6 +1470,8 @@ class HierarchicalCorrectiveRunner:
             token_usage={},
             evaluation=evaluation,
             recover_rounds=tuple(recover_rounds),
+            classifier_intent=classification.intent if classification else None,
+            scope_tier=classification.scope_tier if classification else None,
         )
         scope_kwargs: dict[str, Any] = {}
         if scope is not None:
@@ -1463,9 +1491,50 @@ class HierarchicalCorrectiveRunner:
             started_at=started, tool_calls=tuple(tool_calls),
             classification_confidence=conf, error_code=error_code,
             classifier_policy_hash=classifier_policy_hash,
+            classifier_intent=classification.intent if classification else None,
+            scope_tier=classification.scope_tier if classification else None,
             recover_rounds=tuple(recover_rounds),
             **evaluation_kwargs,
             **scope_kwargs,
+        )
+        await self._recorder.persist(event)
+        return response
+
+    async def _meta_answer(self, request, started, tool_calls,
+                           classification: ClassificationResult, conf):
+        """scope_tier=T3 — 어시스턴트 역량·범위 메타 질의에 검색·인용 없이 응답한다.
+        거부가 아니라 *답변*(refusal_reason=None)이되, 규제 근거가 없으므로
+        verification SKIPPED·regulatory_grounding n_a·citations 없음으로 표시한다
+        (taxonomy plan T3 — 고정 역량 서술). 메타 응답 본문은 모듈 상수이며 검색을
+        타지 않는다."""
+        await emit_step("meta_answer", "ok", scope_tier=classification.scope_tier)
+        response = AgentResponse(
+            interaction_id=request.interaction_id,
+            answer_text=_META_CAPABILITY_TEXT,
+            citations=(),
+            refusal_reason=None,
+            verification_status=VerificationStatus.SKIPPED.value,
+            scenario_object=classification.scenario_object,
+            scenario_depth=classification.scenario_depth,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            token_usage={},
+            regulatory_grounding="n_a",
+            classifier_intent=classification.intent,
+            scope_tier=classification.scope_tier,
+        )
+        classifier_policy_hash = (
+            getattr(self._classifier, "policy_hash", None)
+            if self._classifier is not None
+            else _HARDCODED_POLICY_HASH
+        )
+        event = self._recorder.build(
+            request=request, response=response, agent_variant=self.spec.variant_id,
+            started_at=started, tool_calls=tuple(tool_calls),
+            classification_confidence=conf, error_code=None,
+            classifier_policy_hash=classifier_policy_hash,
+            classifier_intent=classification.intent,
+            scope_tier=classification.scope_tier,
+            regulatory_grounding="n_a",
         )
         await self._recorder.persist(event)
         return response
@@ -1502,7 +1571,31 @@ def _refusal_message(reason: RefusalReason) -> str:
         return "지원되지 않는 (시나리오, 깊이) 조합입니다. 다른 형태로 질문해 주세요."
     if reason is RefusalReason.LLM_UNAVAILABLE:
         return "응답이 지연되거나 모델을 가져올 수 없습니다. 잠시 후 다시 시도해 주세요."
+    if reason is RefusalReason.OUT_OF_SCOPE:
+        # T4 deflect/거부 겸용 — 무해 잡담·역할 과이탈을 도메인으로 정중히 재안내한다
+        # (taxonomy plan T4: 법률·인허가 자문 권위 참칭·날조·원거리 도메인 비대응).
+        return (
+            "이 시스템은 SMR(소형모듈원자로) 인허가·원자력 규제 질의에 한해 "
+            "검색 근거로 답변합니다. 해당 도메인의 노형·규제·RAI 관련 질문으로 "
+            "다시 시도해 주세요. (법적·인허가 자문 권위를 대신하지 않습니다.)"
+        )
     return "근거가 부족하여 답변을 제공할 수 없습니다."
+
+
+# scope_tier=T3 메타 응답 본문(고정 역량·범위 서술 — 검색 미수행). 답변 *프롬프트*
+# 가 아니라 역량 서술 템플릿이므로 코드 상수로 둔다. 동적 capability/registry tier
+# fragment 승격은 후속(taxonomy plan W-P2 tier/meta_capability) 과제.
+_META_CAPABILITY_TEXT = (
+    "저는 SMR(소형모듈원자로) 인허가·원자력 규제 도메인 QA 어시스턴트입니다.\n\n"
+    "- **대상**: NRC 규제 지침(RG·SRP·DSRS·GDC), 10 CFR, NuScale FSAR/SAR, "
+    "RAI/감사 기록.\n"
+    "- **방식**: 인덱싱된 코퍼스를 검색해 근거(인용)와 함께 답합니다. "
+    "근거가 없으면 답변을 보류하거나 제한적으로만 답합니다.\n"
+    "- **할 수 있는 질문 예**: 노형 설계 특징, 규제 조항 원문·요건, RAI 질의문, "
+    "노형↔규제 충족 관계.\n"
+    "- **한계**: 법적·인허가 자문 권위를 대신하지 않으며, 코퍼스 밖 사실을 "
+    "지어내지 않습니다."
+)
 
 
 @register_variant(HIERARCHICAL_CORRECTIVE_VARIANT_ID)
@@ -1510,6 +1603,12 @@ def _build_hierarchical_corrective(
     spec: VariantSpec, deps: AgentDeps
 ) -> "HierarchicalCorrectiveRunner":
     t = deps.tunables
+    # v3.1 전용 바인딩(계획 D-8) — settings.classifier_backend 와 무관하게 Node 1 을
+    # registry 호스팅 프롬프트의 LLM 분류기로 고정한다(정밀 의도·scope_tier 산출).
+    # source 미주입(레거시 부트/테스트)이면 deps.classifier(settings 기반) 폴백.
+    classifier = deps.classifier
+    if deps.classification_prompt_source is not None and deps.utility_llm is not None:
+        classifier = deps.classification_prompt_source.build_classifier(deps.utility_llm)
     return HierarchicalCorrectiveRunner(
         spec=spec,
         llm_router=deps.llm_router,
@@ -1521,7 +1620,7 @@ def _build_hierarchical_corrective(
         recorder=deps.recorder,
         event_sink=deps.event_sink,
         app_profile=deps.app_profile,
-        classifier=deps.classifier,
+        classifier=classifier,
         classification_threshold=t.get("classification_threshold", 0.0),
         verification_citation_threshold=t.get("verification_citation_threshold", 0.5),
         verification_faithfulness_threshold=t.get("verification_faithfulness_threshold", 0.5),

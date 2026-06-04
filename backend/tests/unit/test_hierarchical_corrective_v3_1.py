@@ -122,10 +122,10 @@ def _make_runner(
     corpus_map=None, scope_tau_high: float = 0.6, scope_tau_low: float = 0.3,
     scope_min_token_count: int = 0, fetch_section_tool=None,
     context_token_budget: int = 0, section_merge_max_chunks: int = 50,
-    classifier=None,
+    classifier=None, active_cells_mode: str = "all", scenarios=None,
 ) -> tuple[HierarchicalCorrectiveRunner, FilesystemEventSink]:
     prompts = tmp / "prompts"
-    build_prompts(prompts)
+    build_prompts(prompts, scenarios=scenarios)
     registry = ToolRegistry.from_yaml(_tool_registry_yaml(tmp))
     sink = FilesystemEventSink(root=str(tmp / "events"), prefix="t")
     recorder = EventRecorder(sink, app_profile="local")
@@ -163,6 +163,7 @@ def _make_runner(
         scope_min_token_count=scope_min_token_count,
         context_token_budget=context_token_budget,
         section_merge_max_chunks=section_merge_max_chunks,
+        active_cells_mode=active_cells_mode,
     )
     return runner, sink
 
@@ -1092,3 +1093,118 @@ async def test_section_merge_evidence_reaches_verifier_with_claims_on() -> None:
         assert rec["section_merge_policy_hash"]
         promoted = [s for s in rec["per_chunk_signals"] if s.get("promote")]
         assert promoted and promoted[0]["chunk_id"] == "W_c0001"
+
+
+class _ScopeClassifier:
+    """scope_tier/intent 를 명시 산출하는 테스트용 분류기(LLM 분류기 대역).
+    Node 2 scope 라우팅 분기(T3 메타 / T4 OUT_OF_SCOPE / T1 정상)를 검증한다."""
+
+    backend = "llm"
+    policy_hash = "fake_scope"
+
+    def __init__(self, *, scope_tier: str, intent: str = "definition",
+                 scenario_object: str = "O4", scenario_depth: str = "D2") -> None:
+        self._tier = scope_tier
+        self._intent = intent
+        self._so = scenario_object
+        self._sd = scenario_depth
+
+    async def classify(self, query_text, chat_history=()):
+        from app.domain.classification import ClassificationResult
+
+        return ClassificationResult(
+            scenario_object=self._so, scenario_depth=self._sd, entities={},
+            confidence=0.8, object_confidence=0.8, depth_confidence=0.8,
+            classifier_backend=self.backend, classifier_policy_hash=self.policy_hash,
+            intent=self._intent, scope_tier=self._tier,
+        )
+
+
+def _read_event(tmp: Path) -> dict:
+    events_root = Path(tmp) / "events" / "t" / "interaction_events"
+    line = next(events_root.rglob("*.jsonl")).read_text(encoding="utf-8").splitlines()[0]
+    return json.loads(line)
+
+
+@pytest.mark.asyncio
+async def test_scope_tier_t3_meta_short_circuits_without_retrieval() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), classifier=_ScopeClassifier(scope_tier="T3", intent="meta"),
+        )
+        req = AgentRequest(interaction_id="m1", query_text="너는 뭘 할 수 있어?", session_id="s1")
+        resp = await runner.run(req)
+
+        # 메타 응답: 거부 아님, 인용 없음, 검색 미수행.
+        assert resp.refusal_reason is None
+        assert resp.citations == ()
+        assert resp.scope_tier == "T3"
+        assert resp.classifier_intent == "meta"
+        assert "SMR" in resp.answer_text
+        rec = _read_event(Path(tmp))
+        assert rec["scope_tier"] == "T3"
+        assert rec["classifier_intent"] == "meta"
+        # 검색 도구 호출이 없어야 한다(retriever.search 미기록).
+        assert all(tc["name"] != "retriever.search" for tc in rec["tool_calls"])
+
+
+@pytest.mark.asyncio
+async def test_scope_tier_t4_refuses_out_of_scope() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), classifier=_ScopeClassifier(scope_tier="T4", intent="unknown"),
+        )
+        req = AgentRequest(interaction_id="o1", query_text="오늘 날씨 어때?", session_id="s1")
+        resp = await runner.run(req)
+
+        assert resp.refusal_reason == "out_of_scope"
+        assert resp.citations == ()
+        assert resp.scope_tier == "T4"
+        rec = _read_event(Path(tmp))
+        assert rec["refusal_reason"] == "out_of_scope"
+        assert rec["error_code"] == "out_of_scope"
+        assert rec["scope_tier"] == "T4"
+
+
+@pytest.mark.asyncio
+async def test_scope_tier_t1_proceeds_to_normal_path_and_records_signals() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), llm=_ClaimAwareLLM(entailment_status="supported"),
+            classifier=_ScopeClassifier(scope_tier="T1", intent="causal"),
+        )
+        req = AgentRequest(interaction_id="t1", query_text="APR1400 안전계통", session_id="s1")
+        resp = await runner.run(req)
+
+        # 정상 검색·답변 경로 — scope_tier/intent 가 event 에 기록된다.
+        assert resp.scope_tier == "T1"
+        assert resp.classifier_intent == "causal"
+        rec = _read_event(Path(tmp))
+        assert rec["scope_tier"] == "T1"
+        assert rec["classifier_intent"] == "causal"
+        assert any(tc["name"] == "retriever.search" for tc in rec["tool_calls"])
+
+
+@pytest.mark.asyncio
+async def test_inactive_cell_downgrades_instead_of_unsupported_refusal() -> None:
+    # is_active 정교화(taxonomy plan W-S2): top_priority 모드에서 비핵심 셀(O1×D1,
+    # TOP_PRIORITY 밖)이라도 scope_tier=T1/T2 면 UNSUPPORTED_SCENARIO 로 일률 거부하지
+    # 않고 정상 경로로 강등 진행한다. (이전 동작=거부 → 회귀 가드.)
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), llm=_ClaimAwareLLM(entailment_status="supported"),
+            active_cells_mode="top_priority",
+            scenarios=[("O1", "D2"), ("O4", "D2"), ("O1", "D1")],
+            classifier=_ScopeClassifier(
+                scope_tier="T1", intent="enumerate",
+                scenario_object="O1", scenario_depth="D1",
+            ),
+        )
+        req = AgentRequest(interaction_id="dg1", query_text="FSAR 구성", session_id="s1")
+        resp = await runner.run(req)
+
+        # 비활성 셀이지만 거부되지 않고 검색·답변 경로로 진행.
+        assert resp.refusal_reason != "unsupported_scenario"
+        rec = _read_event(Path(tmp))
+        assert rec["error_code"] != "inactive_cell"
+        assert any(tc["name"] == "retriever.search" for tc in rec["tool_calls"])

@@ -79,6 +79,20 @@
 # 지시만으로는 abstention 이 신뢰되지 않음을 보고하므로, 판정 부담을 system
 # 프롬프트에 싣지 않는다. (docs/references/prompt_design_reference.md §1.3)
 
+# Node 1 분류 프롬프트 (llm_classifier_intent_scope_registry.plan.v1).
+#   답변 프롬프트(prompt_profiles)와 동일 registry 에서 sha 핀·버전 관리한다.
+#   `ClassificationPromptSource`(backend/app/application/prompting/classification_source.py)
+#   가 boot 시 fragment 바이트를 재해시해 declared sha 와 대조(무단 편집 차단,
+#   prompt_profiles 와 동일 fail-fast 불변식). 분류기의 `classifier_policy_hash`
+#   는 이 prompt fragment 의 sha 로 InteractionEvent 에 기록된다(원칙 5).
+#   model_options 도 여기서 외부화 — 코드 인라인 상수 제거.
+classification_prompts:
+  classifier_v1:
+    profile_version: v1
+    prompt:        {path: classification/classifier_v1.md,                 version: v1, sha256: "fdb651e0c83cc76011656382b820a8b14567c87b04d76b69689076a9af6db243"}
+    output_schema: {path: classification/schemas/classifier_output_v1.json, version: v1, sha256: "3d2507293f83d3285c8ebfd69fbc98333d67952ffa8c5e586224e9a59d609b1d"}
+    model_options: {temperature: 0.0, max_tokens: 200}
+
 prompt_profiles:
 
   # === O1 Vendor ===

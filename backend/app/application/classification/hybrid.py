@@ -5,7 +5,6 @@ from typing import Iterable
 
 from app.application.classification.llm import LLMClassifier
 from app.application.classification.rule import RuleClassifier
-from app.application.classification import llm as _llm_mod
 from app.application.classification import rule as _rule_mod
 from app.domain.classification import ClassificationResult
 from app.domain.interaction import ChatTurn
@@ -32,8 +31,10 @@ class HybridClassifier:
         self._escalate_below = escalate_below
         # 복합 정책 핀(원칙 5) — rule·llm 정책 해시 + escalate 임계로 hybrid 결정
         # 경로를 재현. LLM 채택 분기 결과에 싣는다(rule 채택 분기는 rule 해시 유지).
+        # llm 정책 핀은 인스턴스별(프롬프트 본문 의존) — registry source 가 주입한
+        # 프롬프트 sha 를 그대로 합성한다(인라인 모듈 상수 시절 대체).
         self._policy_hash = hashlib.sha256(
-            f"hybrid|rule={_rule_mod._POLICY_HASH}|llm={_llm_mod._POLICY_HASH}"
+            f"hybrid|rule={_rule_mod._POLICY_HASH}|llm={llm.policy_hash}"
             f"|escalate_below={escalate_below}".encode("utf-8")
         ).hexdigest()[:16]
         # 정적 정책 핀(요청 불변) — refusal 이벤트가 읽음. rule 채택 분기여도

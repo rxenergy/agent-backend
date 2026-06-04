@@ -16,6 +16,9 @@ class RefusalReason(str, Enum):
     # v3.1 (hierarchical_corrective)
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"  # Node 7 recover exhausted (WEAK gate)
     BUDGET_EXCEEDED = "budget_exceeded"  # LLM-call budget cap hit (spec §2.3)
+    # scope/open-world (taxonomy plan D-4) — off-topic·out-of-role(권위 참칭·날조·
+    # 원거리 도메인). scope_tier=T4 의 과이탈 분기가 이 사유로 정중 거부한다.
+    OUT_OF_SCOPE = "out_of_scope"
 
 
 class VerificationStatus(str, Enum):
