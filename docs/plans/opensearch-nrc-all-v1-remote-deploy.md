@@ -179,11 +179,16 @@ import json, sys
 for name in json.load(sys.stdin):
     print(' ', name)
 "
-# 출력 예상:
-#   nrc-hybrid-search        (BM25 0.25, dense 0.35, sparse 0.4)
+# 출력 예상 (weights 순서 = [BM25, dense, sparse]):
+#   nrc-hybrid-search        (0.2, 0.3, 0.5)   # 폴백 기본
+#   nrc-hybrid-search-k5      (0.4, 0.3, 0.3)   # operating point top_k=5 벤치마크
+#   nrc-hybrid-search-k10     (0.4, 0.2, 0.4)   # operating point top_k=10 벤치마크
 #   nrc-hybrid-bm25-only     (1.0, 0.0, 0.0)
 #   nrc-hybrid-dense-only    (0.0, 1.0, 0.0)
 #   nrc-hybrid-sparse-only   (0.0, 0.0, 1.0)
+#
+# hybrid pipeline 은 retriever_top_k(operating point)에 연동되어 선택된다
+# (profiles.py): k=5→k5, k=10→k10, 그 외→nrc-hybrid-search.
 ```
 
 ---

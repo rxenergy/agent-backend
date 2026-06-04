@@ -12,8 +12,8 @@ from app.config.profiles import _HYBRID_K_PIPELINES, _resolve_hybrid_pipeline
 @pytest.mark.parametrize(
     "top_k,expected",
     [
-        (5, "nrc-hybrid-search-k5"),    # weights=[0.4, 0.3, 0.3]
         (10, "nrc-hybrid-search-k10"),  # weights=[0.4, 0.2, 0.4]
+        (5, "nrc-hybrid-search"),       # k5 pipeline 미등록 → 맵 제외, 폴백
         (3, "nrc-hybrid-search"),       # 미벤치마크 k → 폴백
         (20, "nrc-hybrid-search"),      # fetch 깊이 값이 새도 폴백
     ],
@@ -29,8 +29,8 @@ def test_empty_fallback_normalizes_to_none():
 
 
 def test_benchmarked_k_ignores_empty_fallback():
-    # 벤치마크 k 는 폴백이 비어도 전용 pipeline 을 쓴다.
-    assert _resolve_hybrid_pipeline(5, None) == "nrc-hybrid-search-k5"
+    # 맵에 남은 벤치마크 k(10)는 폴백이 비어도 전용 pipeline 을 쓴다.
+    assert _resolve_hybrid_pipeline(10, None) == "nrc-hybrid-search-k10"
 
 
 def test_pipeline_files_match_map():
