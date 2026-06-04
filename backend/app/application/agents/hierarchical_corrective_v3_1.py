@@ -33,7 +33,8 @@ from app.application.prompting.resolver import PromptResolver
 from app.application.tool_runtime.errors import RequiredToolFailed
 from app.application.tool_runtime.executor import ToolExecutor
 from app.domain.agents import Budget, VariantSpec
-from app.domain.classification import ClassificationResult
+from app.application.query_understanding.instantiator import InformationNeedInstantiator
+from app.domain.classification import DEFAULT_INTENT, ClassificationResult
 from app.domain.errors import (
     PromptProfileNotFoundError,
     RefusalReason,
@@ -402,15 +403,66 @@ class HierarchicalCorrectiveRunner:
             await emit_step("scenario_routing", "ok",
                             scope_tier=scope_tier, inactive_cell=inactive_cell)
 
-            # Node 3 — query_understanding (STUB: no NER/normalize/sub-Q yet)
+            # Node 3 — query_understanding: 정보 요구(information need)를 *모델*로
+            # 인스턴스화(룰 stub 대체, 문서 §4). 두 가지를 한다:
+            #  (1) Node 1 이 산출한 live intent 를 plan.intents 로 흘린다(이전엔
+            #      분류기가 intent 를 냈으나 여기서 버려져 Node 4 planner 가 항상
+            #      default 였다 — intent-keyed 룰이 비로소 발동).
+            #  (2) utility LLM 으로 요구 슬롯·sub-question·version 제약을 산출
+            #      (ClaimDecomposer 동형: 실패 시 결정론 fallback, method 기록).
+            # 산출 슬롯은 *기록*되되 Node 6/9 소비는 미배선(enabler 단계 — 표현=모델,
+            # 충족 판정·게이트=코드 분리).
             await emit_step("query_understanding", "started")
-            query_plan = QueryPlan(
-                normalized_entities=entities,
-                multi_intent=False,
-            )
+            need_intent = classification.intent
+            with _TRACER.start_as_current_span("agent.query_understanding") as s:
+                oi.set_kind(s, oi.KIND_CHAIN)
+                need = await InformationNeedInstantiator(
+                    self._utility_llm or llm
+                ).instantiate(
+                    request.query_text,
+                    scenario_object=scenario_object,
+                    scenario_depth=scenario_depth,
+                    intent=need_intent,
+                    entities=entities,
+                )
+                if need.method == "llm":
+                    llm_calls_used += 1
+                query_plan = QueryPlan(
+                    normalized_entities=entities,
+                    sub_questions=need.sub_questions,
+                    intents=((need_intent,)
+                             if need_intent and need_intent != DEFAULT_INTENT else ()),
+                    version_constraint=need.version_constraint,
+                    multi_intent=need.multi_intent,
+                    required_slots=need.required_slots,
+                    instantiation_method=need.method,
+                    information_need_hash=need.information_need_hash,
+                    # 원 invariant 보존: decompose_prompt_hash 의 *존재* = 이 노드에서
+                    # LLM 호출이 일어났음(원칙 5). fallback 은 LLM 산출이 아니므로 None
+                    # — fallback 신호는 instantiation_method 가 따로 싣는다.
+                    decompose_prompt_hash=(
+                        need.prompt_hash if need.method == "llm" else None
+                    ),
+                )
+                s.set_attribute("query_understanding.method", need.method)
+                s.set_attribute("query_understanding.intent", need_intent or "unknown")
+                s.set_attribute("query_understanding.num_required_slots",
+                                len(need.required_slots))
+                s.set_attribute("query_understanding.multi_intent", need.multi_intent)
+                oi.set_io(s, input_value=request.query_text, output_value={
+                    "intent": need_intent,
+                    "method": need.method,
+                    "num_required_slots": len(need.required_slots),
+                    "num_sub_questions": len(need.sub_questions),
+                    "version_constraint": need.version_constraint,
+                })
             await emit_step("query_understanding", "ok",
+                            method=need.method,
+                            intent=need_intent,
                             multi_intent=query_plan.multi_intent,
-                            sub_questions=len(query_plan.sub_questions))
+                            sub_questions=len(query_plan.sub_questions),
+                            num_required_slots=len(query_plan.required_slots),
+                            slots_consumed=False)
 
             # === Phase B ===================================================
             # Node 4 — retrieval_plan_template (룰 기반, LLM 미사용)
@@ -1168,6 +1220,15 @@ class HierarchicalCorrectiveRunner:
                         "ner_dict_version": query_plan.ner_dict_version,
                         "normalizer_version": query_plan.normalizer_version,
                         "decompose_prompt_hash": query_plan.decompose_prompt_hash,
+                        # v1 Node 3 model-based information need. 기록 전용 —
+                        # Node 6/9 소비 미배선(slots_consumed=False). method 로
+                        # llm/fallback 경로를 표면화(silent degrade 금지). intents
+                        # 는 Node 4 planner 가 실제 소비(intent-keyed 룰).
+                        "intents": list(query_plan.intents),
+                        "instantiation_method": query_plan.instantiation_method,
+                        "information_need_hash": query_plan.information_need_hash,
+                        "required_slots": [s.name for s in query_plan.required_slots],
+                        "version_constraint": query_plan.version_constraint,
                         # Node 12 citation-contract version. Recorded here (not
                         # in fragment_versions) because the contract is wired as
                         # a context-block preamble, not a registered prompt
