@@ -319,7 +319,9 @@ def test_v3_streaming_narrates_v3_steps_and_passes_reasoning():
     # v3.1 summary narration (Korean, outcome-conditioned), dispatched by variant.
     assert "부분적" in joined and "매칭이 약합니다" in joined  # WEAK gate + reason
     assert "동의어 확장" in joined                            # recovery strategy
-    assert "주장 2개" in joined                               # claim verify outcome
+    # claim_verify(검증·한계)는 summary 에서 thinking 에 싣지 않는다(#24295 — 본문
+    # 토큰 이후 reasoning_content 로 나가 신뢰성 있게 렌더 안 됨; answer_text backstop).
+    assert "근거를 검증했습니다" not in joined and "주장 2개" not in joined
     # Internal gate verdict tokens are not leaked to the summary surface.
     assert "Gate decision" not in joined and "WEAK" not in joined
     # Generation LLM native chain-of-thought passed straight through.
@@ -341,7 +343,8 @@ def test_v3_non_streaming_includes_model_reasoning_in_think_block():
     think = content.split("</think>", 1)[0]
     # v3.1 summary narration present (Korean)…
     assert "부분적" in think
-    assert "주장 2개" in think
+    # …but claim_verify(검증·한계)는 summary 에서 드롭(#24295; answer_text backstop).
+    assert "근거를 검증했습니다" not in think and "주장 2개" not in think
     # …and the buffered generation-LLM reasoning is included as one block.
     assert "Let me reason about the cited regulation." in think
     # token body is not in <think>; it is the final answer. PARTIAL → boundary

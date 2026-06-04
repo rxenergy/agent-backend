@@ -1125,6 +1125,7 @@ class HierarchicalCorrectiveRunner:
                     prompt_source=rendered.source,
                     context_hash=pack.context_hash,
                     classification_confidence=conf,
+                    classifier_policy_hash=classification.classifier_policy_hash,
                     citation_completeness=citation_completeness,
                     faithfulness=faithfulness,
                     started_at=started,

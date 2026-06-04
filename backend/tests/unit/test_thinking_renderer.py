@@ -273,22 +273,25 @@ def test_v3_memory_inject_and_multi_hop():
     assert _r(_step("multi_hop_expand", "skipped"), variant_id=_V3) == []
 
 
-def test_v3_claim_verify_outcome_only_no_duplicate_regulatory_note():
-    ver = _r(_step("claim_verify", "ok", verification_status="PARTIAL",
-                   num_claims=4, num_supported=3, contradicted=False,
-                   entailment_ran=True), variant_id=_V3)
-    assert "주장 4개 중 3개 근거 일치" in ver[0]
-    # 규제 미검증 한계는 answer_text(durable)에 실리므로 thinking 에서 중복하지 않는다.
-    assert not any("규제 차원 검증은 미수행" in line for line in ver)
-    # 모순 발견 시 표기.
-    contra = _r(_step("claim_verify", "ok", verification_status="FAIL",
-                      num_claims=2, num_supported=0, contradicted=True),
-                variant_id=_V3)
-    assert "모순" in contra[0]
-    # 검증 생략 → 본문에 없는 신뢰 신호이므로 thinking 에 1줄 남긴다.
-    skipped = _r(_step("claim_verify", "skipped"), variant_id=_V3)
-    assert "생략" in skipped[0]
-    assert not any("규제 차원 검증은 미수행" in line for line in skipped)
+def test_v3_claim_verify_suppressed_in_summary_tier():
+    # 검증·한계 모먼트는 summary tier 에서 thinking 에 싣지 않는다(#24295 — 본문
+    # 토큰 이후 reasoning_content 로 나가 신뢰성 있게 렌더되지 않음; answer_text
+    # durable 고지가 backstop). 어떤 status 든 빈 줄.
+    assert _r(_step("claim_verify", "ok", verification_status="PARTIAL",
+                    num_claims=4, num_supported=3, contradicted=False),
+              variant_id=_V3) == []
+    assert _r(_step("claim_verify", "ok", verification_status="FAIL",
+                    num_claims=2, num_supported=0, contradicted=True),
+              variant_id=_V3) == []
+    assert _r(_step("claim_verify", "skipped"), variant_id=_V3) == []
+
+
+def test_v3_claim_verify_still_narrated_in_detailed_tier():
+    # detailed tier(dev/debug)는 "모든 노드 서술" 계약을 유지 → claim_verify 는 계속 보인다.
+    lines = _r(_step("claim_verify", "ok", verification_status="PASS",
+                     num_claims=4, num_supported=4),
+               variant_id=_V3, verbosity="detailed")
+    assert lines and any("4" in line for line in lines)
 
 
 def test_v3_refused_closes_trace():

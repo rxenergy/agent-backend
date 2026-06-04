@@ -491,22 +491,13 @@ def _h31_generation(status, p, *, content_mode, max_items) -> list[str]:
     return []  # 본문 토큰 스트림이 가시적 진행을 담당.
 
 
-def _h31_claim_verify(status, p, *, content_mode, max_items) -> list[str]:
-    # 검증 *결과*만 thinking 에 싣는다. 규제 미검증 한계는 답변 본문(answer_text)에
-    # durable 고지로 이미 실리므로(CLAUDE.md §6, conductor response_format) 여기서
-    # 중복하지 않는다 — 같은 응답에 같은 면책을 두 번 보이지 않게.
-    if status == "skipped":
-        # 검증 생략은 본문에 따로 나타나지 않는 신뢰 신호 → 짧게 고지.
-        return ["사후 근거 검증은 생략되었습니다(설정)."]
-    if status != "ok":
-        return []
-    n = p.get("num_claims", 0)
-    supported = p.get("num_supported", n)
-    line = f"인용 근거를 검증했습니다 — 주장 {n}개 중 {supported}개 근거 일치"
-    if p.get("contradicted"):
-        line += ", 모순되는 주장 발견"
-    line += "."
-    return [line]
+# claim_verify(검증·한계 모먼트)는 summary tier 에서 thinking 에 싣지 않는다.
+# 검증 narration 은 generation-verification coupling 상 본문 토큰(content) *이후*
+# reasoning_content 로 방출되어 OpenWebUI Thought 블록 조기 종결(#24295)에 걸려
+# 신뢰성 있게 렌더되지 않는다. 규제 미검증 한계·검증 결과는 답변 본문(answer_text)에
+# durable 고지로 이미 실리므로(CLAUDE.md §6) 이를 backstop 으로 삼고 summary 노드에서
+# 드롭한다. detailed tier(dev/debug)는 _h_claim_verify 로 계속 서술한다.
+# (thinking_output_design.md 의 claim_verify 행·D3·예시 참조.)
 
 
 def _h31_selective_regenerate(status, p, *, content_mode, max_items) -> list[str]:
@@ -576,9 +567,12 @@ _V3_1_DETAILED: dict[str, StepHandler] = {
 
 # v3.1 summary tier — user-meaningful, Korean, outcome-conditioned (default).
 # Nodes absent here (retrieval_plan / evidence_snippet / context_build /
-# prompt_render / claim_decompose / scenario_routing / section_merge /
-# context_budget) are intentionally dropped: internal mechanics with no user
-# signal. `refused` is summary-only (D8 — close the trace on a refusal).
+# prompt_render / claim_decompose / claim_verify / scenario_routing /
+# section_merge / context_budget) are intentionally dropped: internal mechanics
+# with no reliable user signal. `claim_verify`(검증·한계)는 본문 토큰 이후
+# reasoning_content 로 나가 OpenWebUI Thought 블록 조기 종결(#24295)에 걸리고,
+# 검증 한계는 answer_text durable 고지가 backstop 이므로 summary 에서 드롭한다.
+# `refused` is summary-only (D8 — close the trace on a refusal).
 _V3_1_SUMMARY: dict[str, StepHandler] = {
     "intent_classification": _h31_intent,
     "query_understanding": _h31_query_understanding,
@@ -588,7 +582,6 @@ _V3_1_SUMMARY: dict[str, StepHandler] = {
     "multi_hop_expand": _h31_multi_hop,
     "memory_inject": _h31_memory_inject,
     "generation": _h31_generation,
-    "claim_verify": _h31_claim_verify,
     "selective_regenerate": _h31_selective_regenerate,
     "refused": _h31_refused,
 }
