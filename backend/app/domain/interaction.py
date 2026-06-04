@@ -172,3 +172,5 @@ class InteractionEvent:
     decompose_method: str | None = None  # "llm" | "fallback" — Node 14 가 실제 LLM 분해인지
     regulatory_grounding: str | None = None  # verified | unverified | n_a (response 와 동일 축)
     budget: Budget | None = None
+    # Node 1 분류 정책 재현 핀(원칙 5) — rule 어휘/정규식/부스트, llm 프롬프트 등.
+    classifier_policy_hash: str | None = None

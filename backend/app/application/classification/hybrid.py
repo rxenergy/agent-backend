@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Iterable
 
 from app.application.classification.llm import LLMClassifier
 from app.application.classification.rule import RuleClassifier
+from app.application.classification import llm as _llm_mod
+from app.application.classification import rule as _rule_mod
 from app.domain.classification import ClassificationResult
 from app.domain.interaction import ChatTurn
 
@@ -27,6 +30,15 @@ class HybridClassifier:
         self._rule = rule
         self._llm = llm
         self._escalate_below = escalate_below
+        # 복합 정책 핀(원칙 5) — rule·llm 정책 해시 + escalate 임계로 hybrid 결정
+        # 경로를 재현. LLM 채택 분기 결과에 싣는다(rule 채택 분기는 rule 해시 유지).
+        self._policy_hash = hashlib.sha256(
+            f"hybrid|rule={_rule_mod._POLICY_HASH}|llm={_llm_mod._POLICY_HASH}"
+            f"|escalate_below={escalate_below}".encode("utf-8")
+        ).hexdigest()[:16]
+        # 정적 정책 핀(요청 불변) — refusal 이벤트가 읽음. rule 채택 분기여도
+        # hybrid 구성 자체를 식별하는 복합 해시를 노출한다.
+        self.policy_hash = self._policy_hash
 
     async def classify(
         self,
@@ -48,5 +60,6 @@ class HybridClassifier:
                 depth_confidence=llm_r.depth_confidence,
                 low_confidence_reason=None,
                 classifier_backend=self.backend,
+                classifier_policy_hash=self._policy_hash,
             )
         return rule_r

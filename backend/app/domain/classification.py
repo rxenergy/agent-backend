@@ -22,6 +22,9 @@ class ClassificationResult:
     depth_confidence: float = 0.0
     low_confidence_reason: str | None = None
     classifier_backend: str = "rule"
+    # 분류 정책 재현 핀(원칙 5) — 어휘·정규식·부스트(rule) / 프롬프트(llm) 등
+    # 정책 본문의 sha16. event 가 "어떤 정책판이 이 분류를 만들었나"를 단독 설명.
+    classifier_policy_hash: str | None = None
 
 
 DEFAULT_OBJECT = ScenarioObject.O4.value

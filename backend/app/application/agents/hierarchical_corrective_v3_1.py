@@ -23,6 +23,7 @@ from app.application.agents.events import (
 from app.application.agents.llm_router import LLMRouter, UnknownLLMError
 from app.application.agents.registry import AgentDeps, register_variant
 from app.application.classification.active_cells import is_active
+from app.application.agents.sequential.nodes.classify import _HARDCODED_POLICY_HASH
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
 from app.application.memory.policies import decide_session_injection
@@ -1449,10 +1450,19 @@ class HierarchicalCorrectiveRunner:
             # scope 적용 *후* 의 refusal(RETRIEVAL_NO_RESULT/INSUFFICIENT_EVIDENCE)
             # 은 "scope 가 막다른 벽으로 좁혔나"를 event 가 단독 설명하게 한다.
             scope_kwargs = dict(corpus_map_hash=scope.corpus_map_hash, scope_mode=scope.mode)
+        # 분류 정책 핀은 분류기별 정적값(요청 불변)이라 self._classifier 에서 직접
+        # 읽는다 — 거부 이벤트도 "어떤 분류 정책이 이 거부로 이끌었나"를 단독 설명
+        # (success 경로와 동일 축, §5 defensibility). None(미주입)=hardcoded.
+        classifier_policy_hash = (
+            getattr(self._classifier, "policy_hash", None)
+            if self._classifier is not None
+            else _HARDCODED_POLICY_HASH
+        )
         event = self._recorder.build(
             request=request, response=response, agent_variant=self.spec.variant_id,
             started_at=started, tool_calls=tuple(tool_calls),
             classification_confidence=conf, error_code=error_code,
+            classifier_policy_hash=classifier_policy_hash,
             recover_rounds=tuple(recover_rounds),
             **evaluation_kwargs,
             **scope_kwargs,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Iterable
 
@@ -79,8 +81,48 @@ _VENDOR_NAMES = (
 )
 
 
+# 정책 부스트 상수(classify 본문과 일치해야 함 — 변경 시 함께 갱신).
+_BOOST_RAI = 3
+_BOOST_REG = 2
+_BOOST_VENDOR = 2
+_BOOST_O4_PRESENT_KINDS = 1
+_BOOST_O4_STRONG = 2
+
+
+def _compute_policy_hash() -> str:
+    """rule 분류 정책(어휘군·정규식·부스트·노형명)의 재현 핀(sha16).
+    corpus_map/evaluator 의 policy_hash idiom 과 동일. 어휘/정규식/부스트가
+    바뀌면 해시가 바뀌어 event 가 정책 변경을 단독으로 드러낸다(원칙 5)."""
+    body = {
+        "kw_vendor": _VENDOR_KEYWORDS,
+        "kw_regulation": _REGULATION_KEYWORDS,
+        "kw_rai": _RAI_KEYWORDS,
+        "kw_relation": _RELATION_KEYWORDS,
+        "kw_overview": _OVERVIEW_KEYWORDS,
+        "kw_technical": _TECHNICAL_KEYWORDS,
+        "kw_formal": _FORMAL_KEYWORDS,
+        "vendor_names": _VENDOR_NAMES,
+        "regex": [
+            r.pattern for r in (
+                _RE_RAI, _RE_RAI_CODE, _RE_AUDIT_CODE, _RE_RG, _RE_CFR,
+                _RE_KINS, _RE_GDC, _RE_SRP, _RE_DSRS, _RE_PDC,
+            )
+        ],
+        "boosts": {
+            "rai": _BOOST_RAI, "reg": _BOOST_REG, "vendor": _BOOST_VENDOR,
+            "o4_present_kinds": _BOOST_O4_PRESENT_KINDS, "o4_strong": _BOOST_O4_STRONG,
+        },
+    }
+    canon = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
+
+
+_POLICY_HASH = _compute_policy_hash()
+
+
 class RuleClassifier:
     backend = "rule"
+    policy_hash = _POLICY_HASH  # 정적 정책 핀(요청 불변) — refusal 이벤트가 읽음.
 
     async def classify(
         self,
@@ -103,22 +145,22 @@ class RuleClassifier:
         # RAI 번호가 있으면 O3 가중치 부스트
         entities = _extract_entities(query_text)
         if entities.get("rai_numbers"):
-            o_scores["O3"] += 3
+            o_scores["O3"] += _BOOST_RAI
         if entities.get("regulation_ids"):
-            o_scores["O2"] += 2
+            o_scores["O2"] += _BOOST_REG
         if entities.get("vendors"):
-            o_scores["O1"] += 2
+            o_scores["O1"] += _BOOST_VENDOR
         # 둘 이상의 강한 객체가 동시 등장하면 관계 질문으로 본다.
         # vendor + regulation, vendor + rai, regulation + rai 중 하나라도 entity 가
         # 동시에 잡히면 O4를 가장 큰 객체보다 1점 위로 올린다.
         present_kinds = sum(1 for k in ("vendors", "regulation_ids", "rai_numbers") if entities.get(k))
         if present_kinds >= 2:
             top_other = max(o_scores[o] for o in ("O1", "O2", "O3"))
-            o_scores["O4"] = max(o_scores["O4"], top_other) + 1
+            o_scores["O4"] = max(o_scores["O4"], top_other) + _BOOST_O4_PRESENT_KINDS
         else:
             strong_objects = sum(1 for v in o_scores.values() if v >= 2)
             if strong_objects >= 2:
-                o_scores["O4"] += 2
+                o_scores["O4"] += _BOOST_O4_STRONG
 
         scenario_object, obj_conf = _argmax(o_scores, default=DEFAULT_OBJECT)
         scenario_depth, dep_conf = _argmax(d_scores, default=DEFAULT_DEPTH)
@@ -132,6 +174,7 @@ class RuleClassifier:
             object_confidence=obj_conf,
             depth_confidence=dep_conf,
             classifier_backend=self.backend,
+            classifier_policy_hash=_POLICY_HASH,
         )
 
 
