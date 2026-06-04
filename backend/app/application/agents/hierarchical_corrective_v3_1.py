@@ -1063,22 +1063,18 @@ class HierarchicalCorrectiveRunner:
                     citations: tuple[Citation, ...] = ()
                 elif verification_status == VerificationStatus.PARTIAL.value:
                     refusal = RefusalReason.PARTIAL_ANSWER.value
-                    answer_text = (
-                        llm_result.text
-                        + "\n\n[부분 답변] 일부 claim 의 근거·인용이 검증을 충족하지 못했습니다."
-                    )
+                    # 부분/규제 미검증 고지는 더 이상 answer_text 에 baking 하지 않는다
+                    # (decision A). API boundary(openai_compat/answer_renderer)가 구조화
+                    # 필드(verification_status, regulatory_grounding)에서 마크다운 callout
+                    # 을 content 로 합성 — 스트리밍·비스트리밍 통일, OpenWebUI clean render.
+                    # 재현성은 구조화 필드가, dumb-client 가시성은 boundary content 가
+                    # 보증(§5/§6).
+                    answer_text = llm_result.text
                     citations = _to_citations(final_candidates)
                 else:
                     refusal = None
                     answer_text = llm_result.text
                     citations = _to_citations(final_candidates)
-                # 미검증 규제 근거를 *답변 본문*에도 명시 — dumb client 도 보이게.
-                if refusal is None and regulatory_grounding == "unverified":
-                    answer_text = (
-                        answer_text
-                        + "\n\n[규제 근거 미검증] 현재 인덱스에 조문 ID·발효일·권위 등급"
-                        " 메타가 없어 규제 차원 검증은 수행되지 않았습니다(인용 충실성만 검증)."
-                    )
                 response = AgentResponse(
                     interaction_id=request.interaction_id,
                     answer_text=answer_text,

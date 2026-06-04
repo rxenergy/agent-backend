@@ -402,16 +402,18 @@ async def test_claim_verification_disabled_skips_phase_d_and_passes_answer() -> 
 
 @pytest.mark.asyncio
 async def test_v1_pass_carries_unverified_marker_in_response_object() -> None:
-    """안전 계약: regulatory_enforced=False(v1) 인 PASS 는 응답 *객체* 에
-    regulatory_grounding='unverified' + answer_text 마커를 달아 '완전 검증된
-    답변'으로 오인되지 않게 한다(advisor #2 — event 뿐 아니라 응답 표면)."""
+    """안전 계약: regulatory_enforced=False(v1) 인 PASS 는 구조화 필드
+    regulatory_grounding='unverified' 로 '완전 검증된 답변' 오인을 막는다(응답 객체 +
+    event). 표시 고지는 더 이상 answer_text 에 baking 하지 않고 API boundary
+    (answer_renderer)가 content callout 으로 합성한다(decision A) — 따라서 응답 객체
+    answer_text 는 깨끗한 LLM 본문이어야 한다."""
     with tempfile.TemporaryDirectory() as tmp:
         runner, _ = _make_runner(Path(tmp), llm=_ClaimAwareLLM(entailment_status="supported"))
         req = AgentRequest(interaction_id="hv", query_text="i-SMR ECCS 설계", session_id="sv")
         resp = await runner.run(req)
         assert resp.verification_status == "pass"
-        assert resp.regulatory_grounding == "unverified"  # v1: 미강제
-        assert "규제 근거 미검증" in resp.answer_text  # dumb client 도 보이게
+        assert resp.regulatory_grounding == "unverified"  # v1: 미강제(단일 표현 소스)
+        assert "규제 근거 미검증" not in resp.answer_text  # baking 제거 — boundary 가 표시
         rec = json.loads(
             next((Path(tmp) / "events" / "t" / "interaction_events").rglob("*.jsonl"))
             .read_text(encoding="utf-8").splitlines()[0]

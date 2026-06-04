@@ -10,6 +10,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.api.answer_renderer import (
+    CiteStreamRewriter,
+    answer_trailer,
+    compose_answer_body,
+)
 from app.api.thinking_renderer import render as render_thinking
 from app.application.agents.events import AgentEvent
 from app.domain.interaction import AgentRequest, ChatTurn
@@ -256,10 +261,11 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
         response=response,
     )
 
-    content_text = response.answer_text
+    # boundary 가 인용 재번호 + References + 고지 callout 을 content 로 합성(decision A).
+    content_text = compose_answer_body(response)
     if thinking_lines:
         think_block = "<think>\n" + "\n".join(thinking_lines) + "\n</think>\n\n"
-        content_text = think_block + (response.answer_text or "")
+        content_text = think_block + content_text
 
     return {
         "id": interaction_id,
@@ -439,16 +445,21 @@ async def _sse_stream_from_runner(
 
     final_yielded = False
     tokens_streamed = False
+    # 본문 토큰 스트림의 [cite-N] → [n] 치환기. renumber 맵을 증분 구축 → 종료 후
+    # trailer(References)가 동일 번호 사용(answer_renderer).
+    cite_rewriter = CiteStreamRewriter()
     try:
         async for event in runner.run_stream(agent_request):
             if event.kind == "token":
                 tokens_streamed = True
-                yield _frame(
-                    interaction_id=interaction_id,
-                    composite_id=composite_id,
-                    created=created,
-                    delta={"content": event.payload.get("content", "")},
-                )
+                rewritten = cite_rewriter.feed(event.payload.get("content", ""))
+                if rewritten:  # 부분 [cite 홀드백 시 빈 문자열 → 프레임 생략.
+                    yield _frame(
+                        interaction_id=interaction_id,
+                        composite_id=composite_id,
+                        created=created,
+                        delta={"content": rewritten},
+                    )
             elif event.kind == "reasoning":
                 yield _frame(
                     interaction_id=interaction_id,
@@ -486,17 +497,37 @@ async def _sse_stream_from_runner(
                     resolved_llm=resolved_llm,
                     response=response,
                 )
-                # If no tokens streamed (early refusal, variants without
-                # token-level streaming like fake_echo_v0, or post-verify
-                # refusal-message overwrite), emit the full answer_text as
-                # a single content chunk so OpenWebUI still renders a body.
-                if response.answer_text and not tokens_streamed:
-                    yield _frame(
-                        interaction_id=interaction_id,
-                        composite_id=composite_id,
-                        created=created,
-                        delta={"content": response.answer_text},
-                    )
+                if not tokens_streamed:
+                    # 토큰이 없던 경로(거부/fake_echo): 전체 본문을 boundary 에서
+                    # compose(마커 재번호 + References + 고지 callout) 해 단일 content.
+                    composed = compose_answer_body(response)
+                    if composed:
+                        yield _frame(
+                            interaction_id=interaction_id,
+                            composite_id=composite_id,
+                            created=created,
+                            delta={"content": composed},
+                        )
+                else:
+                    # 토큰이 스트리밍된 경로: 잔여 버퍼 flush 후 trailer(고지 callout +
+                    # References)를 append. 순서 불변식 — 이 content 프레임은 반드시
+                    # 아래 finish 프레임보다 *먼저* 나가야 OpenWebUI 가 드롭하지 않는다.
+                    tail = cite_rewriter.flush()
+                    if tail:
+                        yield _frame(
+                            interaction_id=interaction_id,
+                            composite_id=composite_id,
+                            created=created,
+                            delta={"content": tail},
+                        )
+                    trailer = answer_trailer(response, cite_rewriter.renumber)
+                    if trailer:
+                        yield _frame(
+                            interaction_id=interaction_id,
+                            composite_id=composite_id,
+                            created=created,
+                            delta={"content": "\n\n" + trailer},
+                        )
                 yield _frame(
                     interaction_id=interaction_id,
                     composite_id=composite_id,

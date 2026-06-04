@@ -344,6 +344,8 @@ def test_v3_non_streaming_includes_model_reasoning_in_think_block():
     assert "주장 2개" in think
     # …and the buffered generation-LLM reasoning is included as one block.
     assert "Let me reason about the cited regulation." in think
-    # token body is not in <think>; it is the final answer.
+    # token body is not in <think>; it is the final answer. PARTIAL → boundary
+    # composes a 부분 답변 callout into content (answer_renderer), not <think>.
     answer_after = content.split("</think>", 1)[1].strip()
-    assert answer_after == "답변"
+    assert answer_after.startswith("답변")
+    assert "**부분 답변**" in answer_after
