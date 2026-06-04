@@ -13,12 +13,17 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from opentelemetry.trace import Span
 
-# Span kinds (Phoenix expects these exact strings).
+# Span kinds (Phoenix expects these exact strings; OpenInference traces spec).
 KIND_AGENT = "AGENT"
 KIND_CHAIN = "CHAIN"
 KIND_LLM = "LLM"
 KIND_RETRIEVER = "RETRIEVER"
 KIND_TOOL = "TOOL"
+# 게이트/검증 노드(Node 6 retrieval_evaluate · Node 15 claim_verify)는 채점·판정이
+# 본질이라 CHAIN 이 아니라 EVALUATOR; 라우팅·거부 게이트(Node 2 scenario_routing)는
+# GUARDRAIL. Phoenix 가 이 kind 로 노드 역할을 구분 렌더한다(실패 귀인).
+KIND_EVALUATOR = "EVALUATOR"
+KIND_GUARDRAIL = "GUARDRAIL"
 
 # Attribute keys.
 SPAN_KIND = "openinference.span.kind"
