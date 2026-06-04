@@ -6,7 +6,7 @@ COMPOSE := docker compose --env-file infra/env/local.env --profile local \
 COMPOSE_ONPREM := docker compose --env-file infra/env/onprem.env --profile onprem \
   -f infra/compose/compose.yml -f infra/compose/compose.onprem.yml
 
-.PHONY: help build up-local down logs ps test test-integration smoke smoke-stream seed seed-encode opensearch-init verify-w1 fmt clean migrate psql prompts-validate \
+.PHONY: help build up-local down logs ps test test-integration smoke smoke-stream seed seed-encode opensearch-init os-snapshot os-restore os-snapshots verify-w1 fmt clean migrate psql prompts-validate \
   build-onprem up-onprem down-onprem logs-onprem ps-onprem clean-onprem _guard-local-only \
   aws-ecr-login aws-build aws-push aws-deploy aws-setup aws-destroy aws-ssh aws-logs aws-status aws-secrets-put
 
@@ -87,6 +87,29 @@ opensearch-init: _guard-local-only
 	OPENSEARCH_INDEX=nrc-all-v3 \
 	OPENSEARCH_SEARCH_PIPELINE=nrc-hybrid-search \
 	sh infra/opensearch/init.sh
+
+# OpenSearch fs-snapshot — 프로젝트 경로(infra/opensearch/snapshots/)에 저장/복원.
+# local 프로파일 전용. 인덱스 기본값은 nrc-* glob (OS_SNAPSHOT_INDICES 로 override).
+# ⚠ 마운트는 컨테이너 재생성 시 활성화된다. 이미 떠 있는 opensearch 라면 먼저
+#   `make up-local` (또는 `... up -d opensearch`) 로 재생성해야 스냅샷이 프로젝트
+#   경로에 실제로 기록된다. (path.repo 화이트리스트는 마운트와 무관하므로, 재생성
+#   없이 실행하면 컨테이너 임시 레이어에 써졌다가 다음 up 에서 사라진다.)
+#   make os-snapshot NAME=snap-2026-06-04
+#   make os-restore  NAME=snap-2026-06-04
+#   make os-snapshots
+os-snapshot: _guard-local-only
+	@test -n "$(NAME)" || { echo >&2 "ERROR: NAME=<snapshot-name> 필요"; exit 2; }
+	OPENSEARCH_ENDPOINT=http://localhost:9200 \
+	sh scripts/opensearch_snapshot.sh create $(NAME)
+
+os-restore: _guard-local-only
+	@test -n "$(NAME)" || { echo >&2 "ERROR: NAME=<snapshot-name> 필요"; exit 2; }
+	OPENSEARCH_ENDPOINT=http://localhost:9200 \
+	sh scripts/opensearch_snapshot.sh restore $(NAME)
+
+os-snapshots: _guard-local-only
+	OPENSEARCH_ENDPOINT=http://localhost:9200 \
+	sh scripts/opensearch_snapshot.sh list
 
 # BM25-only seed (no embeddings). Use `make seed-encode` for full hybrid.
 # Local profile 전용 — onprem 스택의 색인을 손대지 않는다.

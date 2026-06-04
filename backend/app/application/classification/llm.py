@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Iterable
@@ -35,9 +36,14 @@ Depth:
 
 _RE_JSON = re.compile(r"\{[^{}]*\}", re.S)
 
+# 분류 정책 재현 핀(원칙 5) — 분류 프롬프트 본문의 sha16. 프롬프트가 바뀌면
+# 해시가 바뀐다. entity 정규식은 rule._extract_entities 재사용이라 별도 핀 불필요.
+_POLICY_HASH = hashlib.sha256(_PROMPT.encode("utf-8")).hexdigest()[:16]
+
 
 class LLMClassifier:
     backend = "llm"
+    policy_hash = _POLICY_HASH  # 정적 정책 핀(프롬프트 sha) — refusal 이벤트가 읽음.
 
     def __init__(self, llm: LLMPort) -> None:
         self._llm = llm
@@ -60,6 +66,7 @@ class LLMClassifier:
                 confidence=0.0,
                 low_confidence_reason="llm_classifier_unavailable",
                 classifier_backend=self.backend,
+                classifier_policy_hash=_POLICY_HASH,
             )
         parsed = _parse_json(result.text)
         if parsed is None:
@@ -70,6 +77,7 @@ class LLMClassifier:
                 confidence=0.0,
                 low_confidence_reason="llm_classifier_parse_failed",
                 classifier_backend=self.backend,
+                classifier_policy_hash=_POLICY_HASH,
             )
         obj = str(parsed.get("object", DEFAULT_OBJECT))
         dep = str(parsed.get("depth", DEFAULT_DEPTH))
@@ -89,6 +97,7 @@ class LLMClassifier:
             object_confidence=round(oc, 3),
             depth_confidence=round(dc, 3),
             classifier_backend=self.backend,
+            classifier_policy_hash=_POLICY_HASH,
         )
 
 

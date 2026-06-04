@@ -23,6 +23,7 @@ from app.application.agents.events import (
 from app.application.agents.llm_router import LLMRouter, UnknownLLMError
 from app.application.agents.registry import AgentDeps, register_variant
 from app.application.classification.active_cells import is_active
+from app.application.agents.sequential.nodes.classify import _HARDCODED_POLICY_HASH
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
 from app.application.memory.policies import decide_session_injection
@@ -513,7 +514,21 @@ class HierarchicalCorrectiveRunner:
             await emit_step("retrieval_execute", "ok",
                             num_chunks=len(chunks), pool_size=len(pool),
                             strategies_ok=[s.name for s in dispatch.executed],
-                            strategies_failed=dispatch.failed_strategies)
+                            strategies_failed=dispatch.failed_strategies,
+                            # 표시용 — thinking 요약이 "어떤 문서를 근거로 쓰는지"를
+                            # 보여줄 수 있게 상위 chunk 메타를 싣는다(로직 불변, 감사
+                            # 상세는 사이드채널/span 이 별도 보유).
+                            chunks_preview=[
+                                {
+                                    "title": c.title,
+                                    "document_id": c.document_id,
+                                    "section": c.section,
+                                    "page": c.page,
+                                    "doc_type": c.doc_type,
+                                    "score": c.score,
+                                }
+                                for c in chunks
+                            ])
             metrics.record_retrieval(pool_size=len(pool),
                                      failed_strategies=dispatch.failed_strategies)
 
@@ -546,7 +561,15 @@ class HierarchicalCorrectiveRunner:
             await emit_step("retrieval_evaluate", "ok",
                             overall=evaluation.overall_decision,
                             regulatory_enforced=evaluation.regulatory_enforced,
-                            num_pass=num_pass)
+                            num_pass=num_pass,
+                            # PASS 가 아닐 때만 사용자에게 "근거가 왜 부분적인지"를
+                            # 설명할 한국어 사유를 싣는다(요약 thinking 전용).
+                            diagnosis_reason=(
+                                _RETRIEVAL_DIAGNOSIS_REASON.get(
+                                    self._recoverer.diagnose(evaluation))
+                                if evaluation.overall_decision != GateDecision.PASS.value
+                                else None
+                            ))
             metrics.record_gate(decision=evaluation.overall_decision)
 
             # Node 7 — retrieval_recover. WEAK/FAIL → 결정론 진단·복구 → Node 5
@@ -1077,6 +1100,9 @@ class HierarchicalCorrectiveRunner:
                 await emit_step("claim_verify", "ok",
                                 verification_status=verification_status,
                                 num_claims=len(claims),
+                                num_supported=sum(
+                                    1 for cv in claims
+                                    if cv.status == ClaimStatus.SUPPORTED.value),
                                 contradicted=verify_res.contradicted,
                                 entailment_ran=verify_res.entailment_ran)
                 metrics.record_verification(status=verification_status,
@@ -1128,22 +1154,18 @@ class HierarchicalCorrectiveRunner:
                     citations: tuple[Citation, ...] = ()
                 elif verification_status == VerificationStatus.PARTIAL.value:
                     refusal = RefusalReason.PARTIAL_ANSWER.value
-                    answer_text = (
-                        llm_result.text
-                        + "\n\n[부분 답변] 일부 claim 의 근거·인용이 검증을 충족하지 못했습니다."
-                    )
+                    # 부분/규제 미검증 고지는 더 이상 answer_text 에 baking 하지 않는다
+                    # (decision A). API boundary(openai_compat/answer_renderer)가 구조화
+                    # 필드(verification_status, regulatory_grounding)에서 마크다운 callout
+                    # 을 content 로 합성 — 스트리밍·비스트리밍 통일, OpenWebUI clean render.
+                    # 재현성은 구조화 필드가, dumb-client 가시성은 boundary content 가
+                    # 보증(§5/§6).
+                    answer_text = llm_result.text
                     citations = _to_citations(final_candidates)
                 else:
                     refusal = None
                     answer_text = llm_result.text
                     citations = _to_citations(final_candidates)
-                # 미검증 규제 근거를 *답변 본문*에도 명시 — dumb client 도 보이게.
-                if refusal is None and regulatory_grounding == "unverified":
-                    answer_text = (
-                        answer_text
-                        + "\n\n[규제 근거 미검증] 현재 인덱스에 조문 ID·발효일·권위 등급"
-                        " 메타가 없어 규제 차원 검증은 수행되지 않았습니다(인용 충실성만 검증)."
-                    )
                 response = AgentResponse(
                     interaction_id=request.interaction_id,
                     answer_text=answer_text,
@@ -1208,6 +1230,7 @@ class HierarchicalCorrectiveRunner:
                     prompt_source=rendered.source,
                     context_hash=pack.context_hash,
                     classification_confidence=conf,
+                    classifier_policy_hash=classification.classifier_policy_hash,
                     citation_completeness=citation_completeness,
                     faithfulness=faithfulness,
                     started_at=started,
@@ -1499,6 +1522,10 @@ class HierarchicalCorrectiveRunner:
                       verification_status: VerificationStatus = VerificationStatus.FAIL,
                       evaluation=None, recover_rounds=(),
                       scope: ScopeDecision | None = None):
+        # 거부는 가장 의미 있는 모먼트인데 thinking 트레이스가 무음 종료되면 사용자는
+        # "왜 답이 안 나왔나"를 알 수 없다 → 요약 채널에 거부 사유 1줄을 종결로 남긴다
+        # (거부 메시지 본문은 answer_text 로 별도 전달).
+        await emit_step("refused", "ok", reason=reason.value)
         # 평가 *후* refusal(예: INSUFFICIENT_EVIDENCE)은 per_chunk_signals·
         # recover_rounds·policy_hash 가 이미 존재하므로 event 에 실어야 한다 —
         # "왜 거부했나"가 규제 도메인 defensibility 의 핵심 질문(CLAUDE.md §5).
@@ -1528,10 +1555,19 @@ class HierarchicalCorrectiveRunner:
             # scope 적용 *후* 의 refusal(RETRIEVAL_NO_RESULT/INSUFFICIENT_EVIDENCE)
             # 은 "scope 가 막다른 벽으로 좁혔나"를 event 가 단독 설명하게 한다.
             scope_kwargs = dict(corpus_map_hash=scope.corpus_map_hash, scope_mode=scope.mode)
+        # 분류 정책 핀은 분류기별 정적값(요청 불변)이라 self._classifier 에서 직접
+        # 읽는다 — 거부 이벤트도 "어떤 분류 정책이 이 거부로 이끌었나"를 단독 설명
+        # (success 경로와 동일 축, §5 defensibility). None(미주입)=hardcoded.
+        classifier_policy_hash = (
+            getattr(self._classifier, "policy_hash", None)
+            if self._classifier is not None
+            else _HARDCODED_POLICY_HASH
+        )
         event = self._recorder.build(
             request=request, response=response, agent_variant=self.spec.variant_id,
             started_at=started, tool_calls=tuple(tool_calls),
             classification_confidence=conf, error_code=error_code,
+            classifier_policy_hash=classifier_policy_hash,
             recover_rounds=tuple(recover_rounds),
             **evaluation_kwargs,
             **scope_kwargs,

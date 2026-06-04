@@ -99,12 +99,30 @@ def _tool_registry_yaml(root: Path) -> Path:
     return p
 
 
+class _FakeO4Classifier:
+    """conf 0.5 로 O4/D2 를 주는 테스트용 분류기. P2 이후 None-shim 은 conf 0.0
+    이라 scope/confidence 게이트 테스트는 분류기를 *명시 주입*해야 한다(plan W2)."""
+
+    backend = "fake"
+    policy_hash = "fake_o4"
+
+    async def classify(self, query_text, chat_history=()):
+        from app.domain.classification import ClassificationResult
+
+        return ClassificationResult(
+            scenario_object="O4", scenario_depth="D2", entities={},
+            confidence=0.5, object_confidence=0.5, depth_confidence=0.5,
+            classifier_backend=self.backend, classifier_policy_hash=self.policy_hash,
+        )
+
+
 def _make_runner(
     tmp: Path, *, with_contract: bool = True, retrieval_planner=None, retriever_tool=None,
     llm=None, claim_verification_enabled: bool = True,
     corpus_map=None, scope_tau_high: float = 0.6, scope_tau_low: float = 0.3,
     scope_min_token_count: int = 0, fetch_section_tool=None,
     context_token_budget: int = 0, section_merge_max_chunks: int = 50,
+    classifier=None,
 ) -> tuple[HierarchicalCorrectiveRunner, FilesystemEventSink]:
     prompts = tmp / "prompts"
     build_prompts(prompts)
@@ -135,6 +153,7 @@ def _make_runner(
         recorder=recorder,
         event_sink=sink,
         app_profile="local",
+        classifier=classifier,
         citation_contract_path=str(_CONTRACT) if with_contract else None,
         retrieval_planner=retrieval_planner,
         claim_verification_enabled=claim_verification_enabled,
@@ -181,6 +200,8 @@ async def test_full_workflow_runs_and_records_v31_fields() -> None:
         assert rec["budget"]["llm_calls_used"] == 3
         assert rec["decompose_method"] == "llm"
         assert rec["entailment_model"] == "claim-aware"
+        # P1: 분류 정책 핀이 event 에 기록된다(원칙 5). 미주입이므로 hardcoded 핀.
+        assert rec["classifier_policy_hash"]
 
 
 class _TextChunkRetriever:
@@ -402,16 +423,18 @@ async def test_claim_verification_disabled_skips_phase_d_and_passes_answer() -> 
 
 @pytest.mark.asyncio
 async def test_v1_pass_carries_unverified_marker_in_response_object() -> None:
-    """안전 계약: regulatory_enforced=False(v1) 인 PASS 는 응답 *객체* 에
-    regulatory_grounding='unverified' + answer_text 마커를 달아 '완전 검증된
-    답변'으로 오인되지 않게 한다(advisor #2 — event 뿐 아니라 응답 표면)."""
+    """안전 계약: regulatory_enforced=False(v1) 인 PASS 는 구조화 필드
+    regulatory_grounding='unverified' 로 '완전 검증된 답변' 오인을 막는다(응답 객체 +
+    event). 표시 고지는 더 이상 answer_text 에 baking 하지 않고 API boundary
+    (answer_renderer)가 content callout 으로 합성한다(decision A) — 따라서 응답 객체
+    answer_text 는 깨끗한 LLM 본문이어야 한다."""
     with tempfile.TemporaryDirectory() as tmp:
         runner, _ = _make_runner(Path(tmp), llm=_ClaimAwareLLM(entailment_status="supported"))
         req = AgentRequest(interaction_id="hv", query_text="i-SMR ECCS 설계", session_id="sv")
         resp = await runner.run(req)
         assert resp.verification_status == "pass"
-        assert resp.regulatory_grounding == "unverified"  # v1: 미강제
-        assert "규제 근거 미검증" in resp.answer_text  # dumb client 도 보이게
+        assert resp.regulatory_grounding == "unverified"  # v1: 미강제(단일 표현 소스)
+        assert "규제 근거 미검증" not in resp.answer_text  # baking 제거 — boundary 가 표시
         rec = json.loads(
             next((Path(tmp) / "events" / "t" / "interaction_events").rglob("*.jsonl"))
             .read_text(encoding="utf-8").splitlines()[0]
@@ -799,8 +822,9 @@ class _ScopeCapturingRetriever:
 def _scope_corpus_map():
     from app.application.retrieval.corpus_map import CorpusMap
 
-    # 분류기 미주입 시 shim 이 scenario_object=DEFAULT(O4), confidence=0.5 를 준다.
+    # _FakeO4Classifier 주입 시 scenario_object=O4, confidence=0.5.
     # tau_high=0.4 로 0.5>=0.4 → filter mode. 룰은 scenario_object_in:[O4] 로 매칭.
+    # (P2 이후 None-shim 은 conf 0.0 이라 분류기를 명시 주입해야 filter 발동.)
     return CorpusMap(
         topic_routing=[
             {"id": "t-o4", "when": {"scenario_object_in": ["O4"]},
@@ -818,6 +842,7 @@ async def test_scope_filter_applied_then_dropped_on_recover() -> None:
         runner, _ = _make_runner(
             Path(tmp), retriever_tool=fake, corpus_map=cm,
             scope_tau_high=0.4, scope_tau_low=0.3,
+            classifier=_FakeO4Classifier(),
         )
         req = AgentRequest(interaction_id="sc1", query_text="APR1400 안전계통", session_id="ss1")
         resp = await runner.run(req)

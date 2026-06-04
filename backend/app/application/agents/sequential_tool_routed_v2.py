@@ -728,10 +728,10 @@ class SequentialToolRoutedRunner:
                     citations: tuple[Citation, ...] = ()
                 elif verification_status == VerificationStatus.PARTIAL.value:
                     refusal = RefusalReason.PARTIAL_ANSWER.value
-                    answer_text = (
-                        llm_result.text
-                        + "\n\n[부분 답변] 일부 인용·근거가 임계값을 충족하지 못했습니다."
-                    )
+                    # 부분 답변 고지는 answer_text 에 baking 하지 않는다(decision A) —
+                    # API boundary(answer_renderer)가 verification_status 에서 마크다운
+                    # callout 을 content 로 합성. 구조화 필드가 단일 표현 소스.
+                    answer_text = llm_result.text
                     citations = tuple(
                         Citation(
                             citation_id=c.citation_id,

@@ -37,6 +37,8 @@ venv/
 infra/aws/.state/
 *.pem
 
-# OpenSearch snapshot 본체는 호스트의 /srv/os-snapshots 에만 두고
-# 저장소 안에는 절대 두지 않는다 (수 GB 단위).
-infra/opensearch/snapshots/
+# OpenSearch snapshot 본체(수 GB)는 저장소에 커밋하지 않는다. 단, local
+# 프로파일의 fs-repo 마운트 지점이 되도록 디렉토리 자체는 .gitkeep 으로 추적한다.
+# (onprem 본체는 호스트의 /srv/os-snapshots 에만 둔다.)
+infra/opensearch/snapshots/*
+!infra/opensearch/snapshots/.gitkeep

@@ -22,7 +22,10 @@ async def test_classify_falls_back_to_hardcoded_when_no_classifier() -> None:
     assert result.scenario_object == DEFAULT_OBJECT
     assert result.scenario_depth == DEFAULT_DEPTH
     assert result.classifier_backend == "hardcoded"
-    assert result.confidence == 0.5
+    # P2: 미주입 폴백은 confident O4/D2 가 아니라 conf 0.0 + 사유로 정직 표시.
+    assert result.confidence == 0.0
+    assert result.low_confidence_reason == "classifier_not_injected"
+    assert result.classifier_policy_hash  # 재현 핀 존재(원칙 5)
 
 
 @pytest.mark.asyncio
