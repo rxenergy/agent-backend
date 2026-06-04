@@ -20,6 +20,16 @@ services:
       postgres:
         condition: service_healthy
 
+  # local 전용: fs-snapshot repository 를 프로젝트 경로에 바인딩한다.
+  # 컨테이너 내부 경로(/usr/share/opensearch/snapshots) 는 opensearch.yml 의
+  # path.repo 화이트리스트와 일치한다. onprem overlay 는 동일 컨테이너 경로를
+  # /srv/os-snapshots 에 바인딩하므로, 이 마운트는 base 가 아닌 local overlay
+  # 에만 둔다 (base 에 두면 두 바인딩이 충돌). 스냅샷 본체는 .gitignore 로
+  # 저장소 커밋에서 제외된다 (수 GB).
+  opensearch:
+    volumes:
+      - ../opensearch/snapshots:/usr/share/opensearch/snapshots
+
   open-webui:
     build:
       context: ../../frontend
