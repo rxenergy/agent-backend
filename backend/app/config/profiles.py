@@ -112,7 +112,10 @@ def _resolve_preflight_severity(settings: Settings) -> "str":
 # 어댑터의 per-call top_k 는 fetch 깊이(fetch_k≈20)라 operating point 가 아니므로,
 # pipeline 선택은 반드시 여기(config)에서 결정한다. 미벤치마크 k 는 폴백을 쓴다.
 _HYBRID_K_PIPELINES: dict[int, str] = {
-    5: "nrc-hybrid-search-k5",   # weights=[0.4, 0.3, 0.3]
+    # k=5 전용 pipeline(nrc-hybrid-search-k5)은 실행 클러스터에 등록돼 있지 않아
+    # (provisioning 미자동화) preflight 404 를 유발했다. operating point 5 는
+    # 폴백 base pipeline(opensearch_search_pipeline=nrc-hybrid-search)을 쓰도록
+    # 맵에서 제외한다. 재등록 시 다시 추가. (k10 도 등록 전엔 동일 위험)
     10: "nrc-hybrid-search-k10",  # weights=[0.4, 0.2, 0.4]
 }
 
