@@ -126,7 +126,8 @@ class _V3StubRunner:
                          payload={"multi_intent": False, "sub_questions": 1})
         yield AgentEvent(kind="step", name="retrieval_evaluate", status="ok",
                          payload={"overall": "WEAK", "regulatory_enforced": True,
-                                  "num_pass": 1})
+                                  "num_pass": 1,
+                                  "diagnosis_reason": "질의 핵심어와 근거 매칭이 약합니다."})
         yield AgentEvent(kind="step", name="retrieval_recover", status="started",
                          payload={"round": 0, "diagnosis": "low entity coverage",
                                   "strategy": "synonym_expand"})
@@ -315,10 +316,12 @@ def test_v3_streaming_narrates_v3_steps_and_passes_reasoning():
         if "reasoning_content" in c["choices"][0].get("delta", {})
     ]
     joined = "".join(reasoning)
-    # v3.1-specific narration (dispatched by runner.spec.variant_id).
-    assert "Gate decision WEAK" in joined
-    assert "low entity coverage" in joined
-    assert "Verification PARTIAL" in joined
+    # v3.1 summary narration (Korean, outcome-conditioned), dispatched by variant.
+    assert "부분적" in joined and "매칭이 약합니다" in joined  # WEAK gate + reason
+    assert "동의어 확장" in joined                            # recovery strategy
+    assert "주장 2개" in joined                               # claim verify outcome
+    # Internal gate verdict tokens are not leaked to the summary surface.
+    assert "Gate decision" not in joined and "WEAK" not in joined
     # Generation LLM native chain-of-thought passed straight through.
     assert "Let me reason about the cited regulation." in joined
 
@@ -336,9 +339,9 @@ def test_v3_non_streaming_includes_model_reasoning_in_think_block():
     content = body["choices"][0]["message"]["content"]
     assert content.startswith("<think>") and "</think>" in content
     think = content.split("</think>", 1)[0]
-    # v3.1 step narration present…
-    assert "Gate decision WEAK" in think
-    assert "Verification PARTIAL" in think
+    # v3.1 summary narration present (Korean)…
+    assert "부분적" in think
+    assert "주장 2개" in think
     # …and the buffered generation-LLM reasoning is included as one block.
     assert "Let me reason about the cited regulation." in think
     # token body is not in <think>; it is the final answer.

@@ -484,7 +484,21 @@ class HierarchicalCorrectiveRunner:
             await emit_step("retrieval_execute", "ok",
                             num_chunks=len(chunks), pool_size=len(pool),
                             strategies_ok=[s.name for s in dispatch.executed],
-                            strategies_failed=dispatch.failed_strategies)
+                            strategies_failed=dispatch.failed_strategies,
+                            # 표시용 — thinking 요약이 "어떤 문서를 근거로 쓰는지"를
+                            # 보여줄 수 있게 상위 chunk 메타를 싣는다(로직 불변, 감사
+                            # 상세는 사이드채널/span 이 별도 보유).
+                            chunks_preview=[
+                                {
+                                    "title": c.title,
+                                    "document_id": c.document_id,
+                                    "section": c.section,
+                                    "page": c.page,
+                                    "doc_type": c.doc_type,
+                                    "score": c.score,
+                                }
+                                for c in chunks
+                            ])
 
             # Node 6 — retrieval_evaluate (5-신호 결정론 게이트)
             await emit_step("retrieval_evaluate", "started")
@@ -515,7 +529,15 @@ class HierarchicalCorrectiveRunner:
             await emit_step("retrieval_evaluate", "ok",
                             overall=evaluation.overall_decision,
                             regulatory_enforced=evaluation.regulatory_enforced,
-                            num_pass=num_pass)
+                            num_pass=num_pass,
+                            # PASS 가 아닐 때만 사용자에게 "근거가 왜 부분적인지"를
+                            # 설명할 한국어 사유를 싣는다(요약 thinking 전용).
+                            diagnosis_reason=(
+                                _RETRIEVAL_DIAGNOSIS_REASON.get(
+                                    self._recoverer.diagnose(evaluation))
+                                if evaluation.overall_decision != GateDecision.PASS.value
+                                else None
+                            ))
 
             # Node 7 — retrieval_recover. WEAK/FAIL → 결정론 진단·복구 → Node 5
             # 재-dispatch → Node 6 재평가. max N round. 경계는 dispatch→evaluate 만
@@ -990,6 +1012,9 @@ class HierarchicalCorrectiveRunner:
                 await emit_step("claim_verify", "ok",
                                 verification_status=verification_status,
                                 num_claims=len(claims),
+                                num_supported=sum(
+                                    1 for cv in claims
+                                    if cv.status == ClaimStatus.SUPPORTED.value),
                                 contradicted=verify_res.contradicted,
                                 entailment_ran=verify_res.entailment_ran)
 
@@ -1394,6 +1419,10 @@ class HierarchicalCorrectiveRunner:
                       verification_status: VerificationStatus = VerificationStatus.FAIL,
                       evaluation=None, recover_rounds=(),
                       scope: ScopeDecision | None = None):
+        # 거부는 가장 의미 있는 모먼트인데 thinking 트레이스가 무음 종료되면 사용자는
+        # "왜 답이 안 나왔나"를 알 수 없다 → 요약 채널에 거부 사유 1줄을 종결로 남긴다
+        # (거부 메시지 본문은 answer_text 로 별도 전달).
+        await emit_step("refused", "ok", reason=reason.value)
         # 평가 *후* refusal(예: INSUFFICIENT_EVIDENCE)은 per_chunk_signals·
         # recover_rounds·policy_hash 가 이미 존재하므로 event 에 실어야 한다 —
         # "왜 거부했나"가 규제 도메인 defensibility 의 핵심 질문(CLAUDE.md §5).

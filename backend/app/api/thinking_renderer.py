@@ -4,12 +4,17 @@ Surfaced through OpenAI-compatible `delta.reasoning_content` (streaming) or
 `<think>…</think>` content prefix (non-streaming) so that OpenWebUI renders
 agent workflow progress in its collapsible thinking block.
 
-Style: first-person present-continuous for in-flight steps + past-tense
-single-line summaries on completion, with indented bullet lists for the
-detail of each step (search query, retrieved documents, resolved citations,
-…). Modeled after OpenAI Deep Research / o1 reasoning traces and Perplexity
-Pro Search progress lines. Domain nouns stay in English so the thinking
-layer reads consistently when the upstream LLM also emits reasoning_content.
+Two narration tiers, selected per call by `verbosity` (settings.thinking_verbosity):
+  • "summary"  — user-meaningful, Korean, outcome-conditioned (default). The
+                 16-node v3.1 workflow is distilled to a few load-bearing
+                 moments (이해 / 검색·근거 / 근거품질·복구 / 작성 / 검증·한계);
+                 internal mechanics and identifiers are dropped (they live on
+                 the `smr_agent.event` sidechannel + OTel spans). Modeled after
+                 OpenAI's reasoning-*summary* convention — distill, don't dump.
+  • "detailed" — legacy per-node English narration (dev/debug); narrates every
+                 step. v2/fake_echo always use their single English table.
+Domain proper nouns (RG 1.206, KEPIC, KINS-RG) stay in their source form.
+Design reference: docs/references/thinking_output_design.md.
 
 The renderer narrates **deterministic workflow steps** (`step`/`tool` events).
 The generation LLM's own chain-of-thought rides a *separate* channel
@@ -36,23 +41,40 @@ ContentMode = Literal["metadata", "snippets", "full"]
 StepHandler = Callable[..., list[str]]
 
 
+Verbosity = Literal["summary", "detailed", "off"]
+
+
 def render(
     event: AgentEvent,
     *,
     variant_id: str | None = None,
     content_mode: ContentMode = "metadata",
     max_items: int = 3,
+    verbosity: Verbosity = "summary",
 ) -> list[str]:
     """Return zero or more thinking lines for an event.
 
     Pure function — no side effects, no I/O. Empty list means "drop this
     event" (no thinking output). Each returned string is one logical line
-    (callers add a trailing newline). `variant_id` selects the step-handler
-    table; when None/unknown the union of all variants' handlers is used so
-    callers without variant context still get sensible output.
+    (callers add a trailing newline).
+
+    `verbosity` selects the narration tier:
+      • "summary"  — user-meaningful, outcome-conditioned, Korean (default).
+                     Distilled phase/result lines (OpenAI reasoning-summary
+                     model), internal mechanics dropped. See thinking_output
+                     design reference.
+      • "detailed" — the legacy per-node English narration (dev/debug). Every
+                     workflow node is narrated.
+      • "off"      — no workflow narration at all.
+
+    `variant_id` selects the step-handler table; when None/unknown the union of
+    all variants' handlers is used so callers without variant context still get
+    sensible output.
     """
+    if verbosity == "off":
+        return []
     if event.kind == "step":
-        table = _RENDERERS.get(variant_id or "", _DEFAULT_STEPS)
+        table = _select_table(variant_id or "", verbosity)
         handler = table.get(event.name or "")
         if handler is None:
             return []
@@ -63,6 +85,14 @@ def render(
     if event.kind == "tool":
         return _render_tool(event)
     return []
+
+
+def _select_table(variant_id: str, verbosity: Verbosity) -> dict[str, StepHandler]:
+    """Resolve the (variant, verbosity) → handler table. Only v3.1 has a
+    distinct summary tier; other variants share one table across tiers."""
+    if verbosity == "detailed":
+        return _RENDERERS_DETAILED.get(variant_id, _RENDERERS.get(variant_id, _DEFAULT_STEPS))
+    return _RENDERERS.get(variant_id, _DEFAULT_STEPS)
 
 
 # --- shared step handlers (identical narration across variants) -----------
@@ -351,6 +381,161 @@ def _h_selective_regenerate(status, p, *, content_mode, max_items) -> list[str]:
     return []
 
 
+# --- v3.1 summary tier (Korean, outcome-conditioned) ----------------------
+# Design: docs/references/thinking_output_design.md. The summary tier distills
+# the 16-node workflow into a few user-meaningful moments (이해 / 검색·근거 /
+# 근거품질·복구 / 작성 / 검증·한계). Internal mechanics (plan/evidence_snippet/
+# context_build/prompt_render/claim_decompose, hashes, gate verdicts) are
+# dropped here and live only on the `smr_agent.event` sidechannel + OTel spans.
+# Domain proper nouns (RG 1.206, KEPIC, KINS-RG) stay in their source form.
+
+# scenario_object / scenario_depth 코드 → 사용자용 한국어 라벨(표현 계층 소유 —
+# CLAUDE.md 원칙 1). 의미는 domain/scenario.py 주석에 정의됨.
+_OBJECT_LABEL_KO = {
+    "O1": "공급사·노형 설계",
+    "O2": "규제 요건",
+    "O3": "RAI(추가정보요청)",
+    "O4": "규제-설계 연계",
+}
+_DEPTH_LABEL_KO = {
+    "D1": "개요",
+    "D2": "기술 상세",
+    "D3": "조문 수준",
+}
+
+
+def _scenario_label_ko(so: str | None, sd: str | None) -> str:
+    obj = _OBJECT_LABEL_KO.get(so or "", so or "?")
+    depth = _DEPTH_LABEL_KO.get(sd or "", sd or "?")
+    return f"{obj} · {depth}"
+
+
+def _h31_intent(status, p, *, content_mode, max_items) -> list[str]:
+    if status != "ok":
+        return []
+    label = _scenario_label_ko(p.get("scenario_object"), p.get("scenario_depth"))
+    line = f"질문을 〈{label}〉(으)로 이해했습니다."
+    ents = p.get("entities") or {}
+    if isinstance(ents, dict) and ents:
+        ent_line = _fmt_entities(ents)
+        if ent_line:
+            line += f" 핵심어: {ent_line}."
+    return [line]
+
+
+def _h31_query_understanding(status, p, *, content_mode, max_items) -> list[str]:
+    # 단일 의도(거의 항상)는 기계 동작 — 다중 의도이거나 하위 질의가 2개 이상일
+    # 때만 서술(sub_questions≤1 은 분해가 일어나지 않은 평범한 케이스).
+    subq = p.get("sub_questions", 0) or 0
+    if status == "ok" and (p.get("multi_intent") or subq > 1):
+        return [f"질문에 {subq}개 하위 질의가 있어 나눠 처리합니다."]
+    return []
+
+
+def _h31_retrieval_execute(status, p, *, content_mode, max_items) -> list[str]:
+    if status == "started":
+        return ["규제 문서에서 근거를 검색하는 중…"]
+    if status == "ok":
+        n = p.get("num_chunks", 0)
+        if n == 0:
+            return ["관련 근거를 찾지 못했습니다."]
+        docs = _fmt_doc_refs(p.get("chunks_preview") or [], max_items)
+        if docs:
+            return [f"근거 {n}건 확보: {docs}."]
+        return [f"근거 {n}건을 확보했습니다."]
+    return []
+
+
+def _h31_retrieval_evaluate(status, p, *, content_mode, max_items) -> list[str]:
+    # PASS 는 검색 줄에 흡수(무신호 억제). WEAK/FAIL 만 사유와 함께 노출.
+    if status == "ok" and p.get("overall") not in (None, "PASS"):
+        reason = p.get("diagnosis_reason")
+        if reason:
+            return [f"확보한 근거가 부분적입니다 — {reason}"]
+        return ["확보한 근거가 부분적입니다."]
+    return []
+
+
+_RECOVER_STRATEGY_KO = {
+    "synonym_expand": "동의어 확장",
+    "relax_filter": "필터 완화",
+}
+
+
+def _h31_retrieval_recover(status, p, *, content_mode, max_items) -> list[str]:
+    if status == "started":
+        strat = _RECOVER_STRATEGY_KO.get(p.get("strategy") or "", "근거 확장")
+        rnd = p.get("round")
+        rnd_s = f" (시도 {rnd + 1})" if isinstance(rnd, int) else ""
+        return [f"근거가 부족해 {strat}(으)로 재검색합니다{rnd_s}."]
+    return []  # ok/skipped 는 후속 검색·평가 줄로 드러남(중복 억제)
+
+
+def _h31_multi_hop(status, p, *, content_mode, max_items) -> list[str]:
+    if status == "ok":
+        hops = p.get("num_hops", 0)
+        if isinstance(hops, int) and hops:
+            return [f"교차 참조된 조항을 {hops}건 추가로 확인했습니다."]
+    return []
+
+
+def _h31_memory_inject(status, p, *, content_mode, max_items) -> list[str]:
+    if status == "ok" and p.get("inject") and p.get("num_memory_refs"):
+        return [f"이전 전문가 검토 답변 {p.get('num_memory_refs')}건을 참고합니다."]
+    return []
+
+
+def _h31_generation(status, p, *, content_mode, max_items) -> list[str]:
+    if status == "started":
+        return ["답변을 작성하는 중…"]
+    return []  # 본문 토큰 스트림이 가시적 진행을 담당.
+
+
+def _h31_claim_verify(status, p, *, content_mode, max_items) -> list[str]:
+    # 검증 *결과*만 thinking 에 싣는다. 규제 미검증 한계는 답변 본문(answer_text)에
+    # durable 고지로 이미 실리므로(CLAUDE.md §6, conductor response_format) 여기서
+    # 중복하지 않는다 — 같은 응답에 같은 면책을 두 번 보이지 않게.
+    if status == "skipped":
+        # 검증 생략은 본문에 따로 나타나지 않는 신뢰 신호 → 짧게 고지.
+        return ["사후 근거 검증은 생략되었습니다(설정)."]
+    if status != "ok":
+        return []
+    n = p.get("num_claims", 0)
+    supported = p.get("num_supported", n)
+    line = f"인용 근거를 검증했습니다 — 주장 {n}개 중 {supported}개 근거 일치"
+    if p.get("contradicted"):
+        line += ", 모순되는 주장 발견"
+    line += "."
+    return [line]
+
+
+def _h31_selective_regenerate(status, p, *, content_mode, max_items) -> list[str]:
+    if status == "ok":
+        n = p.get("num_regenerated", p.get("regenerated"))
+        if isinstance(n, int) and n:
+            return ["근거 불일치 부분을 다시 작성했습니다."]
+    return []
+
+
+_REFUSAL_THINKING_KO = {
+    "clarification_required": "질문이 모호해 명확화가 필요합니다 — 답변 대신 되묻습니다.",
+    "retrieval_no_result": "관련 근거를 찾지 못했습니다 — 답변 대신 거부합니다.",
+    "insufficient_evidence": "복구를 시도했으나 답변 자격을 충족하는 근거를 확보하지 못했습니다 — 답변 대신 거부합니다.",
+    "verification_failed": "인용 가능한 근거가 부족해 검증을 통과하지 못했습니다 — 답변 대신 거부합니다.",
+    "budget_exceeded": "처리 예산을 초과해 답변을 완료하지 못했습니다 — 거부합니다.",
+    "unsupported_scenario": "현재 단계에서 지원되지 않는 유형입니다 — 답변 대신 거부합니다.",
+    "unknown_scenario": "지원되지 않는 시나리오 조합입니다 — 답변 대신 거부합니다.",
+    "partial_answer": "일부 주장의 근거가 검증을 충족하지 못해 부분 답변으로 표기합니다.",
+    "llm_unavailable": "모델을 가져올 수 없어 답변하지 못했습니다 — 잠시 후 재시도가 필요합니다.",
+}
+
+
+def _h31_refused(status, p, *, content_mode, max_items) -> list[str]:
+    reason = p.get("reason") or ""
+    line = _REFUSAL_THINKING_KO.get(reason)
+    return [line] if line else ["근거가 부족하여 답변을 제공하지 못했습니다."]
+
+
 # --- per-variant dispatch tables ------------------------------------------
 
 _V2_STEPS: dict[str, StepHandler] = {
@@ -365,7 +550,9 @@ _V2_STEPS: dict[str, StepHandler] = {
     "verification": _h_verification,
 }
 
-_V3_1_STEPS: dict[str, StepHandler] = {
+# v3.1 detailed tier — the legacy per-node English narration (dev/debug).
+# Every node is narrated; this is what `verbosity="detailed"` selects.
+_V3_1_DETAILED: dict[str, StepHandler] = {
     "intent_classification": _h_intent_classification,   # shared
     # scenario_routing / multi_hop_expand(skipped) / selective_regenerate(skipped)
     # / memory_inject(no-op) are transparent steps — intentionally not narrated
@@ -387,16 +574,44 @@ _V3_1_STEPS: dict[str, StepHandler] = {
     "selective_regenerate": _h_selective_regenerate,
 }
 
+# v3.1 summary tier — user-meaningful, Korean, outcome-conditioned (default).
+# Nodes absent here (retrieval_plan / evidence_snippet / context_build /
+# prompt_render / claim_decompose / scenario_routing / section_merge /
+# context_budget) are intentionally dropped: internal mechanics with no user
+# signal. `refused` is summary-only (D8 — close the trace on a refusal).
+_V3_1_SUMMARY: dict[str, StepHandler] = {
+    "intent_classification": _h31_intent,
+    "query_understanding": _h31_query_understanding,
+    "retrieval_execute": _h31_retrieval_execute,
+    "retrieval_evaluate": _h31_retrieval_evaluate,
+    "retrieval_recover": _h31_retrieval_recover,
+    "multi_hop_expand": _h31_multi_hop,
+    "memory_inject": _h31_memory_inject,
+    "generation": _h31_generation,
+    "claim_verify": _h31_claim_verify,
+    "selective_regenerate": _h31_selective_regenerate,
+    "refused": _h31_refused,
+}
+
+# Default tier per variant (summary for v3.1). `verbosity="detailed"` overrides
+# via `_RENDERERS_DETAILED`.
 _RENDERERS: dict[str, dict[str, StepHandler]] = {
     "sequential_tool_routed_v2": _V2_STEPS,
-    "hierarchical_corrective_v3_1": _V3_1_STEPS,
+    "hierarchical_corrective_v3_1": _V3_1_SUMMARY,
     "fake_echo_v0": _V2_STEPS,  # minimal; fake echo emits v2-style step names
 }
 
+_RENDERERS_DETAILED: dict[str, dict[str, StepHandler]] = {
+    "hierarchical_corrective_v3_1": _V3_1_DETAILED,
+}
+
 # Union fallback for callers without variant context. v2 and v3.1 step names
-# are mostly disjoint; the few shared names map to the same handler, so the
-# merge is unambiguous.
-_DEFAULT_STEPS: dict[str, StepHandler] = {**_V2_STEPS, **_V3_1_STEPS}
+# are mostly disjoint; v3-only names use the summary tier, while the few shared
+# names (intent_classification / context_build / prompt_render / generation /
+# memory_approved_search) resolve to the v2 English handler so the variant-less
+# default stays backward-compatible. In production openai_compat always passes
+# variant_id, so this union is a fallback only.
+_DEFAULT_STEPS: dict[str, StepHandler] = {**_V3_1_SUMMARY, **_V2_STEPS}
 
 
 def _render_tool(event: AgentEvent) -> list[str]:
@@ -440,6 +655,32 @@ def _fmt_chunks(
     remaining = max(0, len(chunks) - max_items)
     if remaining:
         out.append(f"  … {remaining} more")
+    return out
+
+
+def _fmt_doc_refs(chunks: Iterable[dict], max_items: int) -> str:
+    """Compact one-line document/clause reference list for the summary tier —
+    e.g. "RG 1.206 §C.I.4 · KEPIC-ENB §3.2 외 1건". Prefers section over page;
+    falls back to title/document_id when no section. Scores/hashes are omitted
+    (D5/D6 — content over verdicts)."""
+    chunks = list(chunks)
+    refs: list[str] = []
+    for c in chunks[:max_items]:
+        name = c.get("title") or c.get("document_id") or c.get("chunk_id") or "?"
+        section = c.get("section")
+        page = c.get("page")
+        if section:
+            refs.append(f"{name} §{section}")
+        elif page is not None:
+            refs.append(f"{name} (p.{page})")
+        else:
+            refs.append(str(name))
+    if not refs:
+        return ""
+    out = " · ".join(refs)
+    remaining = max(0, len(chunks) - max_items)
+    if remaining:
+        out += f" 외 {remaining}건"
     return out
 
 

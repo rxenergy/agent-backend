@@ -220,6 +220,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     thinking_expose = bool(settings.thinking_expose)
     content_mode = settings.trace_content_mode
     max_items = int(settings.thinking_max_items)
+    verbosity = settings.thinking_verbosity
 
     if req.stream:
         return StreamingResponse(
@@ -232,6 +233,7 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
                 thinking_expose=thinking_expose,
                 content_mode=content_mode,
                 max_items=max_items,
+                verbosity=verbosity,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -239,7 +241,8 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
 
     if thinking_expose:
         response, thinking_lines = await _run_collecting_thinking(
-            runner, agent_request, content_mode=content_mode, max_items=max_items
+            runner, agent_request, content_mode=content_mode,
+            max_items=max_items, verbosity=verbosity,
         )
     else:
         response = await runner.run(agent_request)
@@ -352,6 +355,7 @@ async def _run_collecting_thinking(
     *,
     content_mode: str,
     max_items: int,
+    verbosity: str = "summary",
 ):
     """Drive `run_stream()` non-streaming side: return the final AgentResponse
     plus the list of human-readable thinking lines accumulated from step/tool
@@ -390,7 +394,7 @@ async def _run_collecting_thinking(
         _flush_reasoning()
         lines = render_thinking(
             event, variant_id=variant_id,
-            content_mode=content_mode, max_items=max_items,
+            content_mode=content_mode, max_items=max_items, verbosity=verbosity,
         )
         thinking.extend(lines)
     _flush_reasoning()
@@ -409,6 +413,7 @@ async def _sse_stream_from_runner(
     thinking_expose: bool = True,
     content_mode: str = "metadata",
     max_items: int = 3,
+    verbosity: str = "summary",
 ) -> AsyncIterator[bytes]:
     """Translate `runner.run_stream()` events into OpenAI chat.completion.chunk
     SSE frames.
@@ -456,6 +461,7 @@ async def _sse_stream_from_runner(
                     for line in render_thinking(
                         event, variant_id=runner.spec.variant_id,
                         content_mode=content_mode, max_items=max_items,
+                        verbosity=verbosity,
                     ):
                         yield _frame(
                             interaction_id=interaction_id,

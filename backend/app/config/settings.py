@@ -169,6 +169,11 @@ class Settings(BaseSettings):
 
     # OpenAI-compatible thinking surface (workflow → reasoning_content / <think>)
     thinking_expose: bool = True
+    # Narration tier for the thinking surface (thinking_renderer):
+    #   "summary"  — user-meaningful, Korean, outcome-conditioned (default)
+    #   "detailed" — legacy per-node English narration (dev/debug)
+    #   "off"      — no workflow narration (LLM reasoning still passes through)
+    thinking_verbosity: Literal["summary", "detailed", "off"] = "summary"
     # Per-step preview cap (top-N chunks / hits / citations shown in thinking).
     thinking_max_items: int = 3
 
