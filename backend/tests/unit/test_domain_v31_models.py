@@ -58,7 +58,7 @@ def test_retrieval_plan_construction():
         strategies=(RetrievalStrategy(name="search_hybrid"),),
         plan_hash="abc123",
     )
-    assert plan.fusion == "rrf"
+    assert plan.fusion == "rerank"  # v3.1 — RRF 제거, reranker 가 순위 권위.
     assert plan.strategies[0].name == "search_hybrid"
 
 

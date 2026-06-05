@@ -203,10 +203,11 @@ class HierarchicalCorrectiveRunner:
         self._fetch_k = max(retrieval_fetch_k, retriever_top_k)
         self._active_cells_mode = active_cells_mode
         self._llm_call_budget = llm_call_budget
-        # Node 4/5 — 룰 기반 planner + 다전략 RRF dispatcher. planner 미주입 시
-        # 단일 hybrid 폴백. dispatcher 는 tool_executor 위의 얇은 래퍼.
+        # Node 4/5 — 룰 기반 planner + reranker dispatcher. planner 미주입 시
+        # 단일 hybrid 폴백. dispatcher 는 tool_executor 위의 얇은 래퍼로, 1차 검색
+        # 후보 풀을 cross-encoder reranker(retriever.rerank)로 재정렬한다(RRF 제거).
         self._planner = retrieval_planner or RetrievalPlanner.default()
-        self._dispatcher = RetrievalDispatcher(tool_executor, rrf_k=self._planner.rrf_k)
+        self._dispatcher = RetrievalDispatcher(tool_executor)
         # Node 6 — 5-신호 evaluator. regulatory hard gate 강제 여부는
         # opensearch_schema_version=="v2" 에 연동(profiles 에서 주입).
         self._evaluator = retrieval_evaluator or RetrievalEvaluator.default()
@@ -565,9 +566,9 @@ class HierarchicalCorrectiveRunner:
                 # 실제 실행된 전략으로 plan 을 확정(감사 trace 에 전략명 명시).
                 if dispatch.executed:
                     plan = replace(plan, strategies=tuple(dispatch.executed))
-                # 융합 순서가 권위(RRF rank). raw score 로 재필터하지 않는다(계약).
-                # 깊은 fetch 풀에서 상위 top_k 만 다운스트림으로.
-                pool = dispatch.fused_chunks
+                # reranker 순위가 권위(rerank rank). raw score 로 재필터하지 않는다(계약).
+                # 깊은 fetch 풀을 rerank 한 뒤 상위 top_k 만 다운스트림으로.
+                pool = dispatch.ranked_chunks
                 chunks = pool[: self._top_k]
                 if not chunks:
                     return await self._refuse(
@@ -612,7 +613,7 @@ class HierarchicalCorrectiveRunner:
                     query_text=request.query_text,
                     entities=entities,
                     version_constraint=query_plan.version_constraint,
-                    rrf_scores=dispatch.rrf_scores,
+                    rerank_scores=dispatch.rerank_scores,
                     regulatory_enforced=self._regulatory_enforced,
                 )
                 num_pass = sum(1 for sig in evaluation.per_chunk
@@ -692,13 +693,13 @@ class HierarchicalCorrectiveRunner:
                         rs.set_attribute("recover.aborted", True)
                         break
                     for r in dispatch.tool_results:
-                        record(r)  # 복구 라운드의 재검색도 tool_calls 에 기록(재현성).
-                    pool = dispatch.fused_chunks
+                        record(r)  # 복구 라운드의 재검색·rerank 도 tool_calls 에 기록(재현성).
+                    pool = dispatch.ranked_chunks
                     chunks = pool[: self._top_k]
                     evaluation = self._evaluator.evaluate(
                         chunks, query_text=request.query_text, entities=cur_entities,
                         version_constraint=query_plan.version_constraint,
-                        rrf_scores=dispatch.rrf_scores,
+                        rerank_scores=dispatch.rerank_scores,
                         regulatory_enforced=self._regulatory_enforced,
                     )
                     rs.set_attribute("recover.outcome", evaluation.overall_decision)
@@ -1489,7 +1490,7 @@ class HierarchicalCorrectiveRunner:
                     )
                     total -= before - self._chunk_tokens(chunks[i])
                     budget_log.append(f"demote:{c.chunk_id}")
-        # 2) 최하위(tail = 낮은 RRF / hop)부터 drop.
+        # 2) 최하위(tail = 낮은 rerank / hop)부터 drop.
         while total > budget and len(chunks) > 1:
             dropped = chunks.pop()
             total -= self._chunk_tokens(dropped)

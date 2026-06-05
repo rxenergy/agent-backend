@@ -25,18 +25,20 @@ class RetrievalPlanner:
         *,
         default_strategies: list[str],
         rules: list[dict[str, Any]],
-        fusion: str = "rrf",
+        fusion: str = "rerank",
         rrf_k: int = 60,
     ) -> None:
         self._default = default_strategies or ["hybrid"]
         self._rules = rules or []
+        # v3.1 RRF 제거 후 fusion 은 plan 메타(기본 "rerank") — dispatcher 는 reranker
+        # 로 순위를 정한다. rrf_k 는 하위호환 시그니처로만 남는다(미사용).
         self._fusion = fusion
         self.rrf_k = rrf_k
 
     @classmethod
     def default(cls) -> "RetrievalPlanner":
         """룰 없는 단일 hybrid planner (테스트/폴백)."""
-        return cls(default_strategies=["hybrid"], rules=[], fusion="rrf", rrf_k=60)
+        return cls(default_strategies=["hybrid"], rules=[], fusion="rerank")
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "RetrievalPlanner":
@@ -44,7 +46,7 @@ class RetrievalPlanner:
         return cls(
             default_strategies=list(body.get("default_strategies") or ["hybrid"]),
             rules=list(body.get("rules") or []),
-            fusion=str(body.get("fusion") or "rrf"),
+            fusion=str(body.get("fusion") or "rerank"),
             rrf_k=int(body.get("rrf_k", 60)),
         )
 

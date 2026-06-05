@@ -26,6 +26,7 @@ from app.adapters.tools.document_opensearch import (
 from app.adapters.tools.memory_approved_stub import ApprovedSearchStubTool
 from app.adapters.tools.memory_session_local import SessionLoadTool, SessionUpdateTool
 from app.adapters.tools.opensearch_preflight import OpenSearchPreflight
+from app.adapters.tools.reranker_local import LocalRerankerTool
 from app.adapters.tools.retriever_local import LocalRetrieverTool
 from app.adapters.tools.retriever_opensearch import OpenSearchRetrieverTool
 from app.application.preflight.port import PreflightCheck
@@ -440,6 +441,9 @@ async def build_container(settings: Settings) -> AppContainer:
             ),
             "retrieval.normalize": RetrievalNormalizeTool(),
             "submit_verdict": SubmitVerdictTool(),
+            # v3.1 Node 5 reranker — 현재 local fake 단독(실 cross-encoder 는 후속
+            # Phase). opensearch 경로도 동일 fake 로 재정렬 → RRF 제거 후 순위 권위.
+            "retriever.rerank": LocalRerankerTool(),
             "document.resolve_citation": document_tool,
             "document.fetch_section": fetch_section_tool,
             "memory.session_load": SessionLoadTool(session_store),
