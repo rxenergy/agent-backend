@@ -122,10 +122,10 @@ def _make_runner(
     corpus_map=None, scope_tau_high: float = 0.6, scope_tau_low: float = 0.3,
     scope_min_token_count: int = 0, fetch_section_tool=None,
     context_token_budget: int = 0, section_merge_max_chunks: int = 50,
-    classifier=None,
+    classifier=None, active_cells_mode: str = "all", scenarios=None,
 ) -> tuple[HierarchicalCorrectiveRunner, FilesystemEventSink]:
     prompts = tmp / "prompts"
-    build_prompts(prompts)
+    build_prompts(prompts, scenarios=scenarios)
     registry = ToolRegistry.from_yaml(_tool_registry_yaml(tmp))
     sink = FilesystemEventSink(root=str(tmp / "events"), prefix="t")
     recorder = EventRecorder(sink, app_profile="local")
@@ -143,6 +143,10 @@ def _make_runner(
     }
     executor = ToolExecutor(registry=registry, tools=tools, event_sink=sink)
     llm_router = LLMRouter(pool={"fake-echo": llm or FakeEchoLLM(model_id="fake-echo")}, default_id="fake-echo")
+    # Node 3 정보 요구 프롬프트 source — 실 repo prompts/ 에서 로드(registry sha 검증
+    # 도 함께 탄다). 프롬프트가 코드 인라인이 아님을 테스트도 강제한다.
+    from app.application.prompting.information_need_source import InformationNeedPromptSource
+    information_need_source = InformationNeedPromptSource(_CONTRACT.parents[1])
     runner = HierarchicalCorrectiveRunner(
         spec=_SPEC,
         llm_router=llm_router,
@@ -163,6 +167,8 @@ def _make_runner(
         scope_min_token_count=scope_min_token_count,
         context_token_budget=context_token_budget,
         section_merge_max_chunks=section_merge_max_chunks,
+        active_cells_mode=active_cells_mode,
+        information_need_source=information_need_source,
     )
     return runner, sink
 
@@ -1151,3 +1157,249 @@ async def test_section_merge_evidence_reaches_verifier_with_claims_on() -> None:
         assert rec["section_merge_policy_hash"]
         promoted = [s for s in rec["per_chunk_signals"] if s.get("promote")]
         assert promoted and promoted[0]["chunk_id"] == "W_c0001"
+
+
+class _ScopeClassifier:
+    """scope_tier/intent 를 명시 산출하는 테스트용 분류기(LLM 분류기 대역).
+    Node 2 scope 라우팅 분기(T3 메타 / T4 OUT_OF_SCOPE / T1 정상)를 검증한다."""
+
+    backend = "llm"
+    policy_hash = "fake_scope"
+
+    def __init__(self, *, scope_tier: str, intent: str = "definition",
+                 scenario_object: str = "O4", scenario_depth: str = "D2") -> None:
+        self._tier = scope_tier
+        self._intent = intent
+        self._so = scenario_object
+        self._sd = scenario_depth
+
+    async def classify(self, query_text, chat_history=()):
+        from app.domain.classification import ClassificationResult
+
+        return ClassificationResult(
+            scenario_object=self._so, scenario_depth=self._sd, entities={},
+            confidence=0.8, object_confidence=0.8, depth_confidence=0.8,
+            classifier_backend=self.backend, classifier_policy_hash=self.policy_hash,
+            intent=self._intent, scope_tier=self._tier,
+        )
+
+
+def _read_event(tmp: Path) -> dict:
+    events_root = Path(tmp) / "events" / "t" / "interaction_events"
+    line = next(events_root.rglob("*.jsonl")).read_text(encoding="utf-8").splitlines()[0]
+    return json.loads(line)
+
+
+@pytest.mark.asyncio
+async def test_scope_tier_t3_meta_short_circuits_without_retrieval() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), classifier=_ScopeClassifier(scope_tier="T3", intent="meta"),
+        )
+        req = AgentRequest(interaction_id="m1", query_text="너는 뭘 할 수 있어?", session_id="s1")
+        resp = await runner.run(req)
+
+        # 메타 응답: 거부 아님, 인용 없음, 검색 미수행.
+        assert resp.refusal_reason is None
+        assert resp.citations == ()
+        assert resp.scope_tier == "T3"
+        assert resp.classifier_intent == "meta"
+        assert "SMR" in resp.answer_text
+        rec = _read_event(Path(tmp))
+        assert rec["scope_tier"] == "T3"
+        assert rec["classifier_intent"] == "meta"
+        # 검색 도구 호출이 없어야 한다(retriever.search 미기록).
+        assert all(tc["name"] != "retriever.search" for tc in rec["tool_calls"])
+
+
+@pytest.mark.asyncio
+async def test_scope_tier_t4_refuses_out_of_scope() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), classifier=_ScopeClassifier(scope_tier="T4", intent="unknown"),
+        )
+        req = AgentRequest(interaction_id="o1", query_text="오늘 날씨 어때?", session_id="s1")
+        resp = await runner.run(req)
+
+        assert resp.refusal_reason == "out_of_scope"
+        assert resp.citations == ()
+        assert resp.scope_tier == "T4"
+        rec = _read_event(Path(tmp))
+        assert rec["refusal_reason"] == "out_of_scope"
+        assert rec["error_code"] == "out_of_scope"
+        assert rec["scope_tier"] == "T4"
+
+
+@pytest.mark.asyncio
+async def test_scope_tier_t1_proceeds_to_normal_path_and_records_signals() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), llm=_ClaimAwareLLM(entailment_status="supported"),
+            classifier=_ScopeClassifier(scope_tier="T1", intent="causal"),
+        )
+        req = AgentRequest(interaction_id="t1", query_text="APR1400 안전계통", session_id="s1")
+        resp = await runner.run(req)
+
+        # 정상 검색·답변 경로 — scope_tier/intent 가 event 에 기록된다.
+        assert resp.scope_tier == "T1"
+        assert resp.classifier_intent == "causal"
+        rec = _read_event(Path(tmp))
+        assert rec["scope_tier"] == "T1"
+        assert rec["classifier_intent"] == "causal"
+        assert any(tc["name"] == "retriever.search" for tc in rec["tool_calls"])
+
+
+@pytest.mark.asyncio
+async def test_inactive_cell_downgrades_instead_of_unsupported_refusal() -> None:
+    # is_active 정교화(taxonomy plan W-S2): top_priority 모드에서 비핵심 셀(O1×D1,
+    # TOP_PRIORITY 밖)이라도 scope_tier=T1/T2 면 UNSUPPORTED_SCENARIO 로 일률 거부하지
+    # 않고 정상 경로로 강등 진행한다. (이전 동작=거부 → 회귀 가드.)
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), llm=_ClaimAwareLLM(entailment_status="supported"),
+            active_cells_mode="top_priority",
+            scenarios=[("O1", "D2"), ("O4", "D2"), ("O1", "D1")],
+            classifier=_ScopeClassifier(
+                scope_tier="T1", intent="enumerate",
+                scenario_object="O1", scenario_depth="D1",
+            ),
+        )
+        req = AgentRequest(interaction_id="dg1", query_text="FSAR 구성", session_id="s1")
+        resp = await runner.run(req)
+
+        # 비활성 셀이지만 거부되지 않고 검색·답변 경로로 진행.
+        assert resp.refusal_reason != "unsupported_scenario"
+        rec = _read_event(Path(tmp))
+        assert rec["error_code"] != "inactive_cell"
+        assert any(tc["name"] == "retriever.search" for tc in rec["tool_calls"])
+
+
+@pytest.mark.asyncio
+async def test_live_intent_threads_into_plan_and_information_need_recorded() -> None:
+    # Node 3 모델 기반 정보 요구(문서 §4) — 두 가지를 end-to-end 로 검증:
+    #  (1) Node 1 live intent(comparison)가 query_plan.intents 로 흘러 Node 4
+    #      planner 의 intent-keyed 룰을 *실제로* 발동(이전엔 버려져 항상 default).
+    #  (2) 모델 산출 정보 요구(method/슬롯/intents)가 event 에 기록된다(기록 전용).
+    from app.application.retrieval.planner import RetrievalPlanner
+
+    planner = RetrievalPlanner(
+        default_strategies=["hybrid"],
+        rules=[{
+            "id": "comparison_multi_strategy",
+            "when": {"intents_any": ["comparison"]},
+            "strategies": ["hybrid", "bm25"],
+        }],
+        fusion="rrf", rrf_k=60,
+    )
+    # 분류기 entities={} 이므로 planner 의 entity_hash 도 {} 기준 — 기대 해시를
+    # 동일 입력으로 직접 재계산해 runner 의 plan 이 intent 를 소비했음을 증명.
+    plan_with = planner.plan(
+        scenario_object="O4", scenario_depth="D2", entities={}, intents=("comparison",))
+    plan_without = planner.plan(
+        scenario_object="O4", scenario_depth="D2", entities={}, intents=())
+    assert plan_with.rule_id == "comparison_multi_strategy"
+    assert plan_without.rule_id == "default"
+    assert plan_with.plan_hash != plan_without.plan_hash
+
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp),
+            llm=_ClaimAwareLLM(entailment_status="supported"),
+            retrieval_planner=planner,
+            classifier=_ScopeClassifier(
+                scope_tier="T1", intent="comparison",
+                scenario_object="O4", scenario_depth="D2"),
+        )
+        req = AgentRequest(interaction_id="n3", query_text="APR1400 vs i-SMR 비교",
+                           session_id="s1")
+        resp = await runner.run(req)
+        assert resp.refusal_reason is None
+
+        rec = _read_event(Path(tmp))
+        qu = rec["query_understanding"]
+        # (1) intent 가 plan.intents 로 threaded → planner 가 comparison 룰 채택.
+        assert qu["intents"] == ["comparison"]
+        assert rec["retrieval_plan_hash"] == plan_with.plan_hash
+        # (2) 모델 정보 요구 기록 — fake LLM 은 JSON 미반환이라 fallback(prior 슬롯).
+        assert qu["instantiation_method"] == "fallback"
+        assert qu["required_slots"] == ["comparison_dimension", "requirement_text"]
+        assert qu["information_need_hash"]
+        # fallback 은 LLM 산출이 아니므로 decompose_prompt_hash 부재(invariant).
+        assert qu["decompose_prompt_hash"] is None
+
+
+class _NeedAwareLLM:
+    """Node 3 information_need 프롬프트엔 *요구 JSON*(version_constraint·sub_questions
+    포함)을, 그 외엔 decompose/entailment/generation 을 돌려주는 controllable fake.
+    Node 3 의 *LLM 성공 경로*(production 경로)를 runner end-to-end 로 노출한다 —
+    fallback 만 타던 기존 테스트의 사각을 메운다(advisor)."""
+
+    model_id = "need-aware"
+
+    def __init__(self, *, version_constraint: str = "2024-06-01") -> None:
+        self._vc = version_constraint
+
+    async def generate(self, prompt, *, model_options=None, grammar=None):
+        from app.ports.llm import LLMResult
+
+        # 순서 주의: Node 3 프롬프트엔 "정보 요구"와 "분해"가 둘 다 있으므로
+        # "정보 요구"를 *먼저* 검사. entailment 는 "분해"보다 먼저.
+        if "정보 요구" in prompt:  # Node 3 information_need
+            text = json.dumps({
+                "required_slots": [
+                    {"name": "governing_clause", "required": True},
+                    {"name": "effective_version", "required": True},
+                ],
+                "sub_questions": ["ECCS 요건은?", "발효 개정일은?"],
+                "version_constraint": self._vc,
+                "multi_intent": True,
+            })
+        elif "supported/contradicted" in prompt:  # Node 15 entailment
+            text = json.dumps({"verdicts": [
+                {"claim_id": "cl-0", "status": "supported", "score": 0.95}]})
+        elif "분해" in prompt:  # Node 14 decompose
+            text = json.dumps({"claims": [
+                {"id": "cl-0", "text": "i-SMR ECCS는 수동 냉각을 사용한다",
+                 "cite_marker": "cite-0"}]})
+        else:  # generation
+            text = "i-SMR ECCS는 수동 냉각을 사용한다 [cite-0]."
+        return LLMResult(text=text, token_usage={"prompt_tokens": 1, "completion_tokens": 1},
+                         model_id=self.model_id)
+
+    async def generate_stream(self, prompt, *, model_options=None, grammar=None):
+        from app.ports.llm import LLMTokenDelta
+
+        r = await self.generate(prompt, model_options=model_options, grammar=grammar)
+        yield LLMTokenDelta(content=r.text)
+        yield LLMTokenDelta(finish_reason="stop", token_usage=dict(r.token_usage),
+                            model_id=r.model_id)
+
+
+@pytest.mark.asyncio
+async def test_node3_llm_success_path_threads_subquestions_and_version() -> None:
+    # Node 3 LLM 성공 경로(production) — fallback 이 아닌 *모델 산출* 이 sub_questions·
+    # version_constraint 를 채우고, 그게 다운스트림에서 spurious refusal 없이 흘러
+    # event 에 실린다. version_constraint 가 채워져도 v1 은 effective_on=null →
+    # version_conflict=None → FAIL 없음(검증된 무해성).
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), llm=_NeedAwareLLM(version_constraint="2024-06-01"),
+            classifier=_ScopeClassifier(scope_tier="T1", intent="compliance"),
+        )
+        req = AgentRequest(interaction_id="n3llm",
+                           query_text="i-SMR ECCS 준수 요건과 발효일은?", session_id="s1")
+        resp = await runner.run(req)
+
+        # version_constraint 가 채워졌어도 거부되지 않고 완주(v1 inert 경험적 확인).
+        assert resp.refusal_reason is None
+        rec = _read_event(Path(tmp))
+        qu = rec["query_understanding"]
+        assert qu["instantiation_method"] == "llm"
+        assert qu["sub_question_count"] == 2
+        assert qu["version_constraint"] == "2024-06-01"
+        assert qu["multi_intent"] is True
+        assert qu["required_slots"] == ["governing_clause", "effective_version"]
+        # LLM 성공이므로 decompose_prompt_hash 존재(invariant: 존재=LLM 호출).
+        assert qu["decompose_prompt_hash"]
+        # Node 3 need + generation + decompose + entailment = 4 LLM calls.
+        assert rec["budget"]["llm_calls_used"] == 4

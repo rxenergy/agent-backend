@@ -40,11 +40,12 @@ from app.application.agents.llm_router import LLMRouter
 from app.application.agents.registry import AgentDeps, VariantRegistry
 from app.ports.agent_runner import AgentRunner
 from app.application.classification.hybrid import HybridClassifier
-from app.application.classification.llm import LLMClassifier
 from app.application.classification.rule import RuleClassifier
 from app.application.memory.summarizer import ConversationSummarizer
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
+from app.application.prompting.classification_source import ClassificationPromptSource
+from app.application.prompting.information_need_source import InformationNeedPromptSource
 from app.application.prompting.hybrid_source import HybridPromptSource
 from app.application.prompting.local_source import LocalPromptSource
 from app.application.prompting.phoenix_source import (
@@ -249,6 +250,7 @@ async def build_container(settings: Settings) -> AppContainer:
     prompt_renderer: PromptRenderer | None = None
     context_builder: ContextBuilder | None = None
     classifier: Any = None
+    classification_prompt_source: Any = None
     summarizer: ConversationSummarizer | None = None
     retrieval_planner: Any = None
     retrieval_evaluator: Any = None
@@ -426,14 +428,24 @@ async def build_container(settings: Settings) -> AppContainer:
         }
         tool_executor = ToolExecutor(registry=registry, tools=tools, event_sink=event_sink)
 
+        # 분류 프롬프트 source(registry 호스팅) — boot 시 fragment sha 검증(fail-fast).
+        # llm/hybrid backend 와 v3.1 전용 바인딩이 공유한다(인라인 _PROMPT 대체).
+        classification_prompt_source = ClassificationPromptSource(
+            Path(settings.prompt_local_dir)
+        )
+        # Node 3 정보 요구 프롬프트 source(registry 호스팅) — 분류와 동일 fail-fast
+        # sha 검증. 프롬프트는 코드 인라인이 아니라 registry 에서 관리된다.
+        information_need_prompt_source = InformationNeedPromptSource(
+            Path(settings.prompt_local_dir)
+        )
         if settings.classifier_backend == "rule":
             classifier = RuleClassifier()
         elif settings.classifier_backend == "llm":
-            classifier = LLMClassifier(utility_llm)
+            classifier = classification_prompt_source.build_classifier(utility_llm)
         else:
             classifier = HybridClassifier(
                 RuleClassifier(),
-                LLMClassifier(utility_llm),
+                classification_prompt_source.build_classifier(utility_llm),
                 escalate_below=settings.classifier_escalate_below,
             )
 
@@ -459,6 +471,8 @@ async def build_container(settings: Settings) -> AppContainer:
         prompt_renderer=prompt_renderer,
         context_builder=context_builder,
         classifier=classifier,
+        classification_prompt_source=classification_prompt_source,
+        information_need_prompt_source=information_need_prompt_source,
         summarizer=summarizer,
         retrieval_planner=retrieval_planner,
         retrieval_evaluator=retrieval_evaluator,

@@ -38,6 +38,13 @@ class AgentDeps:
     prompt_renderer: "PromptRenderer | None" = None
     context_builder: "ContextBuilder | None" = None
     classifier: Any = None
+    # Node 1 분류 프롬프트 source(registry 호스팅). v3.1 은 settings.classifier_backend
+    # 와 무관하게 이 source 로 LLM 분류기를 강제 구성한다(variant 격리, 원칙 1).
+    # None 이면 변형이 deps.classifier(settings 기반) 폴백.
+    classification_prompt_source: Any = None
+    # v3.1 Node 3 정보 요구 인스턴스화 프롬프트 source(registry 호스팅, sha 핀).
+    # None 이면 변형이 Node 3 에서 부트 배선 오류로 처리(프롬프트는 코드 인라인 금지).
+    information_need_prompt_source: Any = None
     summarizer: "ConversationSummarizer | None" = None
     # v3.1 (hierarchical_corrective) Node 4 룰 기반 plan 선택기. None 이면
     # 변형이 단일 hybrid 폴백(RetrievalPlanner.default)을 쓴다.
