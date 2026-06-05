@@ -107,6 +107,20 @@ query_understanding_prompts:
     output_schema: {path: query_understanding/schemas/information_need_v1.json,  version: v1, sha256: "86c0788c2edd4bdcd01621cbb56ed2e1e80c702f9163b804c7ded7c13713b93d"}
     model_options: {temperature: 0.0, max_tokens: 400}
 
+# agentic_finder N0 query_translate(질의 번역) 프롬프트 (agentic_finder_workflow.v1).
+#   워크플로우 내부(분류·answer_spec·Finder 검색)는 영어 코퍼스를 대상으로 하므로
+#   사용자 질의를 검색용 영어(query_en)로 번역하고 원 언어(source_language)를 식별한다.
+#   분류/answer_spec 과 동일 registry sha 핀·fail-fast — `QueryTranslatePromptSource`
+#   (backend/app/application/prompting/query_translate_source.py)가 boot 시 fragment
+#   바이트를 재해시해 대조한다(무단 편집 차단, 원칙 5). policy_hash(번역 정책 핀)는
+#   이 prompt fragment 의 sha. output_schema 는 guided-decoding(json_schema)에 쓰인다.
+query_translate_prompts:
+  query_translate_v1:
+    profile_version: v1
+    prompt:        {path: query_translate/query_translate_v1.md,            version: v1, sha256: "5f11a9c6053e31dc9232c22ad78b32ad270802892656cdd191d0453bd69cf4b4"}
+    output_schema: {path: query_translate/schemas/query_translate_v1.json,  version: v1, sha256: "738290b9bc805dd6c562406d2fe82ff65cc4c5f252e7a891f25cf0f668205829"}
+    model_options: {temperature: 0.0, max_tokens: 400}
+
 # agentic_finder N2 answer_spec(답변 사양) 프롬프트 (agentic_finder_workflow.v1).
 #   분류/정보요구 프롬프트와 동일 registry 에서 sha 핀·버전 관리한다. 코드 인라인
 #   금지 — `AnswerSpecPromptSource`(backend/app/application/prompting/answer_spec_source.py)

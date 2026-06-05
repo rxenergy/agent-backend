@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "query_en": {
+      "type": "string",
+      "description": "Search-ready English translation of the user query (translation only; no paraphrase/answer)."
+    },
+    "source_language": {
+      "type": "string",
+      "description": "English name of the original query's language (e.g. Korean, English)."
+    }
+  },
+  "required": ["query_en", "source_language"],
+  "additionalProperties": false
+}
