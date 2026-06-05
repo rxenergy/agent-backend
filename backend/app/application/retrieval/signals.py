@@ -4,10 +4,11 @@ import re
 
 from app.domain.retrieval import RetrievedChunk
 
-# v3.1 Node 6 — 5-신호(G1–G5) 계산기. 전부 순수·결정론·부수효과 없음
-# (docs/plans/hierarchical_corrective_workflow.v1.md §6.1). 모델 의존 신호
-# (G2 cross-encoder)는 PR-5 미구현 — semantic_signal 은 0.0 을 돌려주고 정책
-# weight 0 으로 비활성. 평가자가 신호를 결합/게이팅한다(evaluator.py).
+# v3.1 Node 6 — 신호 계산기. 전부 순수·결정론·부수효과 없음
+# (docs/plans/hierarchical_corrective_workflow.v1.md §6.1). G2 semantic 신호는
+# Node 5 reranker(cross-encoder) 점수를 정규화해 공급한다(semantic_signal). RRF
+# 가 사라지면서 G4 ensemble(cross-strategy agreement)은 폐기됐다. 평가자가 신호를
+# 결합/게이팅한다(evaluator.py).
 
 _WORD = re.compile(r"[0-9a-zA-Z가-힣]+")
 
@@ -90,16 +91,17 @@ def regulatory_signal(
     return sum(parts) / len(parts)
 
 
-# --- G4 Ensemble Agreement --------------------------------------------------
+# --- G2 Semantic (cross-encoder reranker) -----------------------------------
 
 
-def ensemble_signal(chunk_id: str, rrf_scores: dict[str, float], max_rrf: float) -> float:
-    """cross-strategy agreement — RRF 점수를 풀 내 최댓값으로 정규화. 여러
-    전략이 같은 chunk 를 올리면 RRF 가 높다. 단일 전략 경로에선 순위 단조라
-    변별력이 거의 없음(정책 weight 로 보정)."""
-    if max_rrf <= 0:
+def semantic_signal(chunk_id: str, rerank_scores: dict[str, float], max_rerank: float) -> float:
+    """cross-encoder reranker 점수를 풀 내 최댓값으로 정규화한 [0,1] 신호. RRF 의
+    cross-strategy agreement(G4)를 대체한다 — reranker 는 질의-문서 쌍을 직접 채점해
+    semantic relevance 를 주므로, 다전략 합의 대용이던 ensemble 보다 직접적이다.
+    풀에 점수가 없으면(reranker degrade) 0.0 → 정책이 lexical/regulatory 로 게이팅."""
+    if max_rerank <= 0:
         return 0.0
-    return min(1.0, rrf_scores.get(chunk_id, 0.0) / max_rrf)
+    return min(1.0, rerank_scores.get(chunk_id, 0.0) / max_rerank)
 
 
 # --- G5 Confidence Calibration (overall) ------------------------------------

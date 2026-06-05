@@ -30,7 +30,7 @@ def test_clean_positive_passes():
                authority_tier="secondary", clause_id="RG_1_157", jurisdiction="NRC")
     res = ev.evaluate(
         [c], query_text="i-SMR ECCS RG 1.157",
-        entities={"reactor_type": ["i-SMR"]}, rrf_scores={"c1": 0.016},
+        entities={"reactor_type": ["i-SMR"]}, rerank_scores={"c1": 0.016},
         regulatory_enforced=True,
     )
     assert res.per_chunk[0].decision == GateDecision.PASS.value
@@ -48,7 +48,7 @@ def test_version_conflict_fails():
                authority_tier="primary", effective_on="2019-01-01")
     res = ev.evaluate(
         [c], query_text="ECCS i-SMR design", entities={},
-        version_constraint="2024-06-01", rrf_scores={"c1": 0.016},
+        version_constraint="2024-06-01", rerank_scores={"c1": 0.016},
         regulatory_enforced=True,
     )
     assert res.per_chunk[0].hard_gates_passed is False
@@ -65,7 +65,7 @@ def test_tertiary_under_enforcement_fails():
                authority_tier="tertiary")
     res = ev.evaluate(
         [c], query_text="NuScale vendor ECCS submission", entities={},
-        rrf_scores={"c1": 0.016}, regulatory_enforced=True,
+        rerank_scores={"c1": 0.016}, regulatory_enforced=True,
     )
     assert res.per_chunk[0].hard_gates_passed is False
     assert res.per_chunk[0].decision == GateDecision.FAIL.value
@@ -79,7 +79,7 @@ def test_tertiary_allowed_when_not_enforced():
                authority_tier="tertiary")
     res = ev.evaluate(
         [c], query_text="NuScale vendor ECCS submission", entities={},
-        rrf_scores={"c1": 0.016}, regulatory_enforced=False,
+        rerank_scores={"c1": 0.016}, regulatory_enforced=False,
     )
     assert res.per_chunk[0].hard_gates_passed is True
     assert res.regulatory_enforced is False
@@ -94,7 +94,7 @@ def test_low_entity_coverage_fails():
     c = _chunk(text="i-SMR ECCS passive design", authority_tier="secondary")
     res = ev.evaluate(
         [c], query_text="i-SMR ECCS", entities={"reactor_type": ["NuScale"]},
-        rrf_scores={"c1": 0.016}, regulatory_enforced=False,
+        rerank_scores={"c1": 0.016}, regulatory_enforced=False,
     )
     assert res.per_chunk[0].entity_coverage == 0.0
     assert res.per_chunk[0].hard_gates_passed is False
@@ -113,7 +113,7 @@ def test_v1_unknown_regulatory_is_pass_eligible_but_flagged():
                authority_tier="secondary")
     res = ev.evaluate(
         [c], query_text="i-SMR ECCS passive cooling design",
-        entities={"reactor_type": ["i-SMR"]}, rrf_scores={"c1": 0.016},
+        entities={"reactor_type": ["i-SMR"]}, rerank_scores={"c1": 0.016},
         regulatory_enforced=False,
     )
     assert res.per_chunk[0].decision == GateDecision.PASS.value
@@ -126,12 +126,12 @@ def test_v1_unknown_regulatory_is_pass_eligible_but_flagged():
 def test_per_sq_weak_when_only_weak_chunks():
     ev = _ev()
     # 결정론적 WEAK 고정: query 5토큰{i,smr,eccs,passive,design} 중 본문은 2개만
-    # 매칭 → lexical 0.4. tier 없음 → s_reg 0. 단일 chunk → s_ens 1.0.
+    # 매칭 → lexical 0.4. tier 없음 → s_reg 0. 단일 chunk → s_sem(rerank) 1.0.
     # S_total = 0.40·0.4 + 0.40·0 + 0.20·1.0 = 0.36 ∈ [τ_weak .3, τ_pass .5) → WEAK.
     c = _chunk(text="passive design", authority_tier=None)
     res = ev.evaluate(
         [c], query_text="i-SMR ECCS passive design", entities={},
-        rrf_scores={"c1": 0.016}, regulatory_enforced=False,
+        rerank_scores={"c1": 0.016}, regulatory_enforced=False,
     )
     assert res.per_chunk[0].s_lex == 0.4
     assert res.per_chunk[0].decision == GateDecision.WEAK.value
@@ -143,10 +143,10 @@ def test_policy_hash_deterministic_and_present():
     a = _ev()
     b = _ev()
     assert a.policy_hash == b.policy_hash
-    res = a.evaluate([_chunk(text="x")], query_text="x", entities={}, rrf_scores={})
+    res = a.evaluate([_chunk(text="x")], query_text="x", entities={}, rerank_scores={})
     assert res.evaluator_policy_hash == a.policy_hash
 
 
 def test_empty_chunks_overall_fail():
-    res = _ev().evaluate([], query_text="q", entities={}, rrf_scores={})
+    res = _ev().evaluate([], query_text="q", entities={}, rerank_scores={})
     assert res.overall_decision == GateDecision.FAIL.value

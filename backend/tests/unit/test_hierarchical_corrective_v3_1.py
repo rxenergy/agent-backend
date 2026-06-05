@@ -85,6 +85,7 @@ def _tool_registry_yaml(root: Path) -> Path:
     body = {
         "tools": {
             "retriever.search": {"version": "v1", "adapter": "local", "timeout_ms": 5000, "retry": 1, "required": True},
+            "retriever.rerank": {"version": "v1", "adapter": "local", "timeout_ms": 3000, "retry": 0, "required": False},
             "document.resolve_citation": {"version": "v1", "adapter": "local", "timeout_ms": 2000, "retry": 0, "required": True},
             "document.fetch_section": {"version": "v1", "adapter": "local", "timeout_ms": 3000, "retry": 0, "required": False},
             "memory.session_load": {"version": "v1", "adapter": "postgres", "timeout_ms": 1000, "retry": 0, "required": False},
@@ -131,8 +132,10 @@ def _make_runner(
     recorder = EventRecorder(sink, app_profile="local")
     store = InMemorySessionMemoryStore()
     from app.adapters.tools.document_local import LocalDocumentFetchSectionTool
+    from app.adapters.tools.reranker_local import LocalRerankerTool
     tools = {
         "retriever.search": retriever_tool or LocalRetrieverTool(),
+        "retriever.rerank": LocalRerankerTool(),
         "document.resolve_citation": LocalDocumentResolverTool(),
         "document.fetch_section": fetch_section_tool or LocalDocumentFetchSectionTool(),
         "memory.session_load": SessionLoadTool(store),

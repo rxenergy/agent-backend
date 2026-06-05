@@ -5,13 +5,14 @@
 # 변경 시 hash 가 바뀌므로 어떤 정책으로 게이팅했는지 사후 추적 가능.
 
 # 가중 합산 가중치. evaluator 가 (활성) 가중치 합으로 정규화하므로 합이 1이
-# 아니어도 됨 — semantic(G2 cross-encoder)은 PR-5 미구현(spec roadmap P5)이라
-# weight 0. 나중에 재추가하면 자동 재정규화된다.
+# 아니어도 됨. v3.1 RRF 제거: semantic(G2)이 Node 5 reranker(cross-encoder) 점수를
+# 받아 활성화됐고, ensemble(G4 cross-strategy RRF agreement)은 폐기되어 weight 0
+# (분모서 제외). reranker 가 0.20 슬롯을 이어받아 lexical/regulatory 0.40 우위 유지.
 weights:
   lexical: 0.40      # G1 — query term coverage
-  semantic: 0.0      # G2 — cross-encoder (P5)
+  semantic: 0.20     # G2 — cross-encoder reranker (Node 5 retriever.rerank)
   regulatory: 0.40   # G3 — clause/version/authority/jurisdiction
-  ensemble: 0.20     # G4 — cross-strategy agreement (RRF). 단일 전략 경로에선 거의 무력.
+  ensemble: 0.0      # G4 — 폐기(RRF 제거). weight 0 → 분모서 제외.
 
 thresholds:
   tau_pass: 0.5
