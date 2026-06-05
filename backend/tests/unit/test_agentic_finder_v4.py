@@ -26,6 +26,7 @@ from app.application.agents.agentic_finder_v4 import (
 from app.application.agents.llm_router import LLMRouter
 from app.application.agents.registry import VariantRegistry
 from app.application.prompting.answer_spec_source import AnswerSpecPromptSource
+from app.application.prompting.query_translate_source import QueryTranslatePromptSource
 from app.application.prompting.finder_source import FinderPromptSource
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
@@ -45,6 +46,7 @@ from app.domain.interaction import AgentRequest
 _SPEC = VariantSpec(variant_id=AGENTIC_FINDER_VARIANT_ID)
 _REPO_PROMPTS = Path(__file__).resolve().parents[3] / "prompts"
 _CONTRACT = _REPO_PROMPTS / "system" / "citation_contract_v1.md"
+_OUTPUT_LANG = _REPO_PROMPTS / "system" / "output_language_v1.md"
 
 
 def _tool_registry_yaml(root: Path) -> Path:
@@ -127,9 +129,11 @@ def _make_runner(
         classifier=classifier,
         classification_threshold=classification_threshold,
         citation_contract_path=str(_CONTRACT) if with_contract else None,
+        output_language_contract_path=str(_OUTPUT_LANG) if with_contract else None,
         # 프롬프트는 registry 호스팅(코드 인라인 금지) — 실 repo prompts/ 에서 sha 검증과
         # 함께 로드한다(build_prompts 임시 fixture 엔 answer_spec/finder 블록 미존재).
-        # source 미주입은 N2/N3 부트 배선 오류라 항상 주입한다.
+        # source 미주입은 N0/N2/N3 부트 배선 오류라 항상 주입한다.
+        query_translate_source=QueryTranslatePromptSource(_REPO_PROMPTS),
         answer_spec_source=AnswerSpecPromptSource(_REPO_PROMPTS),
         finder_source=FinderPromptSource(_REPO_PROMPTS),
     )
@@ -164,9 +168,13 @@ def _make_deps(tmp: Path, *, classifier=None, classification_prompt_source=None,
         context_builder=ContextBuilder(capture_mode="snippets"),
         classifier=classifier,
         classification_prompt_source=classification_prompt_source,
+        query_translate_prompt_source=QueryTranslatePromptSource(_REPO_PROMPTS),
         answer_spec_prompt_source=AnswerSpecPromptSource(_REPO_PROMPTS),
         finder_prompt_source=FinderPromptSource(_REPO_PROMPTS),
-        tunables={"citation_contract_path": str(_CONTRACT)},
+        tunables={
+            "citation_contract_path": str(_CONTRACT),
+            "output_language_contract_path": str(_OUTPUT_LANG),
+        },
     )
 
 
@@ -301,6 +309,73 @@ async def test_n2_raises_when_answer_spec_source_not_wired() -> None:
         req = AgentRequest(interaction_id="f7", query_text="질의", session_id="s1")
         with pytest.raises(RuntimeError, match="answer_spec_source not wired"):
             await runner.run(req)
+
+
+@pytest.mark.asyncio
+async def test_n0_raises_when_query_translate_source_not_wired() -> None:
+    # N0 도 registry 호스팅 — source 미주입은 부트 배선 오류(N2/N3 와 동일 fail-fast).
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), classifier=_ScopeTierClassifier())
+        runner._query_translate_source = None
+        req = AgentRequest(interaction_id="f8", query_text="질의", session_id="s1")
+        with pytest.raises(RuntimeError, match="query_translate_source not wired"):
+            await runner.run(req)
+
+
+class _TransUtilLLM:
+    """N0 translate JSON 을 돌려주는 utility fake(영어 질의 + 원 언어)."""
+
+    model_id = "trans-util"
+
+    async def generate(self, prompt, *, model_options=None, grammar=None):
+        from app.ports.llm import LLMResult
+        return LLMResult(
+            text=json.dumps({
+                "query_en": "ECCS performance requirements for i-SMR",
+                "source_language": "Japanese",
+            }),
+            token_usage={"prompt_tokens": 1, "completion_tokens": 1},
+            model_id=self.model_id,
+        )
+
+    async def generate_stream(self, prompt, *, model_options=None, grammar=None):  # pragma: no cover
+        raise NotImplementedError
+
+
+@pytest.mark.asyncio
+async def test_query_translate_pins_language_and_threads_english_prompt() -> None:
+    # N0 가 영어 질의·원 언어를 산출 → (1) 이벤트에 번역 재현 핀, (2) 생성 프롬프트는
+    # 영어 # QUERY + 출력-언어 지시문(source_language)으로 렌더된다.
+    with tempfile.TemporaryDirectory() as tmp:
+        deps = _make_deps(Path(tmp), classifier=_ScopeTierClassifier(),
+                          utility_llm=_TransUtilLLM(), finder_llm=_finder_script())
+        runner = VariantRegistry.build(AGENTIC_FINDER_VARIANT_ID, _SPEC, deps)
+        req = AgentRequest(interaction_id="f9", query_text="i-SMRのECCS性能要件は？",
+                           session_id="s1")
+        resp = await runner.run(req)
+        assert resp.refusal_reason is None
+
+        root = Path(tmp) / "events" / "t"
+        rec = json.loads(
+            next((root / "interaction_events").rglob("*.jsonl"))
+            .read_text(encoding="utf-8").splitlines()[0]
+        )
+        # (1) 재현 핀 — 번역은 워크플로우 상태(원칙 #5). 원질의 해시는 query_text_hash 가,
+        # 내부 영어 질의·언어·정책은 query_understanding.query_translate 가 핀한다.
+        qt = rec["query_understanding"]["query_translate"]
+        assert qt["method"] == "llm"
+        assert qt["source_language"] == "Japanese"
+        assert qt["query_en_hash"] and qt["policy_hash"]
+        assert rec["query_text_sample"] == "i-SMRのECCS性能要件は？"  # 원문 보존.
+
+        # (2) 생성 프롬프트 — 영어 # QUERY + 출력-언어 지시문(Japanese).
+        prec = json.loads(
+            next((root / "prompt_render_records").rglob("*.json")).read_text(encoding="utf-8")
+        )
+        prompt_text = prec["rendered_prompt"]
+        assert "ECCS performance requirements for i-SMR" in prompt_text  # 영어 질의 스레딩.
+        assert "OUTPUT LANGUAGE" in prompt_text
+        assert "Japanese" in prompt_text  # 최종 답변 언어 지시.
 
 
 @pytest.mark.asyncio

@@ -54,7 +54,13 @@ class PromptRenderer:
         *,
         query_text: str,
         context_block: str,
+        trailer: str | None = None,
     ) -> RenderedPrompt:
+        """`trailer` (optional) is appended *after* the `# QUERY` block — the
+        highest-recency position. Used for steering directives that must
+        out-authority the body (e.g. agentic_finder 출력-언어 지시: 내부 영어
+        컨텍스트/질의 뒤에서 최종 답변 언어를 가른다). 다른 변형은 미사용(default
+        None) — 시그니처는 하위호환."""
         parts: list[str] = []
         fragments_by_path: dict[str, str] = {}
         fragment_versions: dict[str, str] = {}
@@ -77,6 +83,8 @@ class PromptRenderer:
 
         parts.append(f"# CONTEXT\n{context_block}")
         parts.append(f"# QUERY\n{query_text}")
+        if trailer:
+            parts.append(trailer.strip())
         text = "\n\n".join(parts)
         rendered_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
         composition_hash = compute_composition_hash(profile.fragments.values())

@@ -48,6 +48,7 @@ from app.application.events.recorder import EventRecorder
 from app.application.prompting.classification_source import ClassificationPromptSource
 from app.application.prompting.information_need_source import InformationNeedPromptSource
 from app.application.prompting.answer_spec_source import AnswerSpecPromptSource
+from app.application.prompting.query_translate_source import QueryTranslatePromptSource
 from app.application.prompting.finder_source import FinderPromptSource
 from app.application.prompting.hybrid_source import HybridPromptSource
 from app.application.prompting.local_source import LocalPromptSource
@@ -254,6 +255,7 @@ async def build_container(settings: Settings) -> AppContainer:
     context_builder: ContextBuilder | None = None
     classifier: Any = None
     classification_prompt_source: Any = None
+    query_translate_prompt_source: Any = None
     answer_spec_prompt_source: Any = None
     finder_prompt_source: Any = None
     summarizer: ConversationSummarizer | None = None
@@ -466,6 +468,11 @@ async def build_container(settings: Settings) -> AppContainer:
         information_need_prompt_source = InformationNeedPromptSource(
             Path(settings.prompt_local_dir)
         )
+        # agentic_finder N0 질의 번역 프롬프트 source(registry 호스팅) — 동일 fail-fast
+        # sha 검증. 워크플로우 내부는 영어(query_en), 최종 출력만 사용자 언어.
+        query_translate_prompt_source = QueryTranslatePromptSource(
+            Path(settings.prompt_local_dir)
+        )
         # agentic_finder N2 답변 사양 프롬프트 source(registry 호스팅) — 분류/정보요구와
         # 동일 fail-fast sha 검증. 프롬프트는 코드 인라인이 아니라 registry 에서 관리.
         answer_spec_prompt_source = AnswerSpecPromptSource(
@@ -509,6 +516,7 @@ async def build_container(settings: Settings) -> AppContainer:
         classifier=classifier,
         classification_prompt_source=classification_prompt_source,
         information_need_prompt_source=information_need_prompt_source,
+        query_translate_prompt_source=query_translate_prompt_source,
         answer_spec_prompt_source=answer_spec_prompt_source,
         finder_prompt_source=finder_prompt_source,
         summarizer=summarizer,
@@ -540,6 +548,12 @@ async def build_container(settings: Settings) -> AppContainer:
             "llm_call_budget": getattr(settings, "llm_call_budget", 8),
             "citation_contract_path": str(
                 Path(settings.prompt_local_dir) / "system" / "citation_contract_v1.md"
+            ),
+            # agentic_finder N0/N7 — 워크플로우 내부는 영어, 최종 답변만 사용자 언어.
+            # 출력-언어 지시문({language} 치환)을 citation contract 와 동일 seam 으로
+            # 생성 프롬프트에 prepend 한다(파일 호스팅 → rendered_prompt_hash 에 반영).
+            "output_language_contract_path": str(
+                Path(settings.prompt_local_dir) / "system" / "output_language_v1.md"
             ),
         },
     )

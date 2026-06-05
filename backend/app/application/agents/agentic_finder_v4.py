@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -108,6 +109,13 @@ class AgenticFinderRunner:
         active_cells_mode: str = "all",
         summarizer: ConversationSummarizer | None = None,
         citation_contract_path: str | None = None,
+        # N0 질의 번역 프롬프트 source(registry 호스팅, sha 핀). 워크플로우 내부는 영어,
+        # 최종 출력만 사용자 언어. None 이면 N0 에서 부트 배선 오류(프롬프트 인라인 금지).
+        query_translate_source: Any = None,
+        # N7 출력-언어 지시문({language} 치환). 영어 컨텍스트로 추론하되 최종 답변은
+        # 사용자 언어로 쓰도록 강제(citation contract 와 동일 prepend seam). None 이면
+        # 미주입(지시문 없이 진행 — 시스템 프롬프트 언어를 따른다).
+        output_language_contract_path: str | None = None,
         # N2 답변 사양 인스턴스화 프롬프트 source(registry 호스팅, sha 핀). None 이면
         # N2 에서 부트 배선 오류로 처리(프롬프트는 코드 인라인 금지 — 분류/정보요구와
         # 동일 fail-fast). v3.1 information_need_source 와 동일 idiom.
@@ -136,6 +144,7 @@ class AgenticFinderRunner:
         self._classification_threshold = classification_threshold
         self._active_cells_mode = active_cells_mode
         self._summarizer = summarizer
+        self._query_translate_source = query_translate_source
         self._answer_spec_source = answer_spec_source
         self._finder_source = finder_source
         self._finder_recover_limit = finder_recover_limit
@@ -150,6 +159,16 @@ class AgenticFinderRunner:
             if p.is_file():
                 self._citation_contract = p.read_text(encoding="utf-8")
                 self._citation_contract_sha = _sha16(self._citation_contract)
+        # N7 출력-언어 지시문 템플릿(한 번 로드, {language} 는 런타임 치환). 영어
+        # 컨텍스트로 추론하되 최종 답변은 사용자 언어로 쓰게 한다(생성-검증 결합 결함상
+        # 스트리밍은 되돌릴 수 없으므로 *프롬프트 시점* 제어가 유일한 출력-언어 게이트).
+        self._output_language_template: str | None = None
+        self._output_language_sha: str | None = None
+        if output_language_contract_path:
+            p = Path(output_language_contract_path)
+            if p.is_file():
+                self._output_language_template = p.read_text(encoding="utf-8")
+                self._output_language_sha = _sha16(self._output_language_template)
 
     # ------------------------------------------------------------------
     # Streaming wrapper — v2/v3.1 과 동일 패턴(검증됨).
@@ -245,10 +264,47 @@ class AgenticFinderRunner:
             oi.set_io(root, input_value=request.query_text)
 
             # === Phase 1 Intake ===========================================
-            # N1 — intent_classification (재사용)
+            # N0 — query_translate. 워크플로우 *내부*(분류·answer_spec·Finder 검색)는
+            # 영어 코퍼스를 대상으로 하므로 사용자 질의를 검색용 영어(query_en)로 한 번
+            # 번역하고 원 언어(source_language)를 식별한다 — 최종 답변(N8)을 그 언어로
+            # 되돌리기 위함. 이후 내부 노드는 query_en 으로 구동하고(internal_request),
+            # 세션/이벤트/응답 echo 는 원문(request.query_text)을 보존한다. 프롬프트는
+            # registry 호스팅(sha 핀) — source 미주입은 부트 배선 오류(인라인 금지).
+            await emit_step("query_translate", "started")
+            if self._query_translate_source is None:
+                raise RuntimeError(
+                    "query_translate_source not wired — N0 prompt is registry-hosted "
+                    "(prompts/registry.yaml query_translate_prompts)"
+                )
+            translated = await self._query_translate_source.build_translator(
+                self._utility_llm or llm
+            ).translate(request.query_text)
+            query_en = translated.query_en
+            source_language = translated.source_language
+            if translated.instantiation_method == "llm":
+                llm_calls_used += 1
+            # 내부 노드용 작업 요청 — query_text 만 영어로 치환(나머지 컨텍스트 보존).
+            internal_request = replace(request, query_text=query_en)
+            # 번역 재현 핀(원칙 #5) — 답변·거부·메타 모든 종단 이벤트에 동일하게 실어
+            # "어떤 영어 질의·언어·정책으로 이 상호작용이 돌았나"를 단독 설명한다. 원질의는
+            # request.query_text_hash 가 별도로 핀한다(여기는 내부 영어 질의·언어·정책).
+            qu_pin: dict[str, Any] = {
+                "query_translate": {
+                    "query_en_hash": _sha16(query_en),
+                    "source_language": source_language,
+                    "method": translated.instantiation_method,
+                    "policy_hash": translated.policy_hash,
+                    "output_language_sha": self._output_language_sha,
+                }
+            }
+            await emit_step("query_translate", "ok",
+                            method=translated.instantiation_method,
+                            source_language=source_language)
+
+            # N1 — intent_classification (재사용, 영어 질의로 구동)
             await emit_step("intent_classification", "started")
             with _TRACER.start_as_current_span("agent.intent_classification") as s:
-                classification = await self._classify(request)
+                classification = await self._classify(internal_request)
                 scenario_object = classification.scenario_object
                 scenario_depth = classification.scenario_depth
                 entities = classification.entities
@@ -273,7 +329,8 @@ class AgenticFinderRunner:
             if scope_tier == "T3":
                 await emit_step("scenario_routing", "ok", scope_tier=scope_tier)
                 return await self._meta_answer(request, started, tool_calls,
-                                               classification, conf)
+                                               classification, conf,
+                                               query_understanding=qu_pin)
             if scope_tier == "T4":
                 await emit_step("scenario_routing", "ok", scope_tier=scope_tier)
                 return await self._refuse(
@@ -281,6 +338,7 @@ class AgenticFinderRunner:
                     RefusalReason.OUT_OF_SCOPE, conf,
                     verification_status=VerificationStatus.SKIPPED,
                     error_code="out_of_scope", classification=classification,
+                    query_understanding=qu_pin,
                 )
             if self._classifier is not None and conf < self._classification_threshold:
                 return await self._refuse(
@@ -289,6 +347,7 @@ class AgenticFinderRunner:
                     verification_status=VerificationStatus.SKIPPED,
                     error_code="classification_low_confidence",
                     classification=classification,
+                    query_understanding=qu_pin,
                 )
             inactive_cell = not is_active(
                 scenario_object, scenario_depth, mode=self._active_cells_mode
@@ -317,7 +376,7 @@ class AgenticFinderRunner:
             answer_spec = await self._answer_spec_source.build_instantiator(
                 self._utility_llm or llm
             ).instantiate(
-                request.query_text,
+                query_en,
                 scenario_object=scenario_object,
                 scenario_depth=scenario_depth,
                 intent=classification.intent,
@@ -349,7 +408,7 @@ class AgenticFinderRunner:
                 ctx=ctx,
                 system_prompt_body=self._finder_source.prompt_body,
                 finder_policy_hash=self._finder_source.policy_hash,
-                query_text=request.query_text,
+                query_text=query_en,
                 answer_spec=answer_spec,
                 record=record,
                 recover_limit=self._finder_recover_limit,
@@ -390,7 +449,7 @@ class AgenticFinderRunner:
 
             approved = await self._tools.invoke(
                 "memory.approved_search",
-                {"query_text": request.query_text, "scenario_object": scenario_object,
+                {"query_text": query_en, "scenario_object": scenario_object,
                  "scenario_depth": scenario_depth, "top_k": 5}, ctx,
             )
             record(approved)
@@ -450,7 +509,7 @@ class AgenticFinderRunner:
             with _TRACER.start_as_current_span("agent.context_build") as s:
                 pack = self._context_builder.build(
                     interaction_id=request.interaction_id,
-                    query_text=request.query_text,
+                    query_text=query_en,
                     chat_history=request.chat_history,
                     conversation_summary=conversation_summary if decision.inject else None,
                     scenario_object=scenario_object, scenario_depth=scenario_depth,
@@ -477,6 +536,7 @@ class AgenticFinderRunner:
                         verification_status=VerificationStatus.SKIPPED,
                         error_code="prompt_profile_not_found",
                         classification=classification,
+                        query_understanding=qu_pin,
                     )
                 context_block = self._context_builder.render_for_prompt(pack)
                 if self._citation_contract:
@@ -484,12 +544,26 @@ class AgenticFinderRunner:
                         "# CITATION CONTRACT\n"
                         + self._citation_contract.strip() + "\n\n" + context_block
                     )
+                # 출력-언어 지시문 — # QUERY 뒤(trailer, 최고 recency)에 둔다. 내부
+                # 컨텍스트·질의는 영어(query_en)지만 프롬프트 *마지막*이 "최종 답변은
+                # {language} 로" 라 모델이 영어 본문을 미러링하지 않게 가른다. {language}
+                # 치환 후 rendered_prompt_hash 에 반영(재현 핀). 미주입이면 system 언어.
+                output_language_trailer = (
+                    self._output_language_template.replace("{language}", source_language)
+                    if self._output_language_template else None
+                )
+                # 생성 프롬프트의 # QUERY 는 영어(query_en) — 추론은 영어로, 출력 언어는
+                # trailer 가 가른다. 원문(request.query_text)은 세션/이벤트에 보존.
                 rendered = self._renderer.render(
-                    profile, query_text=request.query_text, context_block=context_block,
+                    profile, query_text=query_en, context_block=context_block,
+                    trailer=output_language_trailer,
                 )
                 s.set_attribute("rendered_prompt_hash", rendered.rendered_prompt_hash)
                 if self._citation_contract_sha:
                     s.set_attribute("citation_contract_sha", self._citation_contract_sha)
+                if self._output_language_sha:
+                    s.set_attribute("output_language_sha", self._output_language_sha)
+                    s.set_attribute("output_language", source_language)
                 oi.set_kind(s, oi.KIND_CHAIN)
                 oi.set_io(s, input_value=request.query_text, output_value={
                     "profile_id": rendered.profile_id,
@@ -498,7 +572,8 @@ class AgenticFinderRunner:
                 })
                 await self._sink.write_prompt_render_record(
                     request.interaction_id,
-                    self._renderer.to_record(rendered, query_text=request.query_text),
+                    # 렌더 본문이 query_en 을 담으므로 sidecar query_text 도 영어로 일치.
+                    self._renderer.to_record(rendered, query_text=query_en),
                 )
                 await self._sink.write_context_snapshot(
                     request.interaction_id, self._context_builder.to_snapshot(pack),
@@ -514,7 +589,7 @@ class AgenticFinderRunner:
             llm_result = await self._generate(
                 request, rendered, started, tool_calls,
                 scenario_object, scenario_depth, conf, llm=llm,
-                classification=classification,
+                classification=classification, query_understanding=qu_pin,
             )
             if isinstance(llm_result, AgentResponse):
                 return llm_result  # LLM-unavailable refusal
@@ -608,6 +683,7 @@ class AgenticFinderRunner:
                     memory_ids_used=tuple(memory_ids_used),
                     memory_types_used=tuple(memory_types_used),
                     regulatory_grounding="n_a",
+                    query_understanding=qu_pin,  # N0 번역 재현 핀(원칙 5).
                 )
                 await self._recorder.persist(event)
                 s.set_attribute("interaction_id", request.interaction_id)
@@ -634,7 +710,8 @@ class AgenticFinderRunner:
 
     async def _generate(self, request, rendered: RenderedPrompt, started, tool_calls,
                         scenario_object, scenario_depth, conf, *, llm: LLMPort,
-                        classification: ClassificationResult):
+                        classification: ClassificationResult,
+                        query_understanding: dict[str, Any] | None = None):
         with _TRACER.start_as_current_span("llm.generation") as s:
             em = current_emitter()
             try:
@@ -648,7 +725,7 @@ class AgenticFinderRunner:
                     request, started, tool_calls, scenario_object, scenario_depth,
                     RefusalReason.LLM_UNAVAILABLE, conf, error_code="llm_unavailable",
                     verification_status=VerificationStatus.SKIPPED,
-                    classification=classification,
+                    classification=classification, query_understanding=query_understanding,
                 )
             s.set_attribute("model_id", llm_result.model_id)
             oi.set_kind(s, oi.KIND_LLM)
@@ -685,7 +762,8 @@ class AgenticFinderRunner:
                       scenario_depth, reason: RefusalReason, conf, *,
                       error_code: str | None,
                       verification_status: VerificationStatus = VerificationStatus.SKIPPED,
-                      classification: ClassificationResult | None = None):
+                      classification: ClassificationResult | None = None,
+                      query_understanding: dict[str, Any] | None = None):
         await emit_step("refused", "ok", reason=reason.value)
         response = AgentResponse(
             interaction_id=request.interaction_id,
@@ -713,6 +791,7 @@ class AgenticFinderRunner:
             classifier_intent=classification.intent if classification else None,
             scope_tier=classification.scope_tier if classification else None,
             regulatory_grounding="n_a",
+            query_understanding=query_understanding,  # N0 번역 핀(원칙 5).
         )
         await self._recorder.persist(event)
         m = get_metrics()
@@ -722,7 +801,8 @@ class AgenticFinderRunner:
         return response
 
     async def _meta_answer(self, request, started, tool_calls,
-                           classification: ClassificationResult, conf):
+                           classification: ClassificationResult, conf,
+                           *, query_understanding: dict[str, Any] | None = None):
         """scope_tier=T3 — 역량·범위 메타 질의에 검색·인용 없이 응답(거부 아님)."""
         await emit_step("meta_answer", "ok", scope_tier=classification.scope_tier)
         response = AgentResponse(
@@ -752,6 +832,7 @@ class AgenticFinderRunner:
             classifier_intent=classification.intent,
             scope_tier=classification.scope_tier,
             regulatory_grounding="n_a",
+            query_understanding=query_understanding,  # N0 번역 핀(원칙 5).
         )
         await self._recorder.persist(event)
         get_metrics().record_terminal(
@@ -828,6 +909,8 @@ def _build_agentic_finder(spec: VariantSpec, deps: AgentDeps) -> "AgenticFinderR
         active_cells_mode=t.get("active_cells_mode", "all"),
         summarizer=deps.summarizer,
         citation_contract_path=t.get("citation_contract_path"),
+        output_language_contract_path=t.get("output_language_contract_path"),
+        query_translate_source=deps.query_translate_prompt_source,
         answer_spec_source=deps.answer_spec_prompt_source,
         finder_source=deps.finder_prompt_source,
         finder_recover_limit=t.get("finder_recover_limit", 3),

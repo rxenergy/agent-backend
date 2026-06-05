@@ -45,6 +45,10 @@ class AgentDeps:
     # v3.1 Node 3 정보 요구 인스턴스화 프롬프트 source(registry 호스팅, sha 핀).
     # None 이면 변형이 Node 3 에서 부트 배선 오류로 처리(프롬프트는 코드 인라인 금지).
     information_need_prompt_source: Any = None
+    # agentic_finder N0 질의 번역 프롬프트 source(registry 호스팅, sha 핀). 워크플로우
+    # 내부는 영어, 최종 출력만 사용자 언어. None 이면 변형이 N0 에서 부트 배선 오류로
+    # 처리(프롬프트는 코드 인라인 금지).
+    query_translate_prompt_source: Any = None
     # agentic_finder N2 답변 사양 인스턴스화 프롬프트 source(registry 호스팅, sha 핀).
     # None 이면 변형이 N2 에서 부트 배선 오류로 처리(프롬프트는 코드 인라인 금지).
     answer_spec_prompt_source: Any = None
