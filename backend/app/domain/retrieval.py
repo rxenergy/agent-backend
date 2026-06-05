@@ -74,6 +74,10 @@ class RetrieverSearchOutput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     chunks: list[RetrievedChunk] = Field(default_factory=list)
+    # agentic_finder `retrieval.search` 가 reranker 정렬 점수를 chunks 와 *같은 순서*
+    # 로 싣는다(FinderRound.reranker_score_dist 계측 입력). 기존 retriever.search·
+    # 다운스트림은 이 필드를 안 채우고 안 읽으므로 무영향(기본 빈 리스트).
+    rerank_scores: list[float] = Field(default_factory=list)
 
 
 class DocumentFetchSectionInput(BaseModel):
@@ -201,12 +205,23 @@ class RecoverRound:
 
 @dataclass(frozen=True)
 class HopEdge:
-    """Node 8 — one cross-reference hop in the multi-hop expansion graph."""
+    """Node 8(v3.1) / N4(agentic_finder) — one cross-reference hop in the
+    multi-hop expansion graph.
+
+    agentic_finder N4(Multi-Hop Sequence + Document Mapper, 현재 stub)는 인용
+    문자열을 Document Mapper 로 검색 파라미터로 해소하므로 추가 필드를 *기본값으로*
+    싣는다(설계 finder §5). 기본값만 추가하므로 v3.1 의 기존 4-인자 생성은 불변."""
 
     from_chunk_id: str
     ref_kind: str  # definition | parent_section | clause_id
     target_id: str
     grade: str | None = None  # GateDecision after re-eval of the hopped chunk
+    # agentic_finder N4 확장 — 인용→문서 해소(Document Mapper) 추적.
+    hop_depth: int = 0
+    citation_text: str | None = None  # 추출된 인용 원문(예: "RG 1.157", "§3.2").
+    mapper_params: dict[str, Any] | None = None  # Mapper 가 산출한 검색 파라미터.
+    resolved: bool = False  # 인용이 코퍼스 문서로 해소됐는가.
+    resolved_doc_id: str | None = None
 
 
 @dataclass(frozen=True)

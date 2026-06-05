@@ -46,6 +46,8 @@ from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
 from app.application.prompting.classification_source import ClassificationPromptSource
 from app.application.prompting.information_need_source import InformationNeedPromptSource
+from app.application.prompting.answer_spec_source import AnswerSpecPromptSource
+from app.application.prompting.finder_source import FinderPromptSource
 from app.application.prompting.hybrid_source import HybridPromptSource
 from app.application.prompting.local_source import LocalPromptSource
 from app.application.prompting.phoenix_source import (
@@ -251,6 +253,8 @@ async def build_container(settings: Settings) -> AppContainer:
     context_builder: ContextBuilder | None = None
     classifier: Any = None
     classification_prompt_source: Any = None
+    answer_spec_prompt_source: Any = None
+    finder_prompt_source: Any = None
     summarizer: ConversationSummarizer | None = None
     retrieval_planner: Any = None
     retrieval_evaluator: Any = None
@@ -414,8 +418,28 @@ async def build_container(settings: Settings) -> AppContainer:
             document_tool = LocalDocumentResolverTool()
             fetch_section_tool = LocalDocumentFetchSectionTool()
 
+        # agentic_finder Finder 도구(설계 finder §3). retrieval.search = 내부 retriever
+        # 재사용 + Reranker 정렬(실 cross-encoder 는 배포 시 주입, dev/test 는 identity
+        # 폴백 — seam 보존). scope=CorpusMap 결정론, normalize=사전 lookup, submit_verdict=no-op.
+        from app.adapters.reranker.identity import IdentityReranker
+        from app.adapters.tools.retrieval_search import RetrievalSearchTool
+        from app.adapters.tools.retrieval_scope import RetrievalScopeTool
+        from app.adapters.tools.retrieval_normalize import RetrievalNormalizeTool
+        from app.adapters.tools.submit_verdict import SubmitVerdictTool
+
         tools = {
             "retriever.search": retriever_tool,
+            "retrieval.search": RetrievalSearchTool(
+                retriever=retriever_tool, reranker=IdentityReranker()
+            ),
+            "retrieval.scope": RetrievalScopeTool(
+                corpus_map=corpus_map,
+                tau_high=settings.retrieval_scope_tau_high,
+                tau_low=settings.retrieval_scope_tau_low,
+                min_token_count=settings.retriever_min_token_count,
+            ),
+            "retrieval.normalize": RetrievalNormalizeTool(),
+            "submit_verdict": SubmitVerdictTool(),
             "document.resolve_citation": document_tool,
             "document.fetch_section": fetch_section_tool,
             "memory.session_load": SessionLoadTool(session_store),
@@ -438,6 +462,14 @@ async def build_container(settings: Settings) -> AppContainer:
         information_need_prompt_source = InformationNeedPromptSource(
             Path(settings.prompt_local_dir)
         )
+        # agentic_finder N2 답변 사양 프롬프트 source(registry 호스팅) — 분류/정보요구와
+        # 동일 fail-fast sha 검증. 프롬프트는 코드 인라인이 아니라 registry 에서 관리.
+        answer_spec_prompt_source = AnswerSpecPromptSource(
+            Path(settings.prompt_local_dir)
+        )
+        # agentic_finder N3 Finder 시스템 프롬프트 source(registry 호스팅) — 동일
+        # fail-fast sha 검증. finder_policy_hash 핀의 출처.
+        finder_prompt_source = FinderPromptSource(Path(settings.prompt_local_dir))
         if settings.classifier_backend == "rule":
             classifier = RuleClassifier()
         elif settings.classifier_backend == "llm":
@@ -473,6 +505,8 @@ async def build_container(settings: Settings) -> AppContainer:
         classifier=classifier,
         classification_prompt_source=classification_prompt_source,
         information_need_prompt_source=information_need_prompt_source,
+        answer_spec_prompt_source=answer_spec_prompt_source,
+        finder_prompt_source=finder_prompt_source,
         summarizer=summarizer,
         retrieval_planner=retrieval_planner,
         retrieval_evaluator=retrieval_evaluator,
