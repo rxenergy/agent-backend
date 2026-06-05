@@ -54,3 +54,22 @@ variants:
       - memory.approved_search
     required_scenarios: [O1, O2, O3, O4]
     capability_tags: [hierarchical, corrective, claim_level_verify, retrieval, verification, memory]
+
+  # agentic_finder_v4 — 3-Phase Intake→Retrieval→Generation.
+  # N3 Finder Agent 의 tool-calling 루프가 retrieval.scope/normalize/search +
+  # submit_verdict 를 ToolExecutor 로 invoke 한다(도구 set 은 registry 고정, "어느
+  # 도구를 언제"만 Finder LLM — 원칙 #2 의 국소 완화). retrieval 검증은 Finder LLM
+  # 단독(RRF·결정론 게이트 제거)이라 verification.* 는 제외. Multi-Hop(N4)은 stub.
+  # compatible_llms 는 pool-wide(fake 단위 경로 동작; 실 tool-calling 은 Gemma vLLM).
+  agentic_finder_v4:
+    compatible_llms: ["*"]
+    required_tools:
+      - retrieval.search
+      - retrieval.scope
+      - retrieval.normalize
+      - submit_verdict
+      - memory.session_load
+      - memory.session_update
+      - memory.approved_search
+    required_scenarios: [O1, O2, O3, O4]
+    capability_tags: [agentic, finder, tool_calling, retrieval, memory]

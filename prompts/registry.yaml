@@ -107,6 +107,30 @@ query_understanding_prompts:
     output_schema: {path: query_understanding/schemas/information_need_v1.json,  version: v1, sha256: "86c0788c2edd4bdcd01621cbb56ed2e1e80c702f9163b804c7ded7c13713b93d"}
     model_options: {temperature: 0.0, max_tokens: 400}
 
+# agentic_finder N2 answer_spec(답변 사양) 프롬프트 (agentic_finder_workflow.v1).
+#   분류/정보요구 프롬프트와 동일 registry 에서 sha 핀·버전 관리한다. 코드 인라인
+#   금지 — `AnswerSpecPromptSource`(backend/app/application/prompting/answer_spec_source.py)
+#   가 boot 시 fragment 바이트를 재해시해 declared sha 와 대조(무단 편집 차단, 동일
+#   fail-fast 불변식). 산출물의 `policy_hash`(= InteractionEvent answer_spec_hash 핀)
+#   는 이 prompt fragment 의 sha. output_schema 는 guided-decoding(json_schema)에 쓰인다.
+answer_spec_prompts:
+  answer_spec_v1:
+    profile_version: v1
+    prompt:        {path: answer_spec/answer_spec_v1.md,            version: v1, sha256: "2f54323f34ea4371e9725575321e319d4c182b73a6de74d3a5d1497f9a379064"}
+    output_schema: {path: answer_spec/schemas/answer_spec_v1.json,  version: v1, sha256: "d1ec8050a8d5375ca9f70f45e09b396a1c185f805d3bc43e8626238a1b33f059"}
+    model_options: {temperature: 0.0, max_tokens: 400}
+
+# agentic_finder N3 Finder Agent 시스템 프롬프트 (agentic_finder_workflow.v1 §3).
+#   tool-calling 멀티턴 루프의 *정적* 시스템 지시(도구 사용 규약·종료 규칙). 동적
+#   답변 사양/질의는 런타임에 덧붙는다. `FinderPromptSource` 가 boot 시 sha 검증
+#   (동일 fail-fast). `finder_policy_hash`(= InteractionEvent 핀)는 이 본문 sha.
+#   output_schema 없음 — 구조는 도구 호출(submit_verdict)이 강제한다(structured-by-construction).
+finder_prompts:
+  finder_v1:
+    profile_version: v1
+    prompt:        {path: finder/finder_v1.md, version: v1, sha256: "3ec1cb6004087dcef2f908ddb6c81ca10ee4acc5fdb20ad6b76d9662e9ff331f"}
+    model_options: {temperature: 0.0, max_tokens: 600}
+
 prompt_profiles:
 
   # === O1 Vendor ===

@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "answer_spec_v1",
+  "description": "agentic_finder N2 answer specification structured output. required_slots = 방어 가능한 답을 위해 검색으로 찾아야 할 정보 조각(모델이 질의별로 인스턴스화) — Finder 입력 계약. answer_structure = 답 합성 흐름의 짧은 서술.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["required_slots"],
+  "properties": {
+    "required_slots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {"type": "string"},
+          "description": {"type": "string"},
+          "required": {"type": "boolean"}
+        }
+      }
+    },
+    "answer_structure": {"type": ["string", "null"]}
+  }
+}

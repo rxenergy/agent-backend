@@ -20,6 +20,46 @@ tools:
     retry: 0
     required: true
 
+  # agentic_finder Finder Agent 도구(설계 finder §3). 검색 어댑터(retriever.search)
+  # 재사용 + Reranker 어댑터 내부 정렬(RRF 대체). adapter 라벨은 span 명에만 쓰이며
+  # 구체 클래스(RetrievalSearchTool=retriever+reranker)는 profiles.py 가 결정한다.
+  # required:false — Finder *루프* 도구다. required:true 는 결정론 파이프라인 의미
+  # ("턴 실패")라 LLM 이 컨트롤러인 agentic 루프와 안 맞는다. 실패 시 ToolExecutor 가
+  # 예외 대신 failed 결과를 돌려주고, 루프가 그것을 tool_result(is_error)로 LLM 에
+  # 되먹여 LLM 이 반응(다른 질의로 재검색 / submit_verdict(sufficient=False))하게
+  # 한다(llm_tool_calling §9). v3.1 retriever.search(결정론 경로)는 required:true 유지.
+  retrieval.search:
+    version: v1
+    adapter: reranked
+    timeout_ms: 6000   # 내부 검색(5s) + reranker 여유.
+    retry: 1
+    required: false
+
+  # retrieval.scope — 검색 범위 파라미터(결정론, CorpusMap.resolve_scope 차용).
+  # required:false — 범위 *보강*용(실패해도 전 코퍼스 검색으로 진행 가능).
+  retrieval.scope:
+    version: v1
+    adapter: corpus_map
+    timeout_ms: 1000
+    retry: 0
+    required: false
+
+  # retrieval.normalize — 도메인 용어 정규화(결정론 사전 lookup). 보강용 required:false.
+  retrieval.normalize:
+    version: v1
+    adapter: term_dict
+    timeout_ms: 1000
+    retry: 0
+    required: false
+
+  # submit_verdict — Finder 종료/충분성 판정 캡처(no-op). 인자=verdict.
+  submit_verdict:
+    version: v1
+    adapter: local
+    timeout_ms: 1000
+    retry: 0
+    required: false
+
   # v3.1 P1 Section auto-merge / P2 다홉 — 한 Section 형제 문단 메타 표적 fetch.
   # required:false — 컨텍스트 *보강*용이라 실패해도 답변을 막지 않는다(leaf 로 진행).
   document.fetch_section:
