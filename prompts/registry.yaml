@@ -93,6 +93,20 @@ classification_prompts:
     output_schema: {path: classification/schemas/classifier_output_v1.json, version: v1, sha256: "3d2507293f83d3285c8ebfd69fbc98333d67952ffa8c5e586224e9a59d609b1d"}
     model_options: {temperature: 0.0, max_tokens: 200}
 
+# Node 3 정보 요구(information need) 프롬프트 (information_need_driven_retrieval.plan.v1).
+#   분류 프롬프트와 동일 registry 에서 sha 핀·버전 관리한다. 코드 인라인 금지 —
+#   `InformationNeedPromptSource`(backend/app/application/prompting/information_need_source.py)
+#   가 boot 시 fragment 바이트를 재해시해 declared sha 와 대조(무단 편집 차단,
+#   classification_prompts 와 동일 fail-fast 불변식). 산출물의 `policy_hash` 는
+#   이 prompt fragment 의 sha 로 InteractionEvent 에 기록된다(원칙 5). output_schema
+#   는 guided-decoding(json_schema grammar)에 쓰이며 model_options 도 외부화.
+query_understanding_prompts:
+  information_need_v1:
+    profile_version: v1
+    prompt:        {path: query_understanding/information_need_v1.md,            version: v1, sha256: "2cd9992528f424e81e874c28d35938047925cc9f4b12f335d865be3e45638f8f"}
+    output_schema: {path: query_understanding/schemas/information_need_v1.json,  version: v1, sha256: "86c0788c2edd4bdcd01621cbb56ed2e1e80c702f9163b804c7ded7c13713b93d"}
+    model_options: {temperature: 0.0, max_tokens: 400}
+
 prompt_profiles:
 
   # === O1 Vendor ===
