@@ -33,7 +33,6 @@ from app.application.prompting.resolver import PromptResolver
 from app.application.tool_runtime.errors import RequiredToolFailed
 from app.application.tool_runtime.executor import ToolExecutor
 from app.domain.agents import Budget, VariantSpec
-from app.application.query_understanding.instantiator import InformationNeedInstantiator
 from app.domain.classification import DEFAULT_INTENT, ClassificationResult
 from app.domain.errors import (
     PromptProfileNotFoundError,
@@ -171,6 +170,7 @@ class HierarchicalCorrectiveRunner:
         scope_min_token_count: int = 0,
         section_merge_max_chunks: int = 50,
         context_token_budget: int = 0,
+        information_need_source: Any = None,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
@@ -212,6 +212,10 @@ class HierarchicalCorrectiveRunner:
         self._regulatory_enforced = regulatory_hard_gates_enforced
         # Node 7 — 결정론 recover(동의어 확장 / filter 완화, max 2 round).
         self._recoverer = retrieval_recoverer or RetrievalRecoverer.default()
+        # Node 3 — 정보 요구 인스턴스화 프롬프트 source(registry 호스팅, sha 핀).
+        # 프롬프트는 코드 인라인이 아니라 prompts/registry.yaml 에서 관리되며 이
+        # source 가 build_instantiator(llm) 로 per-call 인스턴스화기를 만든다.
+        self._information_need_source = information_need_source
         # Node 9 — 문장 window 추출기(결정론 정규식 splitter 기본).
         self._snippet_extractor = SnippetExtractor()
         # Layer 1 범위 한정(corpus_map) — confidence-게이트 scope. 미주입 시 빈 맵
@@ -416,7 +420,14 @@ class HierarchicalCorrectiveRunner:
             need_intent = classification.intent
             with _TRACER.start_as_current_span("agent.query_understanding") as s:
                 oi.set_kind(s, oi.KIND_CHAIN)
-                need = await InformationNeedInstantiator(
+                # 프롬프트는 registry 호스팅(코드 인라인 금지) — source 가 sha 검증 후
+                # per-call 인스턴스화기를 만든다. source 미주입은 부트 배선 오류다.
+                if self._information_need_source is None:
+                    raise RuntimeError(
+                        "information_need_source not wired — Node 3 prompt is "
+                        "registry-hosted (prompts/registry.yaml query_understanding_prompts)"
+                    )
+                need = await self._information_need_source.build_instantiator(
                     self._utility_llm or llm
                 ).instantiate(
                     request.query_text,
@@ -1227,6 +1238,9 @@ class HierarchicalCorrectiveRunner:
                         "intents": list(query_plan.intents),
                         "instantiation_method": query_plan.instantiation_method,
                         "information_need_hash": query_plan.information_need_hash,
+                        # 정적 프롬프트 정책 핀(registry fragment sha) — classifier_
+                        # policy_hash 와 동일 idiom. "어떤 프롬프트가 이 요구를 냈나".
+                        "information_need_policy_hash": need.policy_hash,
                         "required_slots": [s.name for s in query_plan.required_slots],
                         "version_constraint": query_plan.version_constraint,
                         # Node 12 citation-contract version. Recorded here (not
@@ -1703,4 +1717,5 @@ def _build_hierarchical_corrective(
         scope_min_token_count=t.get("retriever_min_token_count", 0),
         section_merge_max_chunks=t.get("section_merge_max_chunks", 50),
         context_token_budget=t.get("context_token_budget", 0),
+        information_need_source=deps.information_need_prompt_source,
     )

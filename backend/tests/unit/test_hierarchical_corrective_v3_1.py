@@ -143,6 +143,10 @@ def _make_runner(
     }
     executor = ToolExecutor(registry=registry, tools=tools, event_sink=sink)
     llm_router = LLMRouter(pool={"fake-echo": llm or FakeEchoLLM(model_id="fake-echo")}, default_id="fake-echo")
+    # Node 3 정보 요구 프롬프트 source — 실 repo prompts/ 에서 로드(registry sha 검증
+    # 도 함께 탄다). 프롬프트가 코드 인라인이 아님을 테스트도 강제한다.
+    from app.application.prompting.information_need_source import InformationNeedPromptSource
+    information_need_source = InformationNeedPromptSource(_CONTRACT.parents[1])
     runner = HierarchicalCorrectiveRunner(
         spec=_SPEC,
         llm_router=llm_router,
@@ -164,6 +168,7 @@ def _make_runner(
         context_token_budget=context_token_budget,
         section_merge_max_chunks=section_merge_max_chunks,
         active_cells_mode=active_cells_mode,
+        information_need_source=information_need_source,
     )
     return runner, sink
 

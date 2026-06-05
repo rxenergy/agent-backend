@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
-from app.application.query_understanding.instantiator import (
-    InformationNeedInstantiator,
+from app.application.prompting.information_need_source import (
+    InformationNeedPromptSource,
 )
 from app.ports.llm import LLMResult, LLMUnavailableError
+
+# 프롬프트는 코드 인라인이 아니라 registry 에서 로드 — source 가 sha 검증 후
+# 인스턴스화기를 만든다. 실 repo prompts/ 를 읽어 로딩 경로까지 함께 검증한다.
+_PROMPTS = Path(__file__).resolve().parents[3] / "prompts"
+
+
+def _make(llm):
+    return InformationNeedPromptSource(_PROMPTS).build_instantiator(llm)
 
 
 class _NeedLLM:
@@ -58,7 +67,7 @@ async def test_llm_path_parses_slots_subquestions_and_version() -> None:
         "version_constraint": "2024-06-01",
         "multi_intent": True,
     })
-    res = await InformationNeedInstantiator(llm).instantiate(
+    res = await _make(llm).instantiate(
         "i-SMR ECCS 준수 요건과 예외는?",
         scenario_object="O1", scenario_depth="D2", intent="compliance",
     )
@@ -70,11 +79,13 @@ async def test_llm_path_parses_slots_subquestions_and_version() -> None:
     assert res.multi_intent is True
     # 재현: prompt_hash(핀)·information_need_hash(fingerprint) 둘 다 16-hex.
     assert len(res.prompt_hash) == 16 and len(res.information_need_hash) == 16
+    # policy_hash = registry 프롬프트 fragment sha(정적 정책 핀) — source 가 주입.
+    assert res.policy_hash and len(res.policy_hash) == 16
 
 
 @pytest.mark.asyncio
 async def test_fallback_on_garbage_uses_intent_prior() -> None:
-    res = await InformationNeedInstantiator(_GarbageLLM({})).instantiate(
+    res = await _make(_GarbageLLM({})).instantiate(
         "i-SMR 준수 요건?", scenario_object="O1", scenario_depth="D2",
         intent="compliance",
     )
@@ -89,7 +100,7 @@ async def test_fallback_on_garbage_uses_intent_prior() -> None:
 
 @pytest.mark.asyncio
 async def test_fallback_on_unavailable() -> None:
-    res = await InformationNeedInstantiator(_UnavailableLLM()).instantiate(
+    res = await _make(_UnavailableLLM()).instantiate(
         "정의가 뭐야?", scenario_object="O4", scenario_depth="D1", intent="definition",
     )
     assert res.method == "fallback"
@@ -98,7 +109,7 @@ async def test_fallback_on_unavailable() -> None:
 
 @pytest.mark.asyncio
 async def test_unknown_intent_falls_back_to_default_slots() -> None:
-    res = await InformationNeedInstantiator(_UnavailableLLM()).instantiate(
+    res = await _make(_UnavailableLLM()).instantiate(
         "뭔가 모호한 질의", scenario_object="O4", scenario_depth="D2", intent="unknown",
     )
     assert [s.name for s in res.required_slots] == ["governing_clause", "requirement_text"]
@@ -107,7 +118,7 @@ async def test_unknown_intent_falls_back_to_default_slots() -> None:
 @pytest.mark.asyncio
 async def test_empty_slots_from_llm_falls_back() -> None:
     # required_slots 가 빈 배열이면 모델 산출을 신뢰하지 않고 fallback(parsed[0] 검사).
-    res = await InformationNeedInstantiator(
+    res = await _make(
         _NeedLLM({"required_slots": []})
     ).instantiate("q", scenario_object="O1", scenario_depth="D2", intent="compliance")
     assert res.method == "fallback"
@@ -116,8 +127,8 @@ async def test_empty_slots_from_llm_falls_back() -> None:
 @pytest.mark.asyncio
 async def test_information_need_hash_is_deterministic() -> None:
     payload = {"required_slots": [{"name": "governing_clause"}], "version_constraint": None}
-    a = await InformationNeedInstantiator(_NeedLLM(payload)).instantiate(
+    a = await _make(_NeedLLM(payload)).instantiate(
         "q", scenario_object="O1", scenario_depth="D2", intent="compliance")
-    b = await InformationNeedInstantiator(_NeedLLM(payload)).instantiate(
+    b = await _make(_NeedLLM(payload)).instantiate(
         "q", scenario_object="O1", scenario_depth="D2", intent="compliance")
     assert a.information_need_hash == b.information_need_hash

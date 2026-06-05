@@ -45,6 +45,7 @@ from app.application.memory.summarizer import ConversationSummarizer
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
 from app.application.prompting.classification_source import ClassificationPromptSource
+from app.application.prompting.information_need_source import InformationNeedPromptSource
 from app.application.prompting.hybrid_source import HybridPromptSource
 from app.application.prompting.local_source import LocalPromptSource
 from app.application.prompting.phoenix_source import (
@@ -432,6 +433,11 @@ async def build_container(settings: Settings) -> AppContainer:
         classification_prompt_source = ClassificationPromptSource(
             Path(settings.prompt_local_dir)
         )
+        # Node 3 정보 요구 프롬프트 source(registry 호스팅) — 분류와 동일 fail-fast
+        # sha 검증. 프롬프트는 코드 인라인이 아니라 registry 에서 관리된다.
+        information_need_prompt_source = InformationNeedPromptSource(
+            Path(settings.prompt_local_dir)
+        )
         if settings.classifier_backend == "rule":
             classifier = RuleClassifier()
         elif settings.classifier_backend == "llm":
@@ -466,6 +472,7 @@ async def build_container(settings: Settings) -> AppContainer:
         context_builder=context_builder,
         classifier=classifier,
         classification_prompt_source=classification_prompt_source,
+        information_need_prompt_source=information_need_prompt_source,
         summarizer=summarizer,
         retrieval_planner=retrieval_planner,
         retrieval_evaluator=retrieval_evaluator,
