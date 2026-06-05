@@ -13,11 +13,16 @@ from tenacity import (
 )
 
 from app.ports.llm import (
+    ChatMessage,
     GrammarSpec,
     LLMPort,
     LLMResult,
+    LLMToolResult,
     LLMTokenDelta,
     LLMUnavailableError,
+    ToolCall,
+    ToolChoice,
+    ToolSpec,
 )
 
 __all__ = ["HttpLLM", "LLMUnavailableError"]
@@ -129,6 +134,172 @@ class HttpLLM(LLMPort):
                     return
         except (httpx.HTTPError, RetryError, _Retry5xx) as exc:
             raise LLMUnavailableError(str(exc)) from exc
+
+    async def generate_with_tools(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: list[ToolSpec],
+        tool_choice: ToolChoice = "auto",
+        model_options: dict[str, Any] | None = None,
+        parallel_tool_calls: bool = False,
+    ) -> LLMToolResult:
+        """Non-streaming 도구 호출 1턴(설계 §3–4). 멀티턴 agentic 루프는 호출자
+        (Finder, application 계층)가 소유하고, 이 어댑터는 "messages+tools →
+        (text, tool_calls, stop_reason)" 1회 변환만 책임진다(원칙 #1/§2). 중립
+        타입↔provider 와이어 포맷 변환은 여기 어댑터 안에 가둔다(원칙 #4)."""
+        opts = dict(model_options or {})
+        max_tokens = int(opts.pop("max_tokens", 1024))
+        temperature = float(opts.pop("temperature", 0.0))
+
+        try:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(self._max_attempts),
+                wait=wait_exponential(multiplier=0.5, min=0.5, max=4.0),
+                retry=retry_if_exception_type(
+                    (httpx.TransportError, httpx.RemoteProtocolError, _Retry5xx)
+                ),
+                reraise=True,
+            ):
+                with attempt:
+                    if self._provider == "openai_compat":
+                        return await self._call_openai_compat_tools(
+                            messages, tools, tool_choice, max_tokens,
+                            temperature, parallel_tool_calls,
+                        )
+                    return await self._call_anthropic_tools(
+                        messages, tools, tool_choice, max_tokens,
+                        temperature, parallel_tool_calls,
+                    )
+        except (httpx.HTTPError, RetryError, _Retry5xx) as exc:
+            raise LLMUnavailableError(str(exc)) from exc
+
+        raise LLMUnavailableError("HttpLLM: tool-call retry loop exited without result")
+
+    async def _call_openai_compat_tools(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolSpec],
+        tool_choice: ToolChoice,
+        max_tokens: int,
+        temperature: float,
+        parallel_tool_calls: bool,
+    ) -> LLMToolResult:
+        url = f"{self._endpoint}/chat/completions"
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": [_openai_message(m) for m in messages],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "tools": [_openai_tool(t) for t in tools],
+            "tool_choice": _openai_tool_choice(tool_choice),
+            # 직렬 기본 — 워크플로우가 1턴 1도구를 제어하므로 instrumentation·순서
+            # 보장을 단순화한다(설계 §3). vLLM/OpenAI 둘 다 top-level 필드.
+            "parallel_tool_calls": parallel_tool_calls,
+        }
+        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+        _raise_for_status(resp)
+        data = resp.json()
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        text = message.get("content") or ""
+        tool_calls: list[ToolCall] = []
+        for tc in message.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            raw_args = fn.get("arguments")
+            tool_calls.append(
+                ToolCall(
+                    id=str(tc.get("id") or ""),
+                    name=str(fn.get("name") or ""),
+                    arguments=_parse_json_args(raw_args),
+                )
+            )
+        usage = data.get("usage") or {}
+        return LLMToolResult(
+            text=text,
+            tool_calls=tuple(tool_calls),
+            stop_reason=str(choice.get("finish_reason") or "stop"),
+            token_usage={
+                "prompt_tokens": int(usage.get("prompt_tokens", 0)),
+                "completion_tokens": int(usage.get("completion_tokens", 0)),
+            },
+            model_id=str(data.get("model") or self._model),
+        )
+
+    async def _call_anthropic_tools(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolSpec],
+        tool_choice: ToolChoice,
+        max_tokens: int,
+        temperature: float,
+        parallel_tool_calls: bool,
+    ) -> LLMToolResult:
+        url = f"{self._endpoint}/messages"
+        headers = {
+            "Content-Type": "application/json",
+            "anthropic-version": self._anthropic_version,
+        }
+        if self._api_key:
+            headers["x-api-key"] = self._api_key
+
+        # system 메시지는 messages 배열이 아니라 top-level `system` 필드로 승격한다.
+        system_text = "\n\n".join(
+            m.content for m in messages if m.role == "system" and m.content
+        )
+        wire_messages = [
+            _anthropic_message(m) for m in messages if m.role != "system"
+        ]
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "messages": wire_messages,
+            "tools": [_anthropic_tool(t) for t in tools],
+            "tool_choice": _anthropic_tool_choice(tool_choice, parallel_tool_calls),
+        }
+        if system_text:
+            payload["system"] = system_text
+        # Opus 4.7/4.8 은 temperature/top_p/top_k 를 400 으로 거부한다(§4.3) —
+        # 도구 호출 경로에서 두 모델 모두 샘플링 파라미터를 전송하지 않는다.
+        if not _rejects_sampling_params(self._model):
+            payload["temperature"] = temperature
+
+        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+        _raise_for_status(resp)
+        data = resp.json()
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        for block in data.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                text_parts.append(block.get("text", ""))
+            elif btype == "tool_use":
+                tool_calls.append(
+                    ToolCall(
+                        id=str(block.get("id") or ""),
+                        name=str(block.get("name") or ""),
+                        arguments=dict(block.get("input") or {}),
+                    )
+                )
+            # `thinking` 블록은 text 에 포함하지 않고 건너뛴다(§4.2).
+        usage = data.get("usage") or {}
+        return LLMToolResult(
+            text="".join(text_parts),
+            tool_calls=tuple(tool_calls),
+            stop_reason=_map_anthropic_stop_reason(data.get("stop_reason")),
+            token_usage={
+                "prompt_tokens": int(usage.get("input_tokens", 0)),
+                "completion_tokens": int(usage.get("output_tokens", 0)),
+            },
+            model_id=str(data.get("model") or self._model),
+        )
 
     async def _call_openai_compat(
         self, prompt: str, max_tokens: int, temperature: float,
@@ -433,6 +604,121 @@ def _is_opus_4_7(model_id: str) -> bool:
     the sampling parameters were removed there. Match on prefix to absorb
     future date-suffix snapshots."""
     return model_id.startswith("claude-opus-4-7")
+
+
+def _rejects_sampling_params(model_id: str) -> bool:
+    """Opus 4.7 *and* 4.8 reject temperature/top_p/top_k with 400 (§4.3). The
+    tool-calling path generalizes the 4.7-only `_is_opus_4_7` guard to both so
+    the same call works against either snapshot. Match on prefix to absorb
+    date-suffix snapshots (e.g. `claude-opus-4-8-20260301`). vLLM unaffected."""
+    return model_id.startswith(("claude-opus-4-7", "claude-opus-4-8"))
+
+
+# ── 도구 호출 직렬화/파싱(중립 ↔ provider 와이어, 설계 §4) ──────────────────
+
+
+def _parse_json_args(raw: Any) -> dict[str, Any]:
+    """OpenAI `function.arguments` 는 JSON *문자열* 이므로 dict 로 파싱한다.
+    Anthropic `input` 처럼 이미 dict 면 그대로 통과. 파싱 실패/비-object 는 빈
+    dict(이후 ToolExecutor 가 registry 스키마로 검증해 error_code 로 귀결, §9)."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _openai_tool(tool: ToolSpec) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters,
+        },
+    }
+
+
+def _openai_tool_choice(choice: ToolChoice) -> Any:
+    if choice.startswith("tool:"):
+        return {"type": "function", "function": {"name": choice[len("tool:"):]}}
+    # "auto" | "required" | "none" 은 그대로 전달.
+    return choice
+
+
+def _openai_message(msg: ChatMessage) -> dict[str, Any]:
+    if msg.role == "assistant":
+        out: dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
+        if msg.tool_calls:
+            out["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                    },
+                }
+                for tc in msg.tool_calls
+            ]
+        return out
+    if msg.role == "tool":
+        return {
+            "role": "tool",
+            "tool_call_id": msg.tool_call_id or "",
+            "content": msg.content or "",
+        }
+    return {"role": msg.role, "content": msg.content or ""}
+
+
+def _anthropic_tool(tool: ToolSpec) -> dict[str, Any]:
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "input_schema": tool.parameters,
+    }
+
+
+def _anthropic_tool_choice(choice: ToolChoice, parallel_tool_calls: bool) -> dict[str, Any]:
+    if choice.startswith("tool:"):
+        out: dict[str, Any] = {"type": "tool", "name": choice[len("tool:"):]}
+    elif choice == "required":
+        out = {"type": "any"}
+    elif choice == "none":
+        out = {"type": "none"}
+    else:
+        out = {"type": "auto"}
+    if not parallel_tool_calls:
+        out["disable_parallel_tool_use"] = True
+    return out
+
+
+def _anthropic_message(msg: ChatMessage) -> dict[str, Any]:
+    if msg.role == "assistant":
+        content: list[dict[str, Any]] = []
+        if msg.content:
+            content.append({"type": "text", "text": msg.content})
+        for tc in msg.tool_calls:
+            content.append(
+                {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.arguments}
+            )
+        return {"role": "assistant", "content": content}
+    if msg.role == "tool":
+        # Anthropic tool_result 는 OpenAI 의 role:"tool" 과 달리 *user 턴* 에 실린다.
+        block: dict[str, Any] = {
+            "type": "tool_result",
+            "tool_use_id": msg.tool_call_id or "",
+            "content": msg.content or "",
+        }
+        if msg.is_error:
+            block["is_error"] = True
+        return {"role": "user", "content": [block]}
+    # user(system 은 호출부에서 top-level 로 승격되어 여기 도달하지 않음).
+    return {"role": "user", "content": msg.content or ""}
 
 
 def _map_anthropic_stop_reason(reason: str | None) -> str:
