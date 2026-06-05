@@ -62,7 +62,8 @@ class RetrievalEvaluator:
     def default(cls) -> "RetrievalEvaluator":
         return cls(
             {
-                "weights": {"lexical": 0.40, "semantic": 0.0, "regulatory": 0.40, "ensemble": 0.20},
+                # semantic(G2)=reranker. ensemble(G4 RRF)는 폐기 → weight 0(분모서 제외).
+                "weights": {"lexical": 0.40, "semantic": 0.20, "regulatory": 0.40, "ensemble": 0.0},
                 "thresholds": {"tau_pass": 0.5, "tau_weak": 0.3},
                 "sub_question": {"k_min": 1},
                 "hard_gates": {"entity_coverage_min": 0.3, "min_authority_tier": "secondary"},
@@ -78,22 +79,23 @@ class RetrievalEvaluator:
         query_text: str,
         entities: dict[str, list[str]] | None = None,
         version_constraint: str | None = None,
-        rrf_scores: dict[str, float] | None = None,
+        rerank_scores: dict[str, float] | None = None,
         regulatory_enforced: bool = False,
         sub_question_id: str = "sq0",
     ) -> EvaluationResult:
-        rrf_scores = rrf_scores or {}
-        max_rrf = max(rrf_scores.values(), default=0.0)
+        rerank_scores = rerank_scores or {}
+        max_rerank = max(rerank_scores.values(), default=0.0)
         per_chunk: list[ChunkSignals] = []
         n_pass = n_weak = n_fail = 0
 
         for c in chunks:
             s_lex = signals.lexical_coverage(query_text, c)
-            s_sem = 0.0  # G2 cross-encoder — PR-5 미구현(P5)
+            # G2 semantic — Node 5 cross-encoder reranker 점수(정규화).
+            s_sem = signals.semantic_signal(c.chunk_id, rerank_scores, max_rerank)
             s_reg = signals.regulatory_signal(
                 c, version_constraint=version_constraint, tier_score=self._tier_score
             )
-            s_ens = signals.ensemble_signal(c.chunk_id, rrf_scores, max_rrf)
+            s_ens = 0.0  # G4 ensemble(RRF) 폐기 — rerank 가 G2 semantic 으로 대체.
             ent_cov = signals.entity_coverage(entities, c)
 
             # --- Hard gate (tri-state) ---

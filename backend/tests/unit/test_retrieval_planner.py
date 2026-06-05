@@ -20,27 +20,18 @@ def test_default_plan_is_single_hybrid():
     assert [s.name for s in plan.strategies] == ["hybrid"]
 
 
-def test_comparison_intent_adds_bm25():
+def test_repo_yaml_routes_everything_to_single_hybrid():
+    """v3.1 RRF 제거 — 별도 bm25 leg + 다전략 룰을 폐기했다. 비교·규제·규제ID
+    질의도 전부 단일 hybrid 1차 검색으로 모은 뒤 Node 5 reranker 가 재정렬한다."""
     p = _planner()
-    plan = p.plan(scenario_object="O1", scenario_depth="D2", entities={}, intents=("comparison",))
-    assert plan.rule_id == "comparison_multi_strategy"
-    assert [s.name for s in plan.strategies] == ["hybrid", "bm25"]
-
-
-def test_regulation_scenario_adds_bm25():
-    p = _planner()
-    plan = p.plan(scenario_object="O2", scenario_depth="D2", entities={}, intents=())
-    assert plan.rule_id == "regulation_clause"
-    assert "bm25" in [s.name for s in plan.strategies]
-
-
-def test_regulation_id_entity_triggers_rule():
-    p = _planner()
-    plan = p.plan(
-        scenario_object="O1", scenario_depth="D2",
-        entities={"regulation_id": ["RG_1_157"]}, intents=(),
-    )
-    assert plan.rule_id == "has_regulation_id"
+    for so, sd, ents, intents in [
+        ("O1", "D2", {}, ("comparison",)),
+        ("O2", "D2", {}, ()),
+        ("O1", "D2", {"regulation_id": ["RG_1_157"]}, ()),
+    ]:
+        plan = p.plan(scenario_object=so, scenario_depth=sd, entities=ents, intents=intents)
+        assert plan.rule_id == "default"
+        assert [s.name for s in plan.strategies] == ["hybrid"]
 
 
 def test_plan_hash_deterministic_and_entity_sensitive():

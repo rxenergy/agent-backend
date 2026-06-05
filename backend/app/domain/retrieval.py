@@ -76,6 +76,31 @@ class RetrieverSearchOutput(BaseModel):
     chunks: list[RetrievedChunk] = Field(default_factory=list)
 
 
+class RerankInput(BaseModel):
+    """v3.1 Node 5 — `retriever.rerank` 입력. 1차 검색(hybrid) 후보 풀을 cross-encoder
+    가 질의-문서 쌍으로 재채점한다. dispatcher 가 RRF 대신 이 도구로 *순위*를 정한다.
+
+    `candidates` 는 1차 검색이 올린 후보(중복 제거된 union). reranker 는 후보를
+    *재정렬*만 할 뿐 새 문서를 만들지 않는다(1차 recall 이 상한)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    query_text: str
+    candidates: list[RetrievedChunk] = Field(default_factory=list)
+    top_k: int = 20
+
+
+class RerankOutput(BaseModel):
+    """`retriever.rerank` 출력. `chunks` 의 *순서*가 권위(authoritative rerank rank).
+    `RetrievedChunk.score` 는 raw 1차 점수 그대로 — rerank 점수는 `scores` 가 별도로
+    싣는다(RRF 시절 rrf_scores 와 동형: 순서=권위, score 는 raw 보존)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chunks: list[RetrievedChunk] = Field(default_factory=list)
+    scores: dict[str, float] = Field(default_factory=dict)  # chunk_id → rerank 점수
+
+
 class DocumentFetchSectionInput(BaseModel):
     """v3.1 P1 `document.fetch_section` 입력 — 한 Section 의 형제 문단 일괄 fetch.
 
@@ -137,7 +162,7 @@ class RetrievalPlan:
 
     rule_id: str
     strategies: tuple[RetrievalStrategy, ...] = ()
-    fusion: str = "rrf"
+    fusion: str = "rerank"  # v3.1 — RRF 제거, cross-encoder reranker 가 순위 권위.
     plan_hash: str | None = None
 
 
