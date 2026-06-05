@@ -114,8 +114,15 @@ class FermiEncoder:
         return self._to_term_dict(pooled[0])
 
     def encode_queries(self, texts: Sequence[str]) -> list[dict[str, float]]:
+        if not texts:
+            return []
         pooled = self._forward(list(texts))
         return [self._to_term_dict(pooled[i]) for i in range(pooled.size(0))]
+
+    def encode_documents(self, texts: Sequence[str]) -> list[dict[str, float]]:
+        # SPLADE 는 query/doc 인코딩이 동일 forward — sparse reranker 가 후보 본문을
+        # 배치로 희소 벡터화할 때 쓴다(encode_queries 와 동형 배치 경로).
+        return self.encode_queries(texts)
 
     def warmup(self) -> None:
         self.encode_query("warmup")
