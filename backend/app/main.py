@@ -8,7 +8,12 @@ from app.api import health, openai_compat
 from app.config.profiles import build_container, shutdown_container
 from app.config.settings import get_settings
 from app.observability.logging import configure_logging, get_logger
-from app.observability.otel import install_tracing, instrument_fastapi
+from app.observability.otel import (
+    install_logs,
+    install_metrics,
+    install_tracing,
+    instrument_fastapi,
+)
 
 
 @asynccontextmanager
@@ -16,6 +21,18 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
     install_tracing(
+        service_name=settings.otel_service_name,
+        service_version=settings.service_version,
+        otlp_endpoint=settings.otel_exporter_otlp_endpoint,
+        enabled=settings.otel_enabled,
+    )
+    install_metrics(
+        service_name=settings.otel_service_name,
+        service_version=settings.service_version,
+        otlp_endpoint=settings.otel_exporter_otlp_endpoint,
+        enabled=settings.otel_enabled,
+    )
+    install_logs(
         service_name=settings.otel_service_name,
         service_version=settings.service_version,
         otlp_endpoint=settings.otel_exporter_otlp_endpoint,

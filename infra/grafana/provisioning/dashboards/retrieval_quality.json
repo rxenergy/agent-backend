@@ -1,0 +1,123 @@
+{
+  "uid": "agent-retrieval-quality",
+  "title": "Agent — Retrieval Quality",
+  "tags": ["agent", "hierarchical_corrective", "plan-w2"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "안내",
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "검색·근거 품질 집계(Node 4~8 · Tool). scope_mode 가 recall 절벽(Q5)을, gate 결정과 strategy 실패가 검색 건강도를 가리킨다. **패널이 비면** 메트릭명 접미사(`_total`/`_bucket`)를 Prometheus 에서 확인."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Scope mode 분포 (Q5 — filter/boost/off)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 3 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "custom": { "stacking": { "mode": "normal" } } } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (mode) (rate(agent_scope_mode_total[5m]))",
+          "legendFormat": "{{mode}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "게이트 결정 (pass/weak/fail)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 3 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "custom": { "stacking": { "mode": "normal" } } } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (decision) (rate(agent_gate_decision_total[5m]))",
+          "legendFormat": "{{decision}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "전략 검색 실패 + 도구 호출 상태",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (strategy) (rate(agent_strategy_failures_total[5m]))",
+          "legendFormat": "strategy-fail {{strategy}}"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (tool, status) (rate(agent_tool_calls_total[5m]))",
+          "legendFormat": "{{tool}}/{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "검색 풀 크기 + 복구 라운드 (p50/p95)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(agent_retrieval_pool_size_bucket[5m])))",
+          "legendFormat": "pool p50"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(agent_recover_rounds_bucket[5m])))",
+          "legendFormat": "recover rounds p95"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "컨텍스트 변형 — 병합/예산 액션/다홉 + WEAK advisory",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 19 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(agent_section_merge_total[5m])",
+          "legendFormat": "section_merge"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (action) (rate(agent_budget_actions_total[5m]))",
+          "legendFormat": "budget {{action}}"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(agent_quality_advisory_total[5m])",
+          "legendFormat": "WEAK advisory"
+        }
+      ]
+    }
+  ]
+}

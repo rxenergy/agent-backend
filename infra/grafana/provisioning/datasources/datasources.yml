@@ -18,9 +18,23 @@ datasources:
     access: proxy
     url: http://prometheus:9090
     uid: prometheus
+    jsonData:
+      # histogram exemplar 의 trace_id 를 Tempo 로 점프(plan §4 metric→trace).
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
 
   - name: Loki
     type: loki
     access: proxy
     url: http://loki:3100
     uid: loki
+    jsonData:
+      # 로그 본문 JSON 의 trace_id 를 Tempo 로 링크(plan §4 Loki→Tempo). `$$` 는
+      # Grafana provisioning 의 env 보간을 피한 리터럴 ${__value.raw}.
+      derivedFields:
+        - name: trace_id
+          matcherRegex: "\"trace_id\":\\s*\"(\\w+)\""
+          url: "$${__value.raw}"
+          datasourceUid: tempo
+          urlDisplayLabel: "Tempo trace"

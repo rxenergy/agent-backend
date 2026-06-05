@@ -65,6 +65,7 @@ from app.domain.retrieval import (
     RetrieverSearchOutput,
 )
 from app.observability import openinference as oi
+from app.observability.metrics import get_metrics
 from app.observability.otel import get_tracer
 from app.ports.event_sink import EventSinkPort
 from app.ports.llm import LLMPort, LLMResult, LLMUnavailableError
@@ -291,6 +292,7 @@ class HierarchicalCorrectiveRunner:
     # ------------------------------------------------------------------
     async def run(self, request: AgentRequest) -> AgentResponse:
         started = time.monotonic()
+        metrics = get_metrics()  # plan §8 레버 3 — 도메인 밖 얇은 tap
         tool_calls: list[ToolCallRecord] = []
         tool_result_refs: list[str] = []
         # Live LLM-call budget (Node 13/14/16 increment). Snapshotted into the
@@ -323,6 +325,8 @@ class HierarchicalCorrectiveRunner:
             )
             if r.output_hash:
                 tool_result_refs.append(r.output_hash)
+            metrics.record_tool(tool=r.tool_name, status=r.status,
+                                retry_count=r.retry_count)
             emit_tool_nowait(
                 r.tool_name, r.status, version=r.tool_version,
                 latency_ms=r.latency_ms, error_code=r.error_code,
@@ -367,6 +371,9 @@ class HierarchicalCorrectiveRunner:
             await emit_step("intent_classification", "ok",
                             scenario_object=scenario_object,
                             scenario_depth=scenario_depth, confidence=conf)
+            metrics.record_classification(confidence=conf,
+                                          scenario_object=scenario_object,
+                                          scenario_depth=scenario_depth)
 
             # Node 2 — scenario_routing
             # scope_tier(LLM 분류기 산출)가 처리 계층을 먼저 가른다(taxonomy plan §4
@@ -479,30 +486,39 @@ class HierarchicalCorrectiveRunner:
             # === Phase B ===================================================
             # Node 4 — retrieval_plan_template (룰 기반, LLM 미사용)
             await emit_step("retrieval_plan", "started")
-            plan = self._planner.plan(
-                scenario_object=scenario_object,
-                scenario_depth=scenario_depth,
-                entities=entities,
-                intents=query_plan.intents,
-            )
-            # Layer 1 범위 한정 — corpus_map 이 (scenario_object/entities/intents)와
-            # 분류 confidence 로 scope 를 해석. high→filter / mid→boost / low→off.
-            # 잘못된 hard scope 의 recall 절벽을 confidence 게이트로 방어한다.
-            scope = self._corpus_map.resolve_scope(
-                scenario_object=scenario_object,
-                scenario_depth=scenario_depth,
-                intents=query_plan.intents,
-                entities=entities,
-                confidence=conf,
-                tau_high=self._scope_tau_high,
-                tau_low=self._scope_tau_low,
-                settings_min_token_count=self._scope_min_token_count,
-            )
+            with _TRACER.start_as_current_span("agent.retrieval_plan") as s:
+                oi.set_kind(s, oi.KIND_CHAIN)
+                plan = self._planner.plan(
+                    scenario_object=scenario_object,
+                    scenario_depth=scenario_depth,
+                    entities=entities,
+                    intents=query_plan.intents,
+                )
+                # Layer 1 범위 한정 — corpus_map 이 (scenario_object/entities/intents)와
+                # 분류 confidence 로 scope 를 해석. high→filter / mid→boost / low→off.
+                # 잘못된 hard scope 의 recall 절벽을 confidence 게이트로 방어한다.
+                scope = self._corpus_map.resolve_scope(
+                    scenario_object=scenario_object,
+                    scenario_depth=scenario_depth,
+                    intents=query_plan.intents,
+                    entities=entities,
+                    confidence=conf,
+                    tau_high=self._scope_tau_high,
+                    tau_low=self._scope_tau_low,
+                    settings_min_token_count=self._scope_min_token_count,
+                )
+                s.set_attribute("plan.rule_id", plan.rule_id)
+                s.set_attribute("plan.plan_hash", plan.plan_hash)
+                s.set_attribute("plan.strategies", [st.name for st in plan.strategies])
+                # scope_mode 가 recall 절벽 추적의 핵심(Q5) — filter/boost/off.
+                s.set_attribute("scope.mode", scope.mode)
+                s.set_attribute("scope.min_token_count", scope.min_token_count)
             await emit_step("retrieval_plan", "ok", rule_id=plan.rule_id,
                             plan_hash=plan.plan_hash,
                             strategies=[s.name for s in plan.strategies],
                             scope_mode=scope.mode,
                             scope_min_token_count=scope.min_token_count)
+            metrics.record_scope(mode=scope.mode)
 
             # Node 3 pre-step memory.session_load (needed by Node 10 decision).
             session_load = await self._tools.invoke(
@@ -585,11 +601,13 @@ class HierarchicalCorrectiveRunner:
                                 }
                                 for c in chunks
                             ])
+            metrics.record_retrieval(pool_size=len(pool),
+                                     failed_strategies=dispatch.failed_strategies)
 
             # Node 6 — retrieval_evaluate (5-신호 결정론 게이트)
             await emit_step("retrieval_evaluate", "started")
             with _TRACER.start_as_current_span("agent.retrieval_evaluate") as s:
-                oi.set_kind(s, oi.KIND_CHAIN)
+                oi.set_kind(s, oi.KIND_EVALUATOR)  # 5-신호 채점 게이트
                 evaluation = self._evaluator.evaluate(
                     chunks,
                     query_text=request.query_text,
@@ -624,6 +642,7 @@ class HierarchicalCorrectiveRunner:
                                 if evaluation.overall_decision != GateDecision.PASS.value
                                 else None
                             ))
+            metrics.record_gate(decision=evaluation.overall_decision)
 
             # Node 7 — retrieval_recover. WEAK/FAIL → 결정론 진단·복구 → Node 5
             # 재-dispatch → Node 6 재평가. max N round. 경계는 dispatch→evaluate 만
@@ -697,6 +716,10 @@ class HierarchicalCorrectiveRunner:
             if not recover_rounds:
                 await emit_step("retrieval_recover", "skipped")
             entities = cur_entities  # 복구로 확장된 entity 를 downstream 에 반영.
+            # Q1 — 복구 라운드 수 + 복구 후 게이트 결과(WEAK→PASS flip). FAIL refuse
+            # 이전에 기록해 거부 경로의 복구도 집계에 든다.
+            metrics.record_recover(rounds=len(recover_rounds),
+                                   outcome=evaluation.overall_decision)
 
             # 복구 소진 후에도 FAIL → 답할 자격 미달. 결정 (a): FAIL → refuse
             # INSUFFICIENT_EVIDENCE(복구 시도함); WEAK → 진행(Node 15 claim gate 가
@@ -717,13 +740,18 @@ class HierarchicalCorrectiveRunner:
             # 참조는 v1 에서 clause_id 가 null 이라 v2-gated(미구현).
             await emit_step("multi_hop_expand", "started")
             hop_edges: list[HopEdge] = []
-            hop_chunks = await self._multi_hop(chunks, ctx=ctx, record=record,
-                                               edges_out=hop_edges)
-            if hop_chunks:
-                chunks = chunks + hop_chunks
+            with _TRACER.start_as_current_span("agent.multi_hop_expand") as s:
+                oi.set_kind(s, oi.KIND_RETRIEVER)
+                hop_chunks = await self._multi_hop(chunks, ctx=ctx, record=record,
+                                                   edges_out=hop_edges)
+                if hop_chunks:
+                    chunks = chunks + hop_chunks
+                s.set_attribute("hop.num_edges", len(hop_edges))
+                s.set_attribute("hop.num_hop_chunks", len(hop_chunks))
             await emit_step("multi_hop_expand",
                             "ok" if hop_edges else "skipped",
                             num_hops=len(hop_edges), num_hop_chunks=len(hop_chunks))
+            metrics.record_hops(num_edges=len(hop_edges))
 
             # Node 9 — evidence_snippet (문장 window 추출; LLM 미사용)
             await emit_step("evidence_snippet", "started")
@@ -756,38 +784,48 @@ class HierarchicalCorrectiveRunner:
             # (재게이트 없음 — §4.1 분모 트랩 회피), snippet 만 Section 본문으로 치환.
             # leaf window 는 demote 복원용으로 스태시. local fetch 는 빈 결과라 no-op.
             await emit_step("section_merge", "started")
-            chunks, leaf_window_stash, promoted_ids = await self._section_merge(
-                chunks, evaluation, ctx=ctx, record=record,
-            )
-            # 승격 flag·정책 해시는 *실제로 병합된* chunk(=형제 fetch 성공, stash 존재)에만
-            # 기록한다. promoted_ids(=non-PASS) 만으로 기록하면 local/형제부재 경로에서
-            # "Section 병합이 일어났다"고 event 가 거짓 보고한다(감사 신뢰성).
-            merged_ids = set(leaf_window_stash)
-            if merged_ids:
-                evaluation = replace(
-                    evaluation,
-                    per_chunk=tuple(
-                        replace(sig, promote=(sig.chunk_id in merged_ids))
-                        for sig in evaluation.per_chunk
-                    ),
+            with _TRACER.start_as_current_span("agent.section_merge") as s:
+                oi.set_kind(s, oi.KIND_CHAIN)
+                chunks, leaf_window_stash, promoted_ids = await self._section_merge(
+                    chunks, evaluation, ctx=ctx, record=record,
                 )
+                # 승격 flag·정책 해시는 *실제로 병합된* chunk(=형제 fetch 성공, stash 존재)에만
+                # 기록한다. promoted_ids(=non-PASS) 만으로 기록하면 local/형제부재 경로에서
+                # "Section 병합이 일어났다"고 event 가 거짓 보고한다(감사 신뢰성).
+                merged_ids = set(leaf_window_stash)
+                if merged_ids:
+                    evaluation = replace(
+                        evaluation,
+                        per_chunk=tuple(
+                            replace(sig, promote=(sig.chunk_id in merged_ids))
+                            for sig in evaluation.per_chunk
+                        ),
+                    )
+                s.set_attribute("merge.num_promoted", len(promoted_ids))
+                s.set_attribute("merge.num_merged", len(merged_ids))
             await emit_step("section_merge",
                             "ok" if merged_ids else "skipped",
                             num_promoted=len(promoted_ids),
                             num_merged=len(merged_ids))
+            metrics.record_section_merge(merged=len(merged_ids))
 
             # P1b 예산 거버너 — context_token_budget>0 일 때만 활성(기본 0 → no-op,
             # 기존 동작 보존). 강등 순서: 승격→leaf 복원 → 최하위 drop → (Node 9 window).
             # 이후 lost-in-the-middle 재배치. 모든 강등·drop 은 로그(silent 금지).
             budget_log: list[str] = []
             if self._context_token_budget > 0:
-                chunks = self._apply_context_budget(
-                    chunks, leaf_window_stash, budget_log=budget_log,
-                )
+                with _TRACER.start_as_current_span("agent.context_budget") as s:
+                    oi.set_kind(s, oi.KIND_CHAIN)
+                    chunks = self._apply_context_budget(
+                        chunks, leaf_window_stash, budget_log=budget_log,
+                    )
+                    s.set_attribute("budget.budget", self._context_token_budget)
+                    s.set_attribute("budget.actions", len(budget_log))
                 if budget_log:
                     await emit_step("context_budget", "ok",
                                     budget=self._context_token_budget,
                                     actions=len(budget_log))
+                metrics.record_budget_actions(actions=budget_log)
 
             # === Phase C ===================================================
             # Node 5 pre-step approved memory search + Node 10 decision.
@@ -821,43 +859,49 @@ class HierarchicalCorrectiveRunner:
             memory_review_statuses: dict[str, str] = {}
             memory_staleness_statuses: dict[str, str] = {}
             memory_retrieval_scores: dict[str, float] = {}
-            if decision.inject and session_load.output and session_load.output.get("present"):
-                sid = request.session_id or ""
-                memory_ids_used.append(sid)
-                memory_types_used.append("session")
-                memory_review_statuses[sid] = MemoryReviewStatus.APPROVED.value
-                memory_staleness_statuses[sid] = StalenessStatus.FRESH.value
-                memory_refs = (
-                    MemoryRef(
-                        memory_id=sid, memory_type="session",
-                        review_status=MemoryReviewStatus.APPROVED.value,
-                        staleness_status=StalenessStatus.FRESH.value,
-                    ),
-                )
-            for hit in (approved.output or {}).get("hits", []) or []:
-                mid = hit.get("memory_id")
-                if not mid:
-                    continue
-                memory_retrieval_scores[mid] = float(hit.get("score", 0.0))
-                memory_ids_used.append(mid)
-                memory_types_used.append("approved")
-                memory_review_statuses[mid] = MemoryReviewStatus.APPROVED.value
-                memory_staleness_statuses[mid] = StalenessStatus.FRESH.value
-                memory_refs = memory_refs + (
-                    MemoryRef(
-                        memory_id=mid, memory_type="approved",
-                        review_status=MemoryReviewStatus.APPROVED.value,
-                        staleness_status=StalenessStatus.FRESH.value,
-                    ),
-                )
-            if self._summarizer is not None:
-                summ = await self._summarizer.summarize(
-                    prior_summary=conversation_summary,
-                    chat_history=request.chat_history,
-                )
-                conversation_summary = summ.summary or conversation_summary
+            with _TRACER.start_as_current_span("agent.memory_inject") as s:
+                oi.set_kind(s, oi.KIND_CHAIN)
+                if decision.inject and session_load.output and session_load.output.get("present"):
+                    sid = request.session_id or ""
+                    memory_ids_used.append(sid)
+                    memory_types_used.append("session")
+                    memory_review_statuses[sid] = MemoryReviewStatus.APPROVED.value
+                    memory_staleness_statuses[sid] = StalenessStatus.FRESH.value
+                    memory_refs = (
+                        MemoryRef(
+                            memory_id=sid, memory_type="session",
+                            review_status=MemoryReviewStatus.APPROVED.value,
+                            staleness_status=StalenessStatus.FRESH.value,
+                        ),
+                    )
+                for hit in (approved.output or {}).get("hits", []) or []:
+                    mid = hit.get("memory_id")
+                    if not mid:
+                        continue
+                    memory_retrieval_scores[mid] = float(hit.get("score", 0.0))
+                    memory_ids_used.append(mid)
+                    memory_types_used.append("approved")
+                    memory_review_statuses[mid] = MemoryReviewStatus.APPROVED.value
+                    memory_staleness_statuses[mid] = StalenessStatus.FRESH.value
+                    memory_refs = memory_refs + (
+                        MemoryRef(
+                            memory_id=mid, memory_type="approved",
+                            review_status=MemoryReviewStatus.APPROVED.value,
+                            staleness_status=StalenessStatus.FRESH.value,
+                        ),
+                    )
+                if self._summarizer is not None:
+                    summ = await self._summarizer.summarize(
+                        prior_summary=conversation_summary,
+                        chat_history=request.chat_history,
+                    )
+                    conversation_summary = summ.summary or conversation_summary
+                s.set_attribute("memory.inject", decision.inject)
+                s.set_attribute("memory.num_refs", len(memory_refs))
+                s.set_attribute("memory.types", sorted(set(memory_types_used)))
             await emit_step("memory_inject", "ok", inject=decision.inject,
                             num_memory_refs=len(memory_refs))
+            metrics.record_memory_inject(inject=decision.inject)
 
             # Node 11 — context_build
             await emit_step("context_build", "started")
@@ -969,6 +1013,8 @@ class HierarchicalCorrectiveRunner:
             await emit_step("prompt_render", "ok", profile_id=rendered.profile_id,
                             profile_version=rendered.profile_version,
                             retrieval_advisory=quality_note is not None)
+            if quality_note is not None:
+                metrics.record_quality_advisory()
 
             # Node 13 — generation
             await emit_step("generation", "started", llm_id=llm_id)
@@ -981,6 +1027,10 @@ class HierarchicalCorrectiveRunner:
             llm_calls_used += 1
             await emit_step("generation", "ok",
                             completion_tokens=llm_result.token_usage.get("completion_tokens", 0))
+            metrics.record_tokens(
+                prompt_tokens=int(llm_result.token_usage.get("prompt_tokens", 0)),
+                completion_tokens=int(llm_result.token_usage.get("completion_tokens", 0)),
+            )
 
             citation_ids = [c.citation_id for c in pack.citation_candidates]
             chunk_ids = [c.chunk_id for c in chunks]
@@ -1037,15 +1087,20 @@ class HierarchicalCorrectiveRunner:
             else:
                 utility = self._utility_llm or llm  # Node 14/15 LLM(temperature 0)
 
-                # Node 14 — claim_decompose
+                # Node 14 — claim_decompose (내부 verify.claim_decompose LLM span 이 nest)
                 await emit_step("claim_decompose", "started")
-                decomposed = await ClaimDecomposer(utility).decompose(llm_result.text)
-                if decomposed.method == "llm":
-                    llm_calls_used += 1
-                decompose_method = decomposed.method
+                with _TRACER.start_as_current_span("agent.claim_decompose") as s:
+                    oi.set_kind(s, oi.KIND_CHAIN)
+                    decomposed = await ClaimDecomposer(utility).decompose(llm_result.text)
+                    if decomposed.method == "llm":
+                        llm_calls_used += 1
+                    decompose_method = decomposed.method
+                    s.set_attribute("decompose.method", decomposed.method)
+                    s.set_attribute("decompose.num_claims", len(decomposed.claims))
                 await emit_step("claim_decompose", "ok",
                                 num_claims=len(decomposed.claims),
                                 method=decomposed.method)
+                metrics.record_decompose(num_claims=len(decomposed.claims))
 
                 # Node 15 — claim_verify (4-step per claim → 집계 status)
                 await emit_step("claim_verify", "started")
@@ -1071,30 +1126,49 @@ class HierarchicalCorrectiveRunner:
                 revision_by_cite = {
                     c.citation_id: c.revision for c in final_candidates if c.revision
                 }
-                verifier = ClaimVerifier(EntailmentChecker(utility))
-                verify_res = await verifier.verify(
-                    list(decomposed.claims),
-                    resolvable_citation_ids=set(resolvable_citation_ids),
-                    candidate_citation_ids={c.citation_id for c in pack.citation_candidates},
-                    evidence_by_cite=evidence_by_cite,
-                    version_constraint=query_plan.version_constraint,
-                    revision_by_cite=revision_by_cite,
-                )
-                if verify_res.entailment_ran:
-                    llm_calls_used += 1
-                claims = verify_res.claims
-                verification_status = verify_res.status
-                entailment_model = (
-                    EntailmentChecker(utility).model_id if verify_res.entailment_ran else None
-                )
-                # 이벤트 호환용 두 스칼라 — claim 집계에서 파생(구 _run_checks 대체).
-                n_claims = max(1, len(claims))
-                citation_completeness = sum(
-                    1 for cv in claims if cv.checks.citation_resolves
-                ) / n_claims
-                faithfulness = sum(
-                    1 for cv in claims if cv.status == ClaimStatus.SUPPORTED.value
-                ) / n_claims
+                with _TRACER.start_as_current_span("agent.claim_verify") as s:
+                    # 검증 코어 — 채점·판정이 본질이라 EVALUATOR. 내부 verify.entailment
+                    # LLM span 이 이 아래 nest 된다. 집계 결정(status·contradicted·
+                    # per-claim status)은 어떤 span 에도 없던 갭 — 실패 귀인의 척추(§5).
+                    oi.set_kind(s, oi.KIND_EVALUATOR)
+                    verifier = ClaimVerifier(EntailmentChecker(utility))
+                    verify_res = await verifier.verify(
+                        list(decomposed.claims),
+                        resolvable_citation_ids=set(resolvable_citation_ids),
+                        candidate_citation_ids={c.citation_id for c in pack.citation_candidates},
+                        evidence_by_cite=evidence_by_cite,
+                        version_constraint=query_plan.version_constraint,
+                        revision_by_cite=revision_by_cite,
+                    )
+                    if verify_res.entailment_ran:
+                        llm_calls_used += 1
+                    claims = verify_res.claims
+                    verification_status = verify_res.status
+                    entailment_model = (
+                        EntailmentChecker(utility).model_id if verify_res.entailment_ran else None
+                    )
+                    # 이벤트 호환용 두 스칼라 — claim 집계에서 파생(구 _run_checks 대체).
+                    n_claims = max(1, len(claims))
+                    citation_completeness = sum(
+                        1 for cv in claims if cv.checks.citation_resolves
+                    ) / n_claims
+                    faithfulness = sum(
+                        1 for cv in claims if cv.status == ClaimStatus.SUPPORTED.value
+                    ) / n_claims
+                    s.set_attribute("verify.status", verification_status)
+                    s.set_attribute("verify.num_claims", len(claims))
+                    s.set_attribute("verify.contradicted", verify_res.contradicted)
+                    s.set_attribute("verify.entailment_ran", verify_res.entailment_ran)
+                    s.set_attribute("verify.faithfulness", faithfulness)
+                    s.set_attribute("verify.citation_completeness", citation_completeness)
+                    # per-claim status(소량, bounded by num_claims) — 어느 claim 이
+                    # unsupported/contradicted 로 떨어졌는지 trace 에서 바로 본다.
+                    s.set_attribute("verify.claim_statuses", [cv.status for cv in claims])
+                    oi.set_io(s, output_value={
+                        "status": verification_status,
+                        "num_claims": len(claims),
+                        "contradicted": verify_res.contradicted,
+                    })
                 await emit_step("claim_verify", "ok",
                                 verification_status=verification_status,
                                 num_claims=len(claims),
@@ -1103,6 +1177,9 @@ class HierarchicalCorrectiveRunner:
                                     if cv.status == ClaimStatus.SUPPORTED.value),
                                 contradicted=verify_res.contradicted,
                                 entailment_ran=verify_res.entailment_ran)
+                metrics.record_verification(status=verification_status,
+                                            faithfulness=faithfulness,
+                                            contradicted=verify_res.contradicted)
 
             # Node 16 — selective_regenerate (PR-9 와 함께 배선). interim: partial/
             # unsupported 는 위에서 PARTIAL 로 귀결, contradicted 는 아래 response_format
@@ -1198,6 +1275,20 @@ class HierarchicalCorrectiveRunner:
                     },
                 )
 
+            # 터미널 집계 — answer/partial/refused. refusal(VERIFICATION_FAILED 등)은
+            # 사유 counter 에도(smooth 금지 §6). _refuse 경로는 자체적으로 기록한다.
+            terminal_outcome = (
+                "answer" if refusal is None
+                else "partial" if verification_status == VerificationStatus.PARTIAL.value
+                else "refused"
+            )
+            metrics.record_terminal(outcome=terminal_outcome,
+                                    latency_ms=response.latency_ms,
+                                    scenario_object=scenario_object,
+                                    scenario_depth=scenario_depth)
+            if refusal is not None:
+                metrics.record_refusal(reason=refusal)
+
             with _TRACER.start_as_current_span("event.persist") as s:
                 event = self._recorder.build(
                     request=request,
@@ -1264,6 +1355,7 @@ class HierarchicalCorrectiveRunner:
                     section_merge_policy_hash=(
                         self._section_merge_policy_hash if merged_ids else None
                     ),
+                    context_budget_actions=tuple(budget_log),
                     claims=claims,
                     verifier_policy_hash=None,
                     entailment_model=entailment_model,
@@ -1574,6 +1666,10 @@ class HierarchicalCorrectiveRunner:
             **scope_kwargs,
         )
         await self._recorder.persist(event)
+        m = get_metrics()
+        m.record_refusal(reason=reason.value)
+        m.record_terminal(outcome="refused", latency_ms=response.latency_ms,
+                          scenario_object=scenario_object, scenario_depth=scenario_depth)
         return response
 
     async def _meta_answer(self, request, started, tool_calls,

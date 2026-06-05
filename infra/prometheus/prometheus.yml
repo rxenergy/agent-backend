@@ -2,12 +2,10 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# 경로 B 단일(plan §7): 앱은 OTLP metrics 를 Collector 로 보내고 Prometheus 는
+# Collector 의 prometheus exporter(:8889)만 스크레이프한다. 앱의 `/metrics`(경로 A)
+# job 은 채택하지 않아 제거. exemplar 저장은 compose 의 --enable-feature=exemplar-storage.
 scrape_configs:
   - job_name: otel-collector
     static_configs:
       - targets: ["otel-collector:8889"]
-
-  - job_name: agent-api
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["agent-api:8000"]

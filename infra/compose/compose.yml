@@ -122,6 +122,8 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
+      # exemplar 저장 — histogram 샘플의 trace_id 를 보관해 Grafana metric→trace 점프.
+      - "--enable-feature=exemplar-storage"
     volumes:
       - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus

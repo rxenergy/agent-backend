@@ -26,6 +26,14 @@ exporters:
       insecure: true
   prometheus:
     endpoint: 0.0.0.0:8889
+    # OpenMetrics 노출 → histogram exemplar(trace_id)를 Prometheus 가 스크레이프할 수
+    # 있게 한다(plan §4 Prometheus→Tempo 드릴다운의 전제). SDK 는 trace-based exemplar
+    # 를 기본 기록하고, Prometheus 는 --enable-feature=exemplar-storage 로 저장한다.
+    enable_open_metrics: true
+  # Loki 3.x 네이티브 OTLP 수신(/otlp/v1/logs). 앱 OTLP 로그가 trace_id 를 실어
+  # Loki↔Tempo 상호 점프를 닫는다(plan §4 W3). 새 수집기(promtail/Alloy) 불필요.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
   debug:
     verbosity: basic
 
@@ -42,4 +50,4 @@ service:
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [debug]
+      exporters: [otlphttp/loki]

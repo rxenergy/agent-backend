@@ -169,6 +169,10 @@ class InteractionEvent:
     recover_rounds: tuple[RecoverRound, ...] = ()
     # v3.1 P1 Section auto-merge 정책 sha(승격·조립이 실행된 경우만). None=미실행.
     section_merge_policy_hash: str | None = None
+    # P1b 예산 거버너(Node context_budget)가 수행한 강등·drop·재배치 액션 목록.
+    # 빈 tuple=거버너 비활성(budget=0) 또는 액션 없음. 액션 상세는 metric 라벨이 아닌
+    # event 로만 영속(고카디널리티 — chunk_id 포함). 인용 desync·근거 변형 감사용.
+    context_budget_actions: tuple[str, ...] = ()
     hops: tuple[HopEdge, ...] = ()
     evidence_pack_hash: str | None = None
     claims: tuple[ClaimVerification, ...] = ()

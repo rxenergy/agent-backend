@@ -692,8 +692,37 @@ async def test_phoenix_spans_emitted_on_pass_path(span_exporter) -> None:
     assert ev.attributes.get("evaluate.overall_decision") == "pass"
     assert "evaluate.num_pass" in ev.attributes
     assert "evaluate.policy_hash" in ev.attributes
+    # 게이트 노드는 EVALUATOR kind(채점 게이트) — CHAIN 이 아니다.
+    assert ev.attributes.get("openinference.span.kind") == "EVALUATOR"
     snip = by_name["agent.evidence_snippet"][0]
     assert "snippet.pack_hash" in snip.attributes  # None 이면 OTel 이 드롭 → 실패
+
+    # (2b) W1 span-gap 충전 — 9개 누락 노드가 모두 span 으로 닿는다(실패 귀인 척추).
+    for name in ("agent.scenario_routing", "agent.query_understanding",
+                 "agent.retrieval_plan", "agent.multi_hop_expand",
+                 "agent.section_merge", "agent.memory_inject",
+                 "agent.claim_decompose", "agent.claim_verify"):
+        assert name in by_name, f"missing W1 node span: {name}"
+    # 라우팅은 GUARDRAIL, 검증 코어는 EVALUATOR — 정밀화된 span kind.
+    assert by_name["agent.scenario_routing"][0].attributes.get(
+        "openinference.span.kind") == "GUARDRAIL"
+    assert by_name["agent.scenario_routing"][0].attributes.get("routing.active") is True
+    cv = by_name["agent.claim_verify"][0]
+    assert cv.attributes.get("openinference.span.kind") == "EVALUATOR"
+    assert cv.attributes.get("verify.status") == "pass"  # 집계 status(per-claim 아님)
+    assert "verify.num_claims" in cv.attributes
+    assert "verify.faithfulness" in cv.attributes
+    assert cv.attributes.get("verify.contradicted") is False
+    # 내부 verify.entailment LLM span 이 claim_verify EVALUATOR 아래 nest 된다.
+    nested = [
+        sp for sp in span_exporter.get_finished_spans()
+        if sp.name == "verify.entailment"
+        and sp.parent is not None
+        and sp.parent.span_id == cv.context.span_id
+    ]
+    assert nested, "verify.entailment did not nest under agent.claim_verify"
+    # retrieval_plan 은 scope_mode 를 실어 recall 절벽 추적(Q5)을 가능케 한다.
+    assert "scope.mode" in by_name["agent.retrieval_plan"][0].attributes
 
     # (3) context_build RETRIEVER 타일에 chunk 가 실린다(v2 parity 회귀 복원).
     cb = by_name["agent.context_build"][0]
@@ -727,6 +756,36 @@ async def test_phoenix_recover_round_spans_distinguishable(span_exporter) -> Non
         and sp.parent.span_id == r0.context.span_id
     ]
     assert tool_spans, "recover round's retriever.search did not nest under round span"
+
+
+@pytest.mark.asyncio
+async def test_otlp_metrics_recorded_on_pass_path() -> None:
+    """W2 — conductor 메트릭 tap 이 실제 MeterProvider 아래서 핵심 집계를 emit.
+    proxy instrument 는 provider 설치 후 첫 측정에서 lazily resolve 된다."""
+    from opentelemetry import metrics as _metrics_api
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    reader = InMemoryMetricReader()
+    _metrics_api.set_meter_provider(MeterProvider(metric_readers=[reader]))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), llm=_ClaimAwareLLM(entailment_status="supported"))
+        req = AgentRequest(interaction_id="mp1", query_text="APR1400 안전계통", session_id="m1")
+        resp = await runner.run(req)
+        assert resp.verification_status == "pass"
+
+    data = reader.get_metrics_data()
+    names = {
+        metric.name
+        for rm in data.resource_metrics
+        for sm in rm.scope_metrics
+        for metric in sm.metrics
+    }
+    # 분석 질문 Q1~Q3 의 집계 신호가 닿는다(OTLP instrument 명; collector 가 _ 로 변환).
+    for n in ("agent.requests", "agent.gate.decision", "agent.verification.status",
+              "agent.classification.confidence", "agent.faithfulness", "agent.tool.calls"):
+        assert n in names, f"missing metric: {n} (got {sorted(names)})"
 
 
 class _ScopeCapturingRetriever:
