@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,9 @@ class ClassificationPromptSource:
         self.prompt_body: str = ""
         self.model_options: dict[str, Any] = {}
         self.output_schema: str = ""
+        # output_schema 를 파싱한 dict — classify() 의 guided decoding(json_schema
+        # grammar)에 쓴다. answer_spec/translate 와 동일 idiom. 빈 dict 면 grammar 미적용.
+        self.schema: dict[str, Any] = {}
         self.policy_hash: str = ""
         self._load()
 
@@ -56,6 +60,13 @@ class ClassificationPromptSource:
         self.model_options = dict(block.get("model_options") or {})
         self.prompt_body = self._read_verified(block, "prompt")
         self.output_schema = self._read_verified(block, "output_schema")
+        try:
+            self.schema = json.loads(self.output_schema)
+        except json.JSONDecodeError as exc:
+            raise PromptRegistryError(
+                f"classification_prompts.{self._profile_id} output_schema is not "
+                f"valid JSON: {exc}"
+            ) from exc
         # 정책 핀 = 프롬프트 본문 sha16 (인라인 시절과 동일 idiom).
         self.policy_hash = hashlib.sha256(
             self.prompt_body.encode("utf-8")
@@ -88,4 +99,5 @@ class ClassificationPromptSource:
             prompt_body=self.prompt_body,
             model_options=self.model_options,
             policy_hash=self.policy_hash,
+            schema=self.schema,
         )

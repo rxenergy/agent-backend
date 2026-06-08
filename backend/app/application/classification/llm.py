@@ -16,7 +16,7 @@ from app.domain.classification import (
     ClassificationResult,
 )
 from app.domain.interaction import ChatTurn
-from app.ports.llm import LLMPort, LLMUnavailableError
+from app.ports.llm import GrammarSpec, LLMPort, LLMUnavailableError
 
 # 분류 프롬프트 본문은 더 이상 코드 인라인이 아니다 — prompts/registry.yaml 의
 # classification_prompts 블록(ClassificationPromptSource)이 source of truth 다.
@@ -48,10 +48,15 @@ class LLMClassifier:
         prompt_body: str | None = None,
         model_options: dict[str, Any] | None = None,
         policy_hash: str | None = None,
+        schema: dict[str, Any] | None = None,
     ) -> None:
         self._llm = llm
         self._prompt = prompt_body if prompt_body is not None else _FALLBACK_PROMPT
         self._model_options = dict(model_options or _DEFAULT_MODEL_OPTIONS)
+        # guided decoding 스키마(json_schema grammar). 주입되면 백엔드가 object/depth/
+        # intent/scope_tier 를 enum 에, 6 개 필드를 완결 JSON 에 강제한다(vLLM guided_json
+        # / OpenAI response_format). 미주입(테스트/fake)이면 자유 생성 + 사후 파싱 폴백.
+        self._schema = dict(schema) if schema else None
         # 정적 정책 핀(프롬프트 sha) — refusal 이벤트가 읽는다. registry source 가
         # 동일 sha 를 미리 계산해 넘기면 재계산을 생략(동일값 보장).
         self.policy_hash = policy_hash or _policy_hash(self._prompt)
@@ -62,8 +67,14 @@ class LLMClassifier:
         chat_history: Iterable[ChatTurn] = (),
     ) -> ClassificationResult:
         prompt = self._prompt.replace("{query}", query_text)
+        grammar = (
+            GrammarSpec(kind="json_schema", value=self._schema)
+            if self._schema else None
+        )
         try:
-            result = await self._llm.generate(prompt, model_options=self._model_options)
+            result = await self._llm.generate(
+                prompt, model_options=self._model_options, grammar=grammar
+            )
         except LLMUnavailableError:
             return self._fallback(query_text, "llm_classifier_unavailable")
         parsed = _parse_json(result.text)

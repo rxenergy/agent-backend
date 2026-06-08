@@ -23,7 +23,7 @@ def _llm_classifier(llm) -> LLMClassifier:
 class _StubLLM:
     text: str
 
-    async def generate(self, prompt: str, *, model_options=None):
+    async def generate(self, prompt: str, *, model_options=None, grammar=None):
         return LLMResult(text=self.text, token_usage={"prompt_tokens": 1, "completion_tokens": 1}, model_id="stub")
 
 

@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # fake-echo는 항상 풀에 자동 포함되므로 여기 정의하지 않는다.
     llm_pool: list[LLMPoolEntry] = []
     default_llm: str = "fake-echo"
-    utility_llm: str = "fake-echo"
+    utility_llm: str = ""
     llm_timeout_s: float = 30.0
     llm_max_attempts: int = 2
 

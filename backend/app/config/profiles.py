@@ -234,12 +234,17 @@ async def build_container(settings: Settings) -> AppContainer:
         raise ValueError(
             f"default_llm={settings.default_llm!r} not in pool ids={sorted(llm_pool)}"
         )
-    if settings.utility_llm not in llm_pool:
+    # utility_llm 미지정(빈 값)이면 default_llm 로 폴백 — UTILITY_LLM 을 안 잡으면
+    # 분류기/요약/translate/answer_spec 이 fake-echo 에 묶여 confidence 0 으로
+    # 무너지던 함정을 제거한다. 부트 시 단일 모델로 핀되므로(요청별 model 추종이
+    # 아님) 재현성(원칙 5)·결정성은 보존된다. default_llm 은 233 행에서 이미 풀 검증됨.
+    utility_llm_id = settings.utility_llm or settings.default_llm
+    if utility_llm_id not in llm_pool:
         raise ValueError(
-            f"utility_llm={settings.utility_llm!r} not in pool ids={sorted(llm_pool)}"
+            f"utility_llm={utility_llm_id!r} not in pool ids={sorted(llm_pool)}"
         )
     llm_router = LLMRouter(pool=llm_pool, default_id=settings.default_llm)
-    utility_llm = llm_pool[settings.utility_llm]
+    utility_llm = llm_pool[utility_llm_id]
 
     # Heavy deps (postgres pool / tool executor / prompt resolver / classifier /
     # summarizer) are constructed only when at least one enabled variant
@@ -576,7 +581,7 @@ async def build_container(settings: Settings) -> AppContainer:
         llm_pool=sorted(llm_pool.keys()),
         default_variant=settings.default_variant,
         default_llm=settings.default_llm,
-        utility_llm=settings.utility_llm,
+        utility_llm=utility_llm_id,  # 폴백 해석된 실제 id(빈 값이면 default_llm).
     )
 
     return AppContainer(
