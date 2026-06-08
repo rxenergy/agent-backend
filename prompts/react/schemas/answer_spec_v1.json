@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "react_answer_spec_v1",
+  "description": "react_minimal_v1 pre-retrieval answer specification. Produced from the raw user question (no classifier/translation upstream) and consumed by (a) the ReAct retrieval system prompt — required_slots tell the model what evidence to find and when to report missing_info — and (b) the generation prompt — answer_plan + governing_normative_class steer composition and authority weighting. Slot name/description are English (English corpus + English ReAct reasoning); the question may be Korean. Informs the model; not a deterministic gate.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["governing_normative_class", "required_slots", "answer_plan"],
+  "properties": {
+    "governing_normative_class": {
+      "description": "The single authority rung that must anchor a defensible answer. binding=10 CFR/GDC/NSSC; advisory=RG/SRP/DSRS; review_record=SER/RAI; applicant_claim=FSAR/DCA; definitional=normative definition; mixed=two rungs co-anchor; unknown=too vague to place.",
+      "type": "string",
+      "enum": ["binding", "advisory", "review_record", "applicant_claim", "definitional", "mixed", "unknown"]
+    },
+    "required_slots": {
+      "description": "Evidence pieces the answer must rest on. Model instantiates per query from the candidate prior.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "description", "required"],
+        "properties": {
+          "name": {
+            "description": "Short snake_case English identifier (drives English-corpus retrieval).",
+            "type": "string"
+          },
+          "description": {
+            "description": "English, one line: what to find and, where useful, in which source family.",
+            "type": "string"
+          },
+          "required": {
+            "description": "true if the answer cannot be defended without this slot; false if it only strengthens it.",
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "answer_plan": {
+      "description": "One or two sentences naming the composition strategy for this question: what to conclude, what to compare/separate, which authority distinctions to preserve. Composition guidance, not the answer. Language-neutral.",
+      "type": "string"
+    }
+  }
+}
