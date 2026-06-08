@@ -151,9 +151,23 @@ fi
 # 5. EIP
 # ─────────────────────────────────────────────────────────────────────────
 log "5/8 EIP 할당"
-EIP_ALLOC=$(aws ec2 allocate-address --region "${REGION}" --domain vpc \
-    --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Project,Value=${PROJECT_TAG}}]" \
-    --query 'AllocationId' --output text)
+# 멱등: 이전 run 이 step 8 직전(EIP 할당 후 run-instances 실패)에서 죽었을 때
+# .state/eip-alloc 에 남은 할당을 재사용한다. 그러지 않으면 재실행마다
+# 미연결 EIP 가 새로 새서 과금된다 (associate 안 된 EIP 는 시간당 과금).
+EIP_ALLOC=""
+if [ -f "${STATE_DIR}/eip-alloc" ]; then
+    PREV_ALLOC="$(cat "${STATE_DIR}/eip-alloc")"
+    if aws ec2 describe-addresses --region "${REGION}" \
+         --allocation-ids "${PREV_ALLOC}" >/dev/null 2>&1; then
+        EIP_ALLOC="${PREV_ALLOC}"
+        log "    기존 EIP 재사용: ${EIP_ALLOC}"
+    fi
+fi
+if [ -z "${EIP_ALLOC}" ]; then
+    EIP_ALLOC=$(aws ec2 allocate-address --region "${REGION}" --domain vpc \
+        --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Project,Value=${PROJECT_TAG}}]" \
+        --query 'AllocationId' --output text)
+fi
 EIP=$(aws ec2 describe-addresses --region "${REGION}" \
     --allocation-ids "${EIP_ALLOC}" --query 'Addresses[0].PublicIp' --output text)
 echo "${EIP_ALLOC}" > "${STATE_DIR}/eip-alloc"
@@ -190,11 +204,17 @@ sed -e "s|@@AWS_REGION@@|${REGION}|g" \
     -e "s|@@CADDY_B64@@|${CADDY_B64}|g" \
     "${SCRIPT_DIR}/user-data.sh" > "${USERDATA_FILE}"
 
-# user-data 크기 검증 (AWS 제한 16KB raw / 64KB MIME base64 — 보통 충분)
+# user-data 크기 검증.
+# AWS RunInstances 는 base64 인코딩된 user-data 를 25600 bytes 로 제한한다
+# (raw 약 19200 bytes). 경고가 아니라 hard fail — 초과 상태로 launch 하면
+# RunInstances 가 InvalidParameterValue 로 거부한다.
 USERDATA_SIZE=$(wc -c < "${USERDATA_FILE}")
-log "    user-data size: ${USERDATA_SIZE} bytes (AWS limit: 16384 raw)"
-if [ "${USERDATA_SIZE}" -gt 16000 ]; then
-    log "    경고: user-data 가 16KB 에 근접/초과. config 파일을 줄이거나 옵션 B(S3) 검토."
+USERDATA_B64_SIZE=$(base64 -w0 < "${USERDATA_FILE}" | wc -c)
+log "    user-data size: ${USERDATA_SIZE} bytes raw / ${USERDATA_B64_SIZE} bytes base64 (AWS limit: 25600 base64)"
+if [ "${USERDATA_B64_SIZE}" -gt 25600 ]; then
+    log "[ERROR] user-data base64 가 ${USERDATA_B64_SIZE} bytes 로 25600 한도 초과."
+    log "        config 파일(compose/env/Caddyfile)을 줄이거나 gzip 인라인 / S3(옵션 B)로 전환하라."
+    exit 1
 fi
 
 # ─────────────────────────────────────────────────────────────────────────

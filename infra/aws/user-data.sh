@@ -5,12 +5,14 @@
 # .state/user-data.rendered.sh 로 저장해 EC2 launch 시 주입한다.
 # 직접 실행하지 말 것.
 #
-# 치환되는 placeholder:
-#   @@AWS_REGION@@     AWS region
-#   @@ECR_REGISTRY@@   ECR registry URL (account.dkr.ecr.region.amazonaws.com)
-#   @@COMPOSE_B64@@    infra/compose/compose.aws-mvp.yml base64 (line-wrap 없음)
-#   @@ENV_B64@@        infra/env/aws-mvp.env base64
-#   @@CADDY_B64@@      infra/caddy/Caddyfile base64
+# 치환되는 placeholder (주의: 아래 목록은 토큰을 의도적으로 분리 표기한다.
+# setup-ec2.sh 의 sed -g 치환이 이 주석까지 확장해 user-data 를 2배로
+# 부풀리는 것을 막기 위함 — 실제 토큰은 @@ 로 감싼 한 곳에서만 등장해야 한다):
+#   AWS_REGION     -> AWS region
+#   ECR_REGISTRY   -> ECR registry URL (account.dkr.ecr.region.amazonaws.com)
+#   COMPOSE_B64    -> infra/compose/compose.aws-mvp.yml base64 (line-wrap 없음)
+#   ENV_B64        -> infra/env/aws-mvp.env base64
+#   CADDY_B64      -> infra/caddy/Caddyfile base64
 #
 # Git 의존성 없음. 3개 config 파일을 user-data 에 직접 박아 EC2 에 기록.
 # 재배포 시 새 config 가 필요하면 deploy.sh 가 SSM Send-Command 로 갱신.
