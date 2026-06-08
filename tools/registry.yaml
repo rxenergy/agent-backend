@@ -56,10 +56,13 @@ tools:
     retry: 0
     required: false
 
-  # retrieval.normalize — 도메인 용어 정규화(결정론 사전 lookup). 보강용 required:false.
-  retrieval.normalize:
+  # terminology.canonicalize — 도메인 용어 정규화(용어집 ISO 25964 결정론 lookup).
+  # N1.5 conductor-invoked(보장 실행) — retrieval.normalize(LLM 재량) 대체. surface/uf
+  # → preferred + 정의를 컨텍스트에 병기(검색 질의 불변). 보강용 required:false.
+  # 검색범위 확장(terminology.expand, 시소러스)은 Finder recover 전용으로 P3 추가.
+  terminology.canonicalize:
     version: v1
-    adapter: term_dict
+    adapter: vocab
     timeout_ms: 1000
     retry: 0
     required: false
