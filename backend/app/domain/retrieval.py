@@ -62,7 +62,7 @@ class RetrieverSearchInput(BaseModel):
     #   filters : hard-scope. {"collection": ["10CFR"], "search_type": "manual"} →
     #             hybrid.filter term/terms 로 모집단 제한. 복구 라운드에선 해제됨.
     #   min_token_count : 노이즈 floor(Layer 2). 본문 토큰 < N 인 chunk 제외.
-    # 셋 다 빈/0 기본값 → 비울 때 DSL 불변(sequential_tool_routed_v2·local 무영향).
+    # 셋 다 빈/0 기본값 → 비울 때 DSL 불변(local retriever 무영향).
     target: dict[str, list[str]] = Field(default_factory=dict)
     filters: dict[str, Any] = Field(default_factory=dict)
     min_token_count: int = 0

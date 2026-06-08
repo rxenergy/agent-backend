@@ -33,11 +33,11 @@ class Settings(BaseSettings):
 
     # Agent variant pool + default selection
     agent_variants_enabled: list[str] = [
-        "sequential_tool_routed_v2",
+        "agentic_finder_v4",
         "hierarchical_corrective_v3_1",
         "fake_echo_v0",
     ]
-    default_variant: str = "sequential_tool_routed_v2"
+    default_variant: str = "agentic_finder_v4"
 
     # Classifier (Node 1)
     classifier_backend: Literal["rule", "llm", "hybrid"] = "rule"
@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # fake-echo는 항상 풀에 자동 포함되므로 여기 정의하지 않는다.
     llm_pool: list[LLMPoolEntry] = []
     default_llm: str = "fake-echo"
-    utility_llm: str = "fake-echo"
+    utility_llm: str = ""
     llm_timeout_s: float = 30.0
     llm_max_attempts: int = 2
 

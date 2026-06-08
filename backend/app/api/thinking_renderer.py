@@ -479,6 +479,22 @@ def _h31_multi_hop(status, p, *, content_mode, max_items) -> list[str]:
     return []
 
 
+def _h31_finder_agent(status, p, *, content_mode, max_items) -> list[str]:
+    # agentic_finder_v4 N3 — Finder tool-calling 루프의 종료 모먼트(검색·근거 확보).
+    # scope/normalize/search 의 개별 턴은 내부 기계 동작 → finder_agent 한 줄로 흡수.
+    if status == "started":
+        return ["규제 문서에서 근거를 검색하는 중…"]
+    if status == "ok":
+        n = p.get("num_chunks", 0)
+        if not n:
+            return ["관련 근거를 찾지 못했습니다."]
+        rounds = p.get("rounds")
+        if p.get("recover_limit_hit") and isinstance(rounds, int) and rounds > 1:
+            return [f"{rounds}차 재검색 끝에 근거 {n}건을 확보했습니다."]
+        return [f"근거 {n}건을 확보했습니다."]
+    return []
+
+
 def _h31_memory_inject(status, p, *, content_mode, max_items) -> list[str]:
     if status == "ok" and p.get("inject") and p.get("num_memory_refs"):
         return [f"이전 전문가 검토 답변 {p.get('num_memory_refs')}건을 참고합니다."]
@@ -586,10 +602,23 @@ _V3_1_SUMMARY: dict[str, StepHandler] = {
     "refused": _h31_refused,
 }
 
+# agentic_finder_v4 — 3-Phase Intake→Retrieval→Generation. Summary tier reuses the
+# v3.1 Korean handlers (이해 / 검색·근거 / 작성 / 거부) and adds the Finder loop's
+# closing moment. Internal mechanics are intentionally dropped (omitted name → []):
+# query_translate / scenario_routing / answer_spec / multi_hop_sequence(현재 stub) /
+# context_build / prompt_render. meta_answer 본문은 answer_text 가 담당한다.
+_AGENTIC_FINDER_SUMMARY: dict[str, StepHandler] = {
+    "intent_classification": _h31_intent,
+    "finder_agent": _h31_finder_agent,
+    "memory_inject": _h31_memory_inject,
+    "generation": _h31_generation,
+    "refused": _h31_refused,
+}
+
 # Default tier per variant (summary for v3.1). `verbosity="detailed"` overrides
 # via `_RENDERERS_DETAILED`.
 _RENDERERS: dict[str, dict[str, StepHandler]] = {
-    "sequential_tool_routed_v2": _V2_STEPS,
+    "agentic_finder_v4": _AGENTIC_FINDER_SUMMARY,
     "hierarchical_corrective_v3_1": _V3_1_SUMMARY,
     "fake_echo_v0": _V2_STEPS,  # minimal; fake echo emits v2-style step names
 }

@@ -34,7 +34,7 @@ def test_regulatory_grounding_exposed_in_custom_field():
 def test_regulatory_grounding_defaults_na_for_other_variants():
     # v2 응답(기본 n_a)도 안전하게 노출.
     meta = _smr_agent_metadata(
-        interaction_id="i1", runner_variant="sequential_tool_routed_v2",
+        interaction_id="i1", runner_variant="agentic_finder_v4",
         resolved_llm="x", response=_resp(),
     )
     assert meta["regulatory_grounding"] == "n_a"

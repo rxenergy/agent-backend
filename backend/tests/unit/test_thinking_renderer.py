@@ -192,7 +192,9 @@ def test_unknown_step_returns_empty():
 # Design: docs/references/thinking_output_design.md.
 
 _V3 = "hierarchical_corrective_v3_1"
-_V2 = "sequential_tool_routed_v2"
+# fake_echo_v0 maps to the _V2_STEPS table (English, v2-style step names) — used
+# here to exercise that table after sequential_tool_routed_v2 was retired.
+_V2 = "fake_echo_v0"
 
 
 def test_v3_intent_uses_korean_scenario_label():

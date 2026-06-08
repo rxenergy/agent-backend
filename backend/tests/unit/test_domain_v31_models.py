@@ -185,7 +185,7 @@ def test_v2_style_event_omits_v31_values():
         trace_id="",
         timestamp="2026-05-29T00:00:00+00:00",
         app_profile="local",
-        agent_variant="sequential_tool_routed_v2",
+        agent_variant="agentic_finder_v4",
         model_id="fake-echo",
         query_text_hash="qh",
         query_text_sample="q",

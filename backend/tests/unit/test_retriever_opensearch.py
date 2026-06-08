@@ -15,7 +15,7 @@ def _ctx() -> ToolExecutionContext:
         interaction_id="inter-1",
         trace_id="trace-1",
         app_profile="local",
-        agent_variant="sequential_tool_routed_v2",
+        agent_variant="agentic_finder_v4",
     )
 
 

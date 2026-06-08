@@ -20,9 +20,9 @@ from app.ports.tool import ToolExecutionContext
 class RunState:
     """Mutable workflow state passed between sequential nodes (ADR-0003).
 
-    Each node reads what it needs and writes only its own outputs. The
-    conductor (`SequentialToolRoutedRunner.run`) instantiates `RunState`
-    once per turn and passes it through the 15-step pipeline.
+    Each node reads what it needs and writes only its own outputs. A
+    conductor instantiates `RunState` once per turn and passes it through
+    its node pipeline.
 
     Frozen=False here is a deliberate compromise: the conductor accumulates
     intermediate values (tool_calls, citations, scores, hashes) step by step,
