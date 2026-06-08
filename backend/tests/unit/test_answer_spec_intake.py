@@ -87,6 +87,6 @@ def test_source_sha_mismatch_fails_fast(tmp_path) -> None:
     import shutil
     dst = tmp_path / "prompts"
     shutil.copytree(_REPO_PROMPTS, dst)
-    (dst / "answer_spec" / "answer_spec_v1.md").write_text("tampered", encoding="utf-8")
+    (dst / "answer_spec" / "answer_spec_v2.md").write_text("tampered", encoding="utf-8")
     with pytest.raises(PromptRegistryError):
         AnswerSpecPromptSource(dst)
