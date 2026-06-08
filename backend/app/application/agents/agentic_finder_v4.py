@@ -312,11 +312,26 @@ class AgenticFinderRunner:
                 s.set_attribute("scenario_object", scenario_object)
                 s.set_attribute("scenario_depth", scenario_depth)
                 s.set_attribute("classification_confidence", conf)
+                # Phoenix 단독 분석용 — confidence=0 원인을 상위 span 에서 바로 본다
+                # (raw LLM 응답·outcome 은 자식 classification.llm_classify span).
+                s.set_attribute("classifier.backend",
+                                classification.classifier_backend or "")
+                s.set_attribute("classifier.object_confidence",
+                                classification.object_confidence)
+                s.set_attribute("classifier.depth_confidence",
+                                classification.depth_confidence)
+                if classification.low_confidence_reason:
+                    s.set_attribute("classifier.low_confidence_reason",
+                                    classification.low_confidence_reason)
                 oi.set_kind(s, oi.KIND_CHAIN)
                 oi.set_io(s, input_value=request.query_text, output_value={
                     "scenario_object": scenario_object,
                     "scenario_depth": scenario_depth,
-                    "confidence": conf, "entities": entities,
+                    "confidence": conf,
+                    "low_confidence_reason": classification.low_confidence_reason,
+                    "object_confidence": classification.object_confidence,
+                    "depth_confidence": classification.depth_confidence,
+                    "entities": entities,
                 })
             await emit_step("intent_classification", "ok",
                             scenario_object=scenario_object,
