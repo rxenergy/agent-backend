@@ -13,10 +13,11 @@ tools:
     retry: 1
     required: true
 
-  # v3.1 Node 5 — cross-encoder reranker. 1차 검색(hybrid) 후보 풀을 재정렬해
-  # RRF 융합을 대체한다. required:false — 실패/미배선 시 dispatcher 가 1차 검색
-  # 순서로 graceful degrade(rerank 점수 부재 → Node 6 G2 semantic 0.0).
-  # Phase 0–3 은 local fake(LocalRerankerTool), 실 cross-encoder 는 후속 Phase.
+  # v3.1 Node 5 — reranker. 1차 검색(hybrid) 후보 풀을 재정렬해 RRF 융합을 대체한다.
+  # required:false — 실패/미배선 시 dispatcher 가 1차 검색 순서로 graceful degrade
+  # (rerank 점수 부재 → Node 6 G2 semantic 0.0). adapter 구현은 profiles.py 가
+  # retriever_backend 로 선택: opensearch → SparseRerankerTool(SPLADE sparse 모델
+  # 기반, 이미 로드된 Fermi encoder 재사용), local → LocalRerankerTool(lexical fake).
   retriever.rerank:
     version: v1
     adapter: local
