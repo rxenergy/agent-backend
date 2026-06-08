@@ -55,6 +55,24 @@
 #     in-place 금지(재현성·원칙 5). v5 신규 파일 bump, v4 보존(과거 이벤트
 #     재현용). 전 12 프로파일 system path/version/sha → v5.
 #
+# system fragment v5 → v6 + object v1 → v2 + answer_spec v1 → v2 (2026-06-08) —
+# prompt_regulatory_authority_expressiveness.plan.v1 (W-A/W-B/W-C/W-D/W-F):
+#   목표 — 답변이 인용 근거의 *규범적 무게*(구속 요건 10CFR/GDC vs 권고·비구속
+#   RG/SRP/DSRS vs 심사기록 SER/RAI vs 신청자 주장 FSAR vs 인증 선례)를 구분해
+#   표현하게 한다. 권위는 doc_type/collection 파생(결정론, citation_format.
+#   normative_weight)이며 분류 축 신설 아님([[model_over_rule]]). 셀 매트릭스
+#   (12=O×D)·answer_schema 불변.
+#   - system v6: [근거 자료] → 문서 지형도+6 규범무게 사다리(W-A); [답변 철학]
+#     제3원칙 "규범적 무게 보존"(W-F — 권위 인플레이션=환각); [Citation Format]
+#     무게 태그 보존 규칙(W-D — 결정론 태그는 citation_format 이 출처에 부착).
+#   - object v2(o1/o2/o3/o4): 각 객체에 무게 구분 지시(W-B). o2 = 구속/권고
+#     분리(RG 를 "요구"로 쓰지 않음), o1 = 주장/선례 분리, o3 = 심사기록 일반화
+#     금지, o4 = 충족 사슬 양끝 무게 부착.
+#   - answer_spec v2: prior 슬롯에 normative_status·authority_basis 추가(W-C —
+#     output_schema 무변경, 슬롯명 자유). Finder 가 권위 가르는 근거를 검색 요구로.
+#   - v5/v1 은 이미 커밋 → in-place 금지(재현성). 신규 파일 bump, 구버전 보존
+#     (과거 이벤트 재현용). 전 12 프로파일 system→v6·object→v2, answer_spec→v2.
+#
 # cell fragment 신설 (2026-06-04) — classification_prompt_goldset_update.plan.v1 W-F:
 #   - o2_d2_regulation_technical_v1: O2×D2 공백 셀. D2 사슬의 2단계 "노형 처리"를
 #     선택화(노형 미언급 시 생략 — 빈 단계 트랩 회피).
@@ -130,7 +148,7 @@ query_translate_prompts:
 answer_spec_prompts:
   answer_spec_v1:
     profile_version: v1
-    prompt:        {path: answer_spec/answer_spec_v1.md,            version: v1, sha256: "2f54323f34ea4371e9725575321e319d4c182b73a6de74d3a5d1497f9a379064"}
+    prompt:        {path: answer_spec/answer_spec_v2.md,            version: v2, sha256: "d9cc623a7a8db1d59b1927cfe7a27736f3e7187e3dd6679b4b096cd9a807defa"}
     output_schema: {path: answer_spec/schemas/answer_spec_v1.json,  version: v1, sha256: "d1ec8050a8d5375ca9f70f45e09b396a1c185f805d3bc43e8626238a1b33f059"}
     model_options: {temperature: 0.0, max_tokens: 400}
 
@@ -153,8 +171,8 @@ prompt_profiles:
     scenario_object: O1
     scenario_depth: D1
     fragments:
-      system: {path: system/smr_agent_system_v5.md, version: v5, sha256: "24f1ca953d8f5520cc5cdd79ee1121a215289cd7945021bdac174d7e472e9b12"}
-      object: {path: object/o1_vendor_v1.md,        version: v1, sha256: "03c1f9348d1c1235079a8b06484113018d51e6f2eed85e9317626e2fd0cad222"}
+      system: {path: system/smr_agent_system_v6.md, version: v6, sha256: "598ed5336a2b57d440f55664d882634b535424ee9105b84c439ca7754bb7f5ff"}
+      object: {path: object/o1_vendor_v2.md,        version: v2, sha256: "1ddaf8350ca8d562b042759a9f33f6b9441a4b4454024f66f4a3aaf8f72314b6"}
       depth:  {path: depth/d1_overview_v1.md,       version: v1, sha256: "cec9c5f6fd7c1b516319323a9531f58e14b3d4e7c1ca8db8c7113f4b24560355"}
       cell:   {path: cell/o1_d1_vendor_overview_v1.md, version: v1, sha256: "039695bca8884ec2097647254ec247d6e473b44924a73545f95705241d8e116a"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
@@ -165,8 +183,8 @@ prompt_profiles:
     scenario_object: O1
     scenario_depth: D2
     fragments:
-      system: {path: system/smr_agent_system_v5.md, version: v5, sha256: "24f1ca953d8f5520cc5cdd79ee1121a215289cd7945021bdac174d7e472e9b12"}
-      object: {path: object/o1_vendor_v1.md,        version: v1, sha256: "03c1f9348d1c1235079a8b06484113018d51e6f2eed85e9317626e2fd0cad222"}
+      system: {path: system/smr_agent_system_v6.md, version: v6, sha256: "598ed5336a2b57d440f55664d882634b535424ee9105b84c439ca7754bb7f5ff"}
+      object: {path: object/o1_vendor_v2.md,        version: v2, sha256: "1ddaf8350ca8d562b042759a9f33f6b9441a4b4454024f66f4a3aaf8f72314b6"}
       depth:  {path: depth/d2_technical_v1.md,      version: v1, sha256: "bded8e63fa3443a49845b1bd7a174fbfbe6bd30d12adf6cd1fb1279c4b5e052d"}
       cell:   {path: cell/o1_d2_vendor_technical_v2.md, version: v2, sha256: "2b8153755a3843dcc09a8e0e5f64580b0e75803c72073bb898f3a67ed14a9b6d"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
@@ -177,8 +195,8 @@ prompt_profiles:
     scenario_object: O1
     scenario_depth: D3
     fragments:
-      system: {path: system/smr_agent_system_v5.md, version: v5, sha256: "24f1ca953d8f5520cc5cdd79ee1121a215289cd7945021bdac174d7e472e9b12"}
-      object: {path: object/o1_vendor_v1.md,        version: v1, sha256: "03c1f9348d1c1235079a8b06484113018d51e6f2eed85e9317626e2fd0cad222"}
+      system: {path: system/smr_agent_system_v6.md, version: v6, sha256: "598ed5336a2b57d440f55664d882634b535424ee9105b84c439ca7754bb7f5ff"}
+      object: {path: object/o1_vendor_v2.md,        version: v2, sha256: "1ddaf8350ca8d562b042759a9f33f6b9441a4b4454024f66f4a3aaf8f72314b6"}
       depth:  {path: depth/d3_formal_v1.md,         version: v1, sha256: "a945d00cb8d1849bf5a7eba8a436b336a9ee5979ff713d553b4a8118cb80fab0"}
       cell:   {path: cell/o1_d3_vendor_formal_v1.md, version: v1, sha256: "1e65645701f9c6c114b2b5a7646c9bfdef34fcb0588d912b9f05928f377b1bf2"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
@@ -190,8 +208,8 @@ prompt_profiles:
     scenario_object: O2
     scenario_depth: D1
     fragments:
-      system: {path: system/smr_agent_system_v5.md, version: v5, sha256: "24f1ca953d8f5520cc5cdd79ee1121a215289cd7945021bdac174d7e472e9b12"}
-      object: {path: object/o2_regulation_v1.md,    version: v1, sha256: "b849699cb8ec810255da7412950b36292d366f64fd0f36ddd35d53bd1cc20456"}
+      system: {path: system/smr_agent_system_v6.md, version: v6, sha256: "598ed5336a2b57d440f55664d882634b535424ee9105b84c439ca7754bb7f5ff"}
+      object: {path: object/o2_regulation_v2.md,    version: v2, sha256: "42378b8798b21810732794045cb40b613ff2046c612161628296a6e603694cf4"}
       depth:  {path: depth/d1_overview_v1.md,       version: v1, sha256: "cec9c5f6fd7c1b516319323a9531f58e14b3d4e7c1ca8db8c7113f4b24560355"}
       cell:   {path: cell/o2_d1_regulation_overview_v1.md, version: v1, sha256: "247c2e03db9d74a4883d0c9d840115ece44946d06d36cf40306d56294aaed888"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
@@ -202,8 +220,8 @@ prompt_profiles:
     scenario_object: O2
     scenario_depth: D2
     fragments:
-      system: {path: system/smr_agent_system_v5.md, version: v5, sha256: "24f1ca953d8f5520cc5cdd79ee1121a215289cd7945021bdac174d7e472e9b12"}
-      object: {path: object/o2_regulation_v1.md,    version: v1, sha256: "b849699cb8ec810255da7412950b36292d366f64fd0f36ddd35d53bd1cc20456"}
+      system: {path: system/smr_agent_system_v6.md, version: v6, sha256: "598ed5336a2b57d440f55664d882634b535424ee9105b84c439ca7754bb7f5ff"}
+      object: {path: object/o2_regulation_v2.md,    version: v2, sha256: "42378b8798b21810732794045cb40b613ff2046c612161628296a6e603694cf4"}
       depth:  {path: depth/d2_technical_v1.md,      version: v1, sha256: "bded8e63fa3443a49845b1bd7a174fbfbe6bd30d12adf6cd1fb1279c4b5e052d"}
       cell:   {path: cell/o2_d2_regulation_technical_v1.md, version: v1, sha256: "f8a99f106c96814eff7a0b830c62cfc76b4d54f2562469aea61f5945558351c7"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
@@ -214,8 +232,8 @@ prompt_profiles:
     scenario_object: O2
     scenario_depth: D3
     fragments:
-      system: {path: system/smr_agent_system_v5.md, version: v5, sha256: "24f1ca953d8f5520cc5cdd79ee1121a215289cd7945021bdac174d7e472e9b12"}
-      object: {path: object/o2_regulation_v1.md,    version: v1, sha256: "b849699cb8ec810255da7412950b36292d366f64fd0f36ddd35d53bd1cc20456"}
+      system: {path: system/smr_agent_system_v6.md, version: v6, sha256: "598ed5336a2b57d440f55664d882634b535424ee9105b84c439ca7754bb7f5ff"}
+      object: {path: object/o2_regulation_v2.md,    version: v2, sha256: "42378b8798b21810732794045cb40b613ff2046c612161628296a6e603694cf4"}
       depth:  {path: depth/d3_formal_v1.md,         version: v1, sha256: "a945d00cb8d1849bf5a7eba8a436b336a9ee5979ff713d553b4a8118cb80fab0"}
       cell:   {path: cell/o2_d3_regulation_formal_v2.md, version: v2, sha256: "9bb1a69fe00877663dce65642c8858254a190cf5e153a7aa87183ac0bc2c74a4"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
@@ -227,8 +245,8 @@ prompt_profiles:
     scenario_object: O3
     scenario_depth: D1
     fragments:
-      system: {path: system/smr_agent_system_v5.md, version: v5, sha256: "24f1ca953d8f5520cc5cdd79ee1121a215289cd7945021bdac174d7e472e9b12"}
-      object: {path: object/o3_rai_v1.md,           version: v1, sha256: "0f1bf1b028a42c12e33649fa07ca7fef65bda1e0dc598691d50b2c80eff8c8df"}
+      system: {path: system/smr_agent_system_v6.md, version: v6, sha256: "598ed5336a2b57d440f55664d882634b535424ee9105b84c439ca7754bb7f5ff"}
+      object: {path: object/o3_rai_v2.md,           version: v2, sha256: "311c592924757b5d2ea49e7aea6acc7e4e094a69bcc8e39e4bd3588a305cb094"}
       depth:  {path: depth/d1_overview_v1.md,       version: v1, sha256: "cec9c5f6fd7c1b516319323a9531f58e14b3d4e7c1ca8db8c7113f4b24560355"}
       cell:   {path: cell/o3_d1_rai_overview_v1.md, version: v1, sha256: "9f413186f73542ce8c045c6cd2b58ddd849e66f6d3ba5d1be581d578b2b447be"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
@@ -239,8 +257,8 @@ prompt_profiles:
     scenario_object: O3
     scenario_depth: D2
     fragments:
-      system: {path: system/smr_agent_system_v5.md, version: v5, sha256: "24f1ca953d8f5520cc5cdd79ee1121a215289cd7945021bdac174d7e472e9b12"}
-      object: {path: object/o3_rai_v1.md,           version: v1, sha256: "0f1bf1b028a42c12e33649fa07ca7fef65bda1e0dc598691d50b2c80eff8c8df"}
+      system: {path: system/smr_agent_system_v6.md, version: v6, sha256: "598ed5336a2b57d440f55664d882634b535424ee9105b84c439ca7754bb7f5ff"}
+      object: {path: object/o3_rai_v2.md,           version: v2, sha256: "311c592924757b5d2ea49e7aea6acc7e4e094a69bcc8e39e4bd3588a305cb094"}
       depth:  {path: depth/d2_technical_v1.md,      version: v1, sha256: "bded8e63fa3443a49845b1bd7a174fbfbe6bd30d12adf6cd1fb1279c4b5e052d"}
       cell:   {path: cell/o3_d2_rai_technical_v2.md, version: v2, sha256: "e0079d02b96bd4fc2c56a233c2e6a6a10be5e0b4af355dce298cc2c76382b47c"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
@@ -251,8 +269,8 @@ prompt_profiles:
     scenario_object: O3
     scenario_depth: D3
     fragments:
-      system: {path: system/smr_agent_system_v5.md, version: v5, sha256: "24f1ca953d8f5520cc5cdd79ee1121a215289cd7945021bdac174d7e472e9b12"}
-      object: {path: object/o3_rai_v1.md,           version: v1, sha256: "0f1bf1b028a42c12e33649fa07ca7fef65bda1e0dc598691d50b2c80eff8c8df"}
+      system: {path: system/smr_agent_system_v6.md, version: v6, sha256: "598ed5336a2b57d440f55664d882634b535424ee9105b84c439ca7754bb7f5ff"}
+      object: {path: object/o3_rai_v2.md,           version: v2, sha256: "311c592924757b5d2ea49e7aea6acc7e4e094a69bcc8e39e4bd3588a305cb094"}
       depth:  {path: depth/d3_formal_v1.md,         version: v1, sha256: "a945d00cb8d1849bf5a7eba8a436b336a9ee5979ff713d553b4a8118cb80fab0"}
       cell:   {path: cell/o3_d3_rai_formal_v1.md, version: v1, sha256: "2bd933d182bcbf3f9731f3b1500b3cecd76588286a55ff5ef75c4e5cab68d837"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
@@ -264,8 +282,8 @@ prompt_profiles:
     scenario_object: O4
     scenario_depth: D1
     fragments:
-      system: {path: system/smr_agent_system_v5.md, version: v5, sha256: "24f1ca953d8f5520cc5cdd79ee1121a215289cd7945021bdac174d7e472e9b12"}
-      object: {path: object/o4_relation_v1.md,      version: v1, sha256: "3b887f01c463f2ea4d03106df622f8199fbbc0ac51d99689d23db5c92dc4dc63"}
+      system: {path: system/smr_agent_system_v6.md, version: v6, sha256: "598ed5336a2b57d440f55664d882634b535424ee9105b84c439ca7754bb7f5ff"}
+      object: {path: object/o4_relation_v2.md,      version: v2, sha256: "f3eabaf673f12dd785c6b0458c345507656d235429d667c4835c74006f3995a5"}
       depth:  {path: depth/d1_overview_v1.md,       version: v1, sha256: "cec9c5f6fd7c1b516319323a9531f58e14b3d4e7c1ca8db8c7113f4b24560355"}
       cell:   {path: cell/o4_d1_relation_overview_v1.md, version: v1, sha256: "9e863620411aca79c87292d47e9d06e7a78ae87f4d5405d61f45eb2962d8d26d"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
@@ -276,8 +294,8 @@ prompt_profiles:
     scenario_object: O4
     scenario_depth: D2
     fragments:
-      system: {path: system/smr_agent_system_v5.md, version: v5, sha256: "24f1ca953d8f5520cc5cdd79ee1121a215289cd7945021bdac174d7e472e9b12"}
-      object: {path: object/o4_relation_v1.md,      version: v1, sha256: "3b887f01c463f2ea4d03106df622f8199fbbc0ac51d99689d23db5c92dc4dc63"}
+      system: {path: system/smr_agent_system_v6.md, version: v6, sha256: "598ed5336a2b57d440f55664d882634b535424ee9105b84c439ca7754bb7f5ff"}
+      object: {path: object/o4_relation_v2.md,      version: v2, sha256: "f3eabaf673f12dd785c6b0458c345507656d235429d667c4835c74006f3995a5"}
       depth:  {path: depth/d2_technical_v1.md,      version: v1, sha256: "bded8e63fa3443a49845b1bd7a174fbfbe6bd30d12adf6cd1fb1279c4b5e052d"}
       cell:   {path: cell/o4_d2_relation_technical_v2.md, version: v2, sha256: "0733b3c26018127772335db568c7503b7c848e20980dc2e641bd8d6637c5ca29"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
@@ -288,8 +306,8 @@ prompt_profiles:
     scenario_object: O4
     scenario_depth: D3
     fragments:
-      system: {path: system/smr_agent_system_v5.md, version: v5, sha256: "24f1ca953d8f5520cc5cdd79ee1121a215289cd7945021bdac174d7e472e9b12"}
-      object: {path: object/o4_relation_v1.md,      version: v1, sha256: "3b887f01c463f2ea4d03106df622f8199fbbc0ac51d99689d23db5c92dc4dc63"}
+      system: {path: system/smr_agent_system_v6.md, version: v6, sha256: "598ed5336a2b57d440f55664d882634b535424ee9105b84c439ca7754bb7f5ff"}
+      object: {path: object/o4_relation_v2.md,      version: v2, sha256: "f3eabaf673f12dd785c6b0458c345507656d235429d667c4835c74006f3995a5"}
       depth:  {path: depth/d3_formal_v1.md,         version: v1, sha256: "a945d00cb8d1849bf5a7eba8a436b336a9ee5979ff713d553b4a8118cb80fab0"}
       cell:   {path: cell/o4_d3_relation_formal_v1.md, version: v1, sha256: "4ca7fa2d670aa0705dadbc6822638e8806f6d31d5a087482b84d2d5a2127f575"}
     output_schema: {path: schemas/answer_schema_v1.json, version: v1, sha256: "8b66895145a471be62122950d7e6b0475d88c9acdce9cb983a3b21e950fb0d59"}
