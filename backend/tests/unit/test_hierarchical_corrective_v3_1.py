@@ -643,13 +643,15 @@ def span_exporter():
         InMemorySpanExporter,
     )
 
+    # 협조적 설치 — 전역 provider 가 이미 실 SDK provider 면 거기에 exporter 만
+    # 덧붙인다(OTel 은 set_tracer_provider 를 최초 1회만 적용). 다른 span 테스트
+    # 모듈(test_classification_llm_hybrid 등)이 먼저 provider 를 설치해도 굶지 않는다.
     exporter = InMemorySpanExporter()
-    provider = TracerProvider()
+    provider = trace.get_tracer_provider()
+    if not isinstance(provider, TracerProvider):
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    # set_tracer_provider 는 최초 1회만 적용(이후 경고+무시). 유닛 스위트는 아무도
-    # provider 를 설치하지 않으므로 여기서 이긴다. 모듈 import 시 캡처된 _TRACER
-    # proxy 는 provider 설치 후 첫 span 생성에서 실제 tracer 로 lazily resolve 된다.
-    trace.set_tracer_provider(provider)
     return exporter
 
 
