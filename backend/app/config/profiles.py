@@ -27,6 +27,7 @@ from app.adapters.tools.memory_approved_stub import ApprovedSearchStubTool
 from app.adapters.tools.memory_session_local import SessionLoadTool, SessionUpdateTool
 from app.adapters.tools.opensearch_preflight import OpenSearchPreflight
 from app.adapters.tools.reranker_local import LocalRerankerTool
+from app.adapters.tools.reranker_sparse import SparseRerankerTool
 from app.adapters.tools.retriever_local import LocalRetrieverTool
 from app.adapters.tools.retriever_opensearch import OpenSearchRetrieverTool
 from app.application.preflight.port import PreflightCheck
@@ -385,9 +386,13 @@ async def build_container(settings: Settings) -> AppContainer:
                 retriever_tool = LocalRetrieverTool()
                 document_tool = LocalDocumentResolverTool()
                 fetch_section_tool = LocalDocumentFetchSectionTool()
+                reranker_tool = LocalRerankerTool()  # 임베딩 미가용 폴백 → fake rerank.
                 dense_encoder = None  # type: ignore[assignment]
 
             if dense_encoder is not None:
+                # Node 5 reranker — 이미 로드된 sparse encoder(Fermi/SPLADE)를 재사용해
+                # query×doc 희소 벡터 내적으로 재정렬한다(모델 기반). 별도 모델 로드 없음.
+                reranker_tool = SparseRerankerTool(sparse_encoder)
                 retriever_tool = OpenSearchRetrieverTool(
                     endpoint=settings.opensearch_endpoint,
                     index=settings.opensearch_index,
@@ -420,6 +425,7 @@ async def build_container(settings: Settings) -> AppContainer:
             retriever_tool = LocalRetrieverTool()
             document_tool = LocalDocumentResolverTool()
             fetch_section_tool = LocalDocumentFetchSectionTool()
+            reranker_tool = LocalRerankerTool()  # local 프로필 → 결정론 lexical fake.
 
         # agentic_finder Finder 도구(설계 finder §3). retrieval.search = 내부 retriever
         # 재사용 + Reranker 정렬(실 cross-encoder 는 배포 시 주입, dev/test 는 identity
@@ -443,9 +449,10 @@ async def build_container(settings: Settings) -> AppContainer:
             ),
             "retrieval.normalize": RetrievalNormalizeTool(),
             "submit_verdict": SubmitVerdictTool(),
-            # v3.1 Node 5 reranker — 현재 local fake 단독(실 cross-encoder 는 후속
-            # Phase). opensearch 경로도 동일 fake 로 재정렬 → RRF 제거 후 순위 권위.
-            "retriever.rerank": LocalRerankerTool(),
+            # v3.1 Node 5 reranker — RRF 대체. opensearch 경로는 SPLADE sparse 모델 기반
+            # (query×doc 희소 벡터 내적), local 경로는 결정론 lexical fake. 둘 다 동일
+            # retriever.rerank 도구 계약이라 dispatcher 무변경.
+            "retriever.rerank": reranker_tool,
             "document.resolve_citation": document_tool,
             "document.fetch_section": fetch_section_tool,
             "memory.session_load": SessionLoadTool(session_store),
