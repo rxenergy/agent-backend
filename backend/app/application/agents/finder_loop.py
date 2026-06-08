@@ -28,7 +28,9 @@ _TRACER = get_tracer("agent")
 _VERDICT_TOOL = "submit_verdict"
 _SEARCH_TOOL = "retrieval.search"
 _SCOPE_TOOL = "retrieval.scope"
-_NORMALIZE_TOOL = "retrieval.normalize"
+# 용어 정규화(canonicalize)는 N1.5 conductor-invoked 로 상향됨(terminology.canonicalize,
+# 보장 실행) — Finder 도구 set 에서 제거. 검색범위 확장(terminology.expand, 시소러스)은
+# recover 전용으로 P3 에서 추가된다. 설계: terminology_normalization_strategy.v1.md.
 
 # LLM-facing 도구 정의(중립 ToolSpec). registry(tools/registry.yaml)는 *실행 정책*
 # (timeout/retry/span)을, 이 ToolSpec 집합은 *모델이 보는 인자 스키마*를 정한다 —
@@ -44,17 +46,6 @@ FINDER_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "intents": {"type": "array", "items": {"type": "string"}},
             },
             "required": [],
-        },
-    ),
-    ToolSpec(
-        name=_NORMALIZE_TOOL,
-        description="원자력 도메인 약어·용어를 정규형으로 바꾸고 정의를 얻는다(예: ECCS, i-SMR).",
-        parameters={
-            "type": "object",
-            "properties": {
-                "terms": {"type": "array", "items": {"type": "string"}, "description": "정규화할 용어 후보"},
-            },
-            "required": ["terms"],
         },
     ),
     ToolSpec(
@@ -139,10 +130,17 @@ async def run_finder(
     recover_limit: int = 3,
     max_turns: int = 10,
     model_options: dict[str, Any] | None = None,
+    terminology_annotation: str | None = None,
 ) -> FinderResult:
     """Finder tool-calling 멀티턴 루프. 종료 = (verdict | research_rounds≥recover_limit
-    | max_turns backstop). chunks 를 누적해 다운스트림(N4/Generation)으로 넘긴다."""
+    | max_turns backstop). chunks 를 누적해 다운스트림(N4/Generation)으로 넘긴다.
+
+    `terminology_annotation`(N1.5 canonicalize 산출 병기) — 정규형·정의를 system 에
+    덧붙여 Finder 가 정밀 질의를 짜게 한다. render_answer_spec 과 동일한 *런타임 컨텐츠*
+    라 finder_policy_hash(정적 prompt_body sha)는 불변, rendered prompt 만 바뀐다."""
     system_text = system_prompt_body + "\n" + render_answer_spec(answer_spec)
+    if terminology_annotation:
+        system_text = system_text + "\n" + terminology_annotation
     messages: list[ChatMessage] = [
         ChatMessage(role="system", content=system_text),
         ChatMessage(role="user", content=query_text),
@@ -153,9 +151,8 @@ async def run_finder(
     searched_once = False
     chunks_by_id: dict[str, RetrievedChunk] = {}
     finder_rounds: list[FinderRound] = []
-    # per-round 누적기(직렬 도구 호출 — scope/normalize 는 search 전 별도 턴).
+    # per-round 누적기(직렬 도구 호출 — scope 는 search 전 별도 턴).
     pending_scope: dict[str, Any] = {}
-    pending_normalized: tuple[str, ...] = ()
     llm_calls = 0
     turns_used = 0
 
@@ -203,9 +200,6 @@ async def run_finder(
                     break
                 if call.name == _SCOPE_TOOL and ok:
                     pending_scope = dict(out.output or {})
-                elif call.name == _NORMALIZE_TOOL and ok:
-                    pending_normalized = tuple(
-                        (out.output or {}).get("normalized_terms", []) or [])
                 elif call.name == _SEARCH_TOOL:
                     if searched_once:
                         research_rounds += 1
@@ -214,15 +208,17 @@ async def run_finder(
                     for c in new_chunks:
                         chunks_by_id[c.chunk_id] = c
                     # per-search FinderRound 확정(advisor: 1 라운드 = 1 검색).
+                    # normalized_terms 는 () — 정규화는 N1.5 conductor(라운드 단위 아님,
+                    # query_understanding.terminology 가 핀). P3 에서 recover 확장
+                    # expanded_terms 필드 추가 예정.
                     finder_rounds.append(FinderRound(
                         round_index=len(finder_rounds),
                         query=str((call.arguments or {}).get("query_text") or query_text),
-                        normalized_terms=pending_normalized,
                         scope_params=pending_scope,
                         num_chunks=len(new_chunks),
                         reranker_score_dist=tuple(rerank_scores),
                     ))
-                    pending_scope, pending_normalized = {}, ()
+                    pending_scope = {}
                 messages.append(ChatMessage(
                     role="tool", content=_serialize(out.output),
                     tool_call_id=call.id, is_error=not ok))

@@ -9,7 +9,6 @@ import yaml
 from app.adapters.event_sink.filesystem import FilesystemEventSink
 from app.adapters.llm.fake import FakeToolLLM
 from app.adapters.reranker.identity import IdentityReranker
-from app.adapters.tools.retrieval_normalize import RetrievalNormalizeTool
 from app.adapters.tools.retrieval_scope import RetrievalScopeTool
 from app.adapters.tools.retrieval_search import RetrievalSearchTool
 from app.adapters.tools.retriever_local import LocalRetrieverTool
@@ -43,7 +42,6 @@ def _executor(tmp: Path) -> ToolExecutor:
     body = {"tools": {
         "retrieval.search": {"version": "v1", "adapter": "reranked", "timeout_ms": 6000, "retry": 0, "required": False},
         "retrieval.scope": {"version": "v1", "adapter": "corpus_map", "timeout_ms": 1000, "retry": 0, "required": False},
-        "retrieval.normalize": {"version": "v1", "adapter": "term_dict", "timeout_ms": 1000, "retry": 0, "required": False},
         "submit_verdict": {"version": "v1", "adapter": "local", "timeout_ms": 1000, "retry": 0, "required": False},
     }}
     p = tmp / "tools.yaml"
@@ -53,7 +51,6 @@ def _executor(tmp: Path) -> ToolExecutor:
     tools = {
         "retrieval.search": RetrievalSearchTool(retriever=LocalRetrieverTool(), reranker=IdentityReranker()),
         "retrieval.scope": RetrievalScopeTool(),
-        "retrieval.normalize": RetrievalNormalizeTool(),
         "submit_verdict": SubmitVerdictTool(),
     }
     return ToolExecutor(registry=registry, tools=tools, event_sink=sink)
@@ -67,10 +64,6 @@ def _r(*calls: ToolCall, text: str = "", stop: str = "tool_calls") -> LLMToolRes
 
 def _scope() -> ToolCall:
     return ToolCall("c-scope", "retrieval.scope", {})
-
-
-def _normalize(*terms) -> ToolCall:
-    return ToolCall("c-norm", "retrieval.normalize", {"terms": list(terms)})
 
 
 def _search(q="i-SMR ECCS", top_k=3) -> ToolCall:
@@ -93,11 +86,11 @@ async def _run(llm, ex, *, recover_limit=3, max_turns=10):
 
 @pytest.mark.asyncio
 async def test_exit_on_submit_verdict() -> None:
-    # scope → normalize → search → verdict. 직렬(1턴 1도구). verdict 캡처 후 종료.
+    # scope → search → verdict. 직렬(1턴 1도구). verdict 캡처 후 종료. 용어 정규화는
+    # N1.5 conductor(terminology.canonicalize)로 상향 — Finder 루프엔 normalize 없음.
     with tempfile.TemporaryDirectory() as tmp:
         llm = FakeToolLLM(script=[
             _r(_scope()),
-            _r(_normalize("ECCS")),
             _r(_search()),
             _r(_verdict(sufficient=True, reason="슬롯 충족")),
         ])
@@ -108,7 +101,7 @@ async def test_exit_on_submit_verdict() -> None:
         assert len(result.finder_rounds) == 1     # 검색 라운드 1건.
         rnd = result.finder_rounds[0]
         assert rnd.num_chunks >= 1
-        assert rnd.normalized_terms == ("ECCS",)  # normalize 가 라운드에 귀속.
+        assert rnd.normalized_terms == ()         # 정규화는 라운드 단위 아님(N1.5 conductor).
         assert rnd.scope_params.get("mode") == "off"  # CorpusMap.default → off.
         assert rnd.reranker_score_dist            # 점수 분포 계측.
         assert rnd.verdict_sufficient is True      # verdict 가 직전 검색 라운드에 귀속.
@@ -146,7 +139,7 @@ async def test_exit_on_max_turns_backstop_when_no_tool_calls() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_calls_routed_through_executor_records() -> None:
-    # "도구는 통제된다" — scope/normalize/search/submit_verdict 모두 ToolExecutor 경로로
+    # "도구는 통제된다" — scope/search/submit_verdict 모두 ToolExecutor 경로로
     # record 된다(submit_verdict 도 no-op tool 로 동일 기록).
     with tempfile.TemporaryDirectory() as tmp:
         recorded: list[str] = []
@@ -179,8 +172,10 @@ async def test_search_failure_is_fed_back_not_raised() -> None:
         assert result.finder_rounds[0].num_chunks == 0
 
 
-def test_tools_schema_hash_is_stable_and_covers_four_tools() -> None:
+def test_tools_schema_hash_is_stable_and_covers_finder_tools() -> None:
+    # 용어 정규화 상향(N1.5)으로 Finder 도구 set 은 scope/search/submit_verdict 3종.
+    # 검색범위 확장(terminology.expand)은 P3 에서 recover 전용으로 추가 예정.
     assert {t.name for t in FINDER_TOOL_SPECS} == {
-        "retrieval.scope", "retrieval.normalize", "retrieval.search", "submit_verdict"}
+        "retrieval.scope", "retrieval.search", "submit_verdict"}
     assert tools_schema_hash() == tools_schema_hash()  # 결정론(재현 핀).
     assert len(tools_schema_hash()) == 16

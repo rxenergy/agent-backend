@@ -309,6 +309,20 @@ async def build_container(settings: Settings) -> AppContainer:
             else CorpusMap.default()
         )
 
+        # agentic_finder 용어집 — `terminology/vocab.yaml` (tools/ sibling, ISO 25964).
+        # 없으면 빈 어휘(canonicalize=passthrough) 폴백. N1.5 terminology.canonicalize
+        # (conductor-invoked)가 소비한다. 설계: terminology_normalization_strategy.v1.md.
+        from app.application.terminology.vocab import TerminologyVocab
+
+        _vocab_path = (
+            Path(settings.tool_registry_path).parent / "terminology" / "vocab.yaml"
+        )
+        terminology_vocab = (
+            TerminologyVocab.from_yaml(_vocab_path)
+            if _vocab_path.is_file()
+            else TerminologyVocab.default()
+        )
+
         if settings.retriever_backend == "opensearch":
             preflight_severity = _resolve_preflight_severity(settings)
             # Hybrid 가중치 pipeline 은 operating point(retriever_top_k)에 연동.
@@ -429,11 +443,13 @@ async def build_container(settings: Settings) -> AppContainer:
 
         # agentic_finder Finder 도구(설계 finder §3). retrieval.search = 내부 retriever
         # 재사용 + Reranker 정렬(실 cross-encoder 는 배포 시 주입, dev/test 는 identity
-        # 폴백 — seam 보존). scope=CorpusMap 결정론, normalize=사전 lookup, submit_verdict=no-op.
+        # 폴백 — seam 보존). scope=CorpusMap 결정론, submit_verdict=no-op.
+        # 용어 정규화는 N1.5 terminology.canonicalize(conductor-invoked, 용어집 lookup)로
+        # 상향(retrieval.normalize 대체). 검색범위 확장(terminology.expand)은 P3.
         from app.adapters.reranker.identity import IdentityReranker
         from app.adapters.tools.retrieval_search import RetrievalSearchTool
         from app.adapters.tools.retrieval_scope import RetrievalScopeTool
-        from app.adapters.tools.retrieval_normalize import RetrievalNormalizeTool
+        from app.adapters.tools.terminology_canonicalize import TerminologyCanonicalizeTool
         from app.adapters.tools.submit_verdict import SubmitVerdictTool
 
         tools = {
@@ -447,7 +463,7 @@ async def build_container(settings: Settings) -> AppContainer:
                 tau_low=settings.retrieval_scope_tau_low,
                 min_token_count=settings.retriever_min_token_count,
             ),
-            "retrieval.normalize": RetrievalNormalizeTool(),
+            "terminology.canonicalize": TerminologyCanonicalizeTool(vocab=terminology_vocab),
             "submit_verdict": SubmitVerdictTool(),
             # v3.1 Node 5 reranker — RRF 대체. opensearch 경로는 SPLADE sparse 모델 기반
             # (query×doc 희소 벡터 내적), local 경로는 결정론 lexical fake. 둘 다 동일

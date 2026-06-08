@@ -67,27 +67,40 @@ class AgenticFinderRunner:
     """agentic_finder_v4 — 3-Phase **Intake → Retrieval → Generation** variant
     (docs/plans/agentic_finder_workflow.v1.md).
 
-    F-0 SKELETON: conductor 가 3-Phase frame 을 배선하고 노드마다 step 이벤트를
-    emit 하며, 신규 노드는 *명시 stub* 으로 유효한 skeleton 도메인 객체를 산출해
-    워크플로우가 fake 어댑터로 end-to-end 통과하게 한다(원칙 #1 — 이후 PR 은
-    conductor 호출부를 고정한 채 stub body 만 교체).
+    conductor 가 3-Phase frame 을 배선하고 노드마다 step 이벤트를 emit 한다. 호출부를
+    고정한 채 노드 body 만 교체 가능(원칙 #1). 노드 상태(구현/계획/stub) 표기:
 
       Phase 1 Intake
-        • N1 intent_classification  — 재사용(ClassificationPromptSource→LLMClassifier)
-        • N2 answer_spec            — STUB: 분류 산출에서 AnswerSpec(method="stub")
+        • N0 query_translate        — 구현. 사용자 질의→query_en(검색용 영어) +
+                                       source_language. 워크플로우 *내부*는 영어로
+                                       구동(분류·answer_spec·Finder), 최종 출력만
+                                       사용자 언어(N7 출력-언어 trailer). 프롬프트는
+                                       registry 호스팅(sha 핀), 실패 시 원문 fallback.
+        • N1 intent_classification  — 재사용(ClassificationPromptSource→LLMClassifier).
+                                       query_en 으로 분류.
         • routing                   — 재사용(T3 메타 / T4 deflect / low-conf 명료화)
+        • N1.5 terminology.canonicalize — 구현(P2). 용어집(ISO 25964 vocab.yaml) 결정론
+                                       canonicalize, conductor-invoked(보장 실행). 분류
+                                       entities → 정규형·정의를 컨텍스트에 *병기*(검색질의는
+                                       query_en 유지). docs/plans/terminology_normalization_strategy.v1.md
+        • N2 answer_spec            — 구현. 모델이 답변 사양(필요 슬롯·구조·깊이)을 산출
+                                       (registry sha 핀, 실패 시 결정론 fallback).
       Phase 2 Retrieval
-        • N3 finder_agent           — STUB: synthetic FinderRound(sufficient=False),
-                                       chunks=() (도구 루프는 F-4, generate_with_tools)
+        • N3 finder_agent           — 구현. tool-calling 멀티턴 루프(run_finder):
+                                       scope→search(+rerank)→submit_verdict, 검증=Finder
+                                       LLM 단독, 종료=(verdict|recover_limit|max_turns).
+                                       용어 정규화는 N1.5 로 상향됨(normalize 제거). 검색범위
+                                       확장 terminology.expand(recover 전용)은 **계획**(P3).
         • N4 multi_hop_sequence     — STUB: hop_edges=() (인용 해소 미지원, finder §6)
       Phase 3 Generation
         • N5 memory_inject          — 재사용(session/approved gating)
         • N6 context_build          — 재사용(ContextBuilder, snippets 모드)
-        • N7 prompt_render          — 재사용(PromptResolver/Renderer + citation contract)
+        • N7 prompt_render          — 재사용(PromptResolver/Renderer + citation contract
+                                       + 출력-언어 trailer)
         • N8 generation             — 재사용(generate_stream 스트리밍)
 
-    생성 답변 검증 = **비동기 audit만**(확정, finder §3) — 런타임 게이트 없음. F-0 은
-    audit 잡(F-7)이 아직 없어 verification_status=SKIPPED 로 통과한다(audit 배선 후
+    생성 답변 검증 = **비동기 audit만**(확정, finder §3) — 런타임 게이트 없음. audit
+    잡(F-7)이 아직 없어 verification_status=SKIPPED 로 통과한다(audit 배선 후
     PENDING_AUDIT). 스트리밍으로 전송된 텍스트는 되돌릴 수 없으므로(생성-검증 결합
     결함) 차단이 아닌 관측·환류 목적이다."""
 
@@ -362,6 +375,31 @@ class AgenticFinderRunner:
             await emit_step("scenario_routing", "ok", scope_tier=scope_tier,
                             inactive_cell=inactive_cell)
 
+            # N1.5 — terminology.canonicalize (conductor-invoked, 보장 실행). 분류
+            # entities 를 후보 term 으로 넘겨 용어집(ISO 25964)으로 정규형·정의를 산출
+            # (terminology_normalization_strategy.v1.md §3.2). 병기(annotate): 검색
+            # 질의(query_en)는 불변, 정규형·정의를 Finder/생성 컨텍스트에 동반해 정밀도를
+            # 돕는다(dense 임베딩 불변). LLM 재량이 아니라 워크플로우가 보장 호출한다
+            # — 앞선 retrieval.normalize 의 "LLM 이 부를지 말지" 약점 해소.
+            await emit_step("terminology_canonicalize", "started")
+            flat_terms = [t for vals in (entities or {}).values() for t in (vals or [])]
+            canon = await self._tools.invoke(
+                "terminology.canonicalize",
+                {"query_en": query_en, "terms": flat_terms}, ctx,
+            )
+            record(canon)
+            canon_out = canon.output or {}
+            terminology_annotation = _terminology_annotation(canon_out)
+            qu_pin["terminology"] = {
+                "vocab_sha": canon_out.get("vocab_sha"),
+                "concept_ids": list(canon_out.get("concept_ids") or []),
+                "num_canonical": len(canon_out.get("concept_ids") or []),
+                "num_unresolved": len(canon_out.get("unresolved") or []),
+            }
+            await emit_step("terminology_canonicalize", "ok",
+                            num_concepts=len(canon_out.get("concept_ids") or []),
+                            num_unresolved=len(canon_out.get("unresolved") or []))
+
             # N2 — answer_spec. finder §3: "답변 사양"(필요 정보 슬롯·구조·깊이) =
             # N3 Finder 입력 계약. 슬롯은 *모델*이 질의별로 산출한다(표현=모델;
             # InformationNeedInstantiator 동형, 실패 시 결정론 fallback method 기록).
@@ -414,6 +452,7 @@ class AgenticFinderRunner:
                 recover_limit=self._finder_recover_limit,
                 max_turns=self._finder_max_turns,
                 model_options=self._finder_source.model_options or None,
+                terminology_annotation=terminology_annotation,
             )
             llm_calls_used += finder_result.llm_calls
             chunks: list[Any] = finder_result.chunks
@@ -543,6 +582,14 @@ class AgenticFinderRunner:
                     context_block = (
                         "# CITATION CONTRACT\n"
                         + self._citation_contract.strip() + "\n\n" + context_block
+                    )
+                # N1.5 용어 정규화 병기 — 정규형·정의를 생성 컨텍스트에 동반(검색 질의는
+                # 불변). citation contract 와 동일 prepend seam. rendered_prompt_hash 에
+                # 반영(런타임 컨텐츠라 정적 프롬프트 sha 는 불변).
+                if terminology_annotation:
+                    context_block = (
+                        "# TERMINOLOGY\n"
+                        + terminology_annotation.strip() + "\n\n" + context_block
                     )
                 # 출력-언어 지시문 — # QUERY 뒤(trailer, 최고 recency)에 둔다. 내부
                 # 컨텍스트·질의는 영어(query_en)지만 프롬프트 *마지막*이 "최종 답변은
@@ -841,6 +888,26 @@ class AgenticFinderRunner:
             scenario_depth=classification.scenario_depth,
         )
         return response
+
+
+def _terminology_annotation(canon_out: dict[str, Any]) -> str | None:
+    """N1.5 canonicalize 산출 → Finder/생성 컨텍스트 병기 텍스트. 정규화된 concept 가
+    없으면 None(빈 헤더 금지). 미등록 passthrough term 은 제외하고 정규형+정의만 싣는다."""
+    defs = canon_out.get("definitions") or {}
+    canonical = canon_out.get("canonical_terms") or []
+    unresolved = set(canon_out.get("unresolved") or [])
+    seen: list[str] = []
+    for t in canonical:
+        if t in unresolved or t in seen:
+            continue
+        seen.append(t)
+    if not seen:
+        return None
+    lines = ["## 용어 정규화(canonical terms — 검색·답변에 정규형 사용)"]
+    for t in seen:
+        d = defs.get(t)
+        lines.append(f"- {t}" + (f": {d}" if d else ""))
+    return "\n".join(lines)
 
 
 def _to_citations(candidates) -> tuple[Citation, ...]:
