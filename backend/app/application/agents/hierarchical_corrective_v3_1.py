@@ -23,6 +23,7 @@ from app.application.agents.events import (
 from app.application.agents.llm_router import LLMRouter, UnknownLLMError
 from app.application.agents.registry import AgentDeps, register_variant
 from app.application.classification.active_cells import is_active
+from app.application.classification.llm import REASON_LLM_UNAVAILABLE
 from app.application.agents.sequential.nodes.classify import _HARDCODED_POLICY_HASH
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
@@ -381,6 +382,20 @@ class HierarchicalCorrectiveRunner:
                         "depth_confidence": classification.depth_confidence,
                         "entities": entities,
                     },
+                )
+            # LLM 백엔드 미도달(분류기 fallback=unavailable)은 "질문 모호"가 아니라
+            # 가용성 장애다. "ok" emit(→ thinking "…이해했습니다") 이전에 단락해 오해
+            # 라인을 막고 LLM_UNAVAILABLE 로 종결한다(API 가 OpenAI 에러로 변환). 모델이
+            # 닿았으나 출력 불량(parse_failed)·미주입(not_injected)은 여기서 가르지
+            # 않는다 — 그건 "닿았는데 오작동/오설정"이라 기존 저신뢰 경로가 맞다.
+            if classification.low_confidence_reason == REASON_LLM_UNAVAILABLE:
+                await emit_step("intent_classification", "error",
+                                error_code="llm_unavailable")
+                return await self._refuse(
+                    request, started, tool_calls, scenario_object, scenario_depth,
+                    RefusalReason.LLM_UNAVAILABLE, conf,
+                    verification_status=VerificationStatus.SKIPPED,
+                    error_code="llm_unavailable", classification=classification,
                 )
             await emit_step("intent_classification", "ok",
                             scenario_object=scenario_object,
@@ -1583,6 +1598,9 @@ class HierarchicalCorrectiveRunner:
                     llm_result = await llm.generate(rendered.text)
             except LLMUnavailableError as exc:
                 s.set_attribute("llm.status", "unavailable")
+                # 생성 단계 미도달도 분류기 span 과 동형으로 upstream 원인을 Phoenix 에
+                # 남긴다(내부 원인은 span 에만, 사용자 응답엔 싣지 않음).
+                s.set_attribute("llm.upstream_error", str(exc)[:500])
                 return await self._refuse(
                     request, started, tool_calls, scenario_object, scenario_depth,
                     RefusalReason.LLM_UNAVAILABLE, conf, error_code="llm_unavailable",

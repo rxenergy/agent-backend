@@ -117,6 +117,43 @@ class _FakeO4Classifier:
         )
 
 
+class _UnavailableClassifier:
+    """LLM 백엔드 미도달로 fallback 한 분류기 — confidence 0 +
+    low_confidence_reason=REASON_LLM_UNAVAILABLE."""
+
+    backend = "llm"
+    policy_hash = "fake_unavail"
+
+    async def classify(self, query_text, chat_history=()):
+        from app.application.classification.llm import REASON_LLM_UNAVAILABLE
+        from app.domain.classification import ClassificationResult
+
+        return ClassificationResult(
+            scenario_object="O4", scenario_depth="D2", entities={},
+            confidence=0.0, object_confidence=0.0, depth_confidence=0.0,
+            low_confidence_reason=REASON_LLM_UNAVAILABLE,
+            classifier_backend=self.backend, classifier_policy_hash=self.policy_hash,
+        )
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_routes_to_llm_unavailable_not_clarification() -> None:
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(Path(tmp), classifier=_UnavailableClassifier())
+        req = AgentRequest(interaction_id="hu", query_text="NuScale DWO", session_id="s1")
+        steps = [(ev.name, ev.status) async for ev in runner.run_stream(req)
+                 if ev.kind == "step"]
+        final = None
+        async for ev in runner.run_stream(req):
+            if ev.kind == "final":
+                final = ev.payload["response"]
+        assert final.refusal_reason == "llm_unavailable"
+        # "ok" emit 단락 → "…이해했습니다" 오해 라인 차단.
+        assert ("intent_classification", "ok") not in steps
+        assert ("intent_classification", "error") in steps
+
+
 def _make_runner(
     tmp: Path, *, with_contract: bool = True, retrieval_planner=None, retriever_tool=None,
     llm=None, claim_verification_enabled: bool = True,
