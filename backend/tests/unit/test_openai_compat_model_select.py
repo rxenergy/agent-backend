@@ -51,10 +51,10 @@ def fake_app():
 
 def test_split_model_id_full():
     assert _split_model_id(
-        "sequential_tool_routed_v2@gpt-4o",
+        "agentic_finder_v4@gpt-4o",
         default_variant="seq",
         default_llm="fake-echo",
-    ) == ("sequential_tool_routed_v2", "gpt-4o")
+    ) == ("agentic_finder_v4", "gpt-4o")
 
 
 def test_split_model_id_empty_falls_back_to_defaults():

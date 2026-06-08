@@ -21,7 +21,7 @@ def test_shipped_variants_self_register() -> None:
     on every shipped runner module — no edits to profiles.py required."""
     known = VariantRegistry.known()
     assert "fake_echo_v0" in known
-    assert "sequential_tool_routed_v2" in known
+    assert "agentic_finder_v4" in known
 
 
 def test_yaml_registry_aligns_with_code_registry(tmp_path) -> None:

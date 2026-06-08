@@ -10,12 +10,12 @@
 #
 # Usage:
 #   scripts/smoke-stream.sh
-#   BASE=http://other-host:8000 MODEL=sequential_tool_routed_v2@gemma-stream \
+#   BASE=http://other-host:8000 MODEL=agentic_finder_v4@gemma-stream \
 #     scripts/smoke-stream.sh
 set -eu
 
 BASE="${BASE:-http://localhost:8000}"
-MODEL="${MODEL:-sequential_tool_routed_v2@fake-echo}"
+MODEL="${MODEL:-agentic_finder_v4@fake-echo}"
 QUERY="${QUERY:-APR1400과 i-SMR 안전계통 차이를 알려줘}"
 
 have_jq=0

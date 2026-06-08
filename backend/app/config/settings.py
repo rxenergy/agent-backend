@@ -33,11 +33,11 @@ class Settings(BaseSettings):
 
     # Agent variant pool + default selection
     agent_variants_enabled: list[str] = [
-        "sequential_tool_routed_v2",
+        "agentic_finder_v4",
         "hierarchical_corrective_v3_1",
         "fake_echo_v0",
     ]
-    default_variant: str = "sequential_tool_routed_v2"
+    default_variant: str = "agentic_finder_v4"
 
     # Classifier (Node 1)
     classifier_backend: Literal["rule", "llm", "hybrid"] = "rule"

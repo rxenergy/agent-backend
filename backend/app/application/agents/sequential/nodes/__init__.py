@@ -1,15 +1,8 @@
 # Sequential workflow nodes (ADR-0003).
 #
-# Each module under this package corresponds to one of the 15 steps in
-# `agent_expreiment_platform_architecture.mvp.v2.md` §7.1. Modules expose
-# free `async def` functions over `RunState` + per-node deps so the
-# conductor (`sequential_tool_routed_v2.SequentialToolRoutedRunner.run`)
-# becomes a straight sequence of calls and each node is independently
-# testable.
-#
-# Migration status (Phase 3.2c):
-#   [done] classify  — extracted as a demonstration of the pattern
-#   [todo] memory_load, retrieve, resolve_citation, build_context,
-#          resolve_prompt, render, generate, verify_citation,
-#          verify_faithfulness, memory_update, build_event
+# Modules under this package expose free `async def` functions over per-node
+# deps so a conductor can call them as a straight sequence and each node is
+# independently testable. `classify` is the extracted shared node — consumed
+# by the `hierarchical_corrective_v3_1` and `agentic_finder_v4` runners (both
+# import `classify` + `_HARDCODED_POLICY_HASH` directly).
 from app.application.agents.sequential.nodes import classify  # noqa: F401

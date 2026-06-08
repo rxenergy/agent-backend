@@ -19,7 +19,7 @@ Profile differences are env vars only — never branch the image.
 
 ## Architecture Principles (Non-Negotiable)
 
-1. **Agent workflow = `AgentRunner` variants.** The API / domain / adapter code does not change when you swap workflows. `AGENT_VARIANT` env var selects: `fake_echo_v0` (P0 test) | `sequential_tool_routed_v2` (default, 15-step via ToolExecutor).
+1. **Agent workflow = `AgentRunner` variants.** The API / domain / adapter code does not change when you swap workflows. `AGENT_VARIANT` env var selects: `fake_echo_v0` (P0 test) | `agentic_finder_v4` (default, 3-Phase Intake→Retrieval→Generation with a Finder tool-calling loop) | `hierarchical_corrective_v3_1` (multi-strategy retrieval + claim-level verification).
 2. **Tools are controlled, not LLM-discovered.** Every external capability — retrieval, document resolution, memory access, verification, artifact write — is invoked through `ToolExecutor` against `tools/registry.yaml`. The LLM does not pick tools; the workflow does. Retrieval / document resolution backends are selected via `RETRIEVER_BACKEND` (`opensearch` | `local`) and wired in `backend/app/config/profiles.py`; `tools/registry.yaml` defines policy (timeout / retry / required) only.
 3. **Memory is gated.** Session memory injects only on follow-up turns with matching scenario + ≥50% entity overlap. Approved memory (Phase 5) is the only long-term knowledge that reaches the prompt; candidate/stale memory never does.
 4. **Hexagonal (Ports & Adapters).** `backend/app/{domain,ports,adapters,application,api,config,observability}`. Domain code MUST NOT import external SDKs.
@@ -46,7 +46,7 @@ backend/                 # FastAPI service (hexagonal)
   app/
     api/                 # /health, /v1/chat/completions, /v1/models
     application/
-      agents/            # fake_echo_v0, sequential_tool_routed_v2
+      agents/            # fake_echo_v0, agentic_finder_v4, hierarchical_corrective_v3_1
       tools/             # registry, executor, policy, errors
       memory/            # session policies, resolver
       prompting/         # resolver, renderer

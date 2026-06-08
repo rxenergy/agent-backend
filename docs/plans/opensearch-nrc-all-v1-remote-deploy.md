@@ -271,7 +271,7 @@ async def main():
     )
     ctx = ToolExecutionContext(
         interaction_id="smoke-1", trace_id="t-1",
-        app_profile="onprem", agent_variant="sequential_tool_routed_v2",
+        app_profile="onprem", agent_variant="agentic_finder_v4",
     )
     r = await tool.invoke(
         {"query_text": "reactor coolant pressure boundary", "top_k": 3,
