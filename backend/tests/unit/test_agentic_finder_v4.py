@@ -17,7 +17,9 @@ from app.adapters.tools.memory_session_local import SessionLoadTool, SessionUpda
 from app.adapters.tools.retriever_local import LocalRetrieverTool
 from app.adapters.tools.retrieval_search import RetrievalSearchTool
 from app.adapters.tools.retrieval_scope import RetrievalScopeTool
-from app.adapters.tools.retrieval_normalize import RetrievalNormalizeTool
+from app.adapters.tools.terminology_canonicalize import TerminologyCanonicalizeTool
+from app.adapters.tools.terminology_expand import TerminologyExpandTool
+from app.application.terminology.vocab import TerminologyVocab
 from app.adapters.tools.submit_verdict import SubmitVerdictTool
 from app.application.agents.agentic_finder_v4 import (
     AGENTIC_FINDER_VARIANT_ID,
@@ -47,6 +49,7 @@ _SPEC = VariantSpec(variant_id=AGENTIC_FINDER_VARIANT_ID)
 _REPO_PROMPTS = Path(__file__).resolve().parents[3] / "prompts"
 _CONTRACT = _REPO_PROMPTS / "system" / "citation_contract_v1.md"
 _OUTPUT_LANG = _REPO_PROMPTS / "system" / "output_language_v1.md"
+_VOCAB = _REPO_PROMPTS.parent / "tools" / "terminology" / "vocab.yaml"
 
 
 def _tool_registry_yaml(root: Path) -> Path:
@@ -54,7 +57,8 @@ def _tool_registry_yaml(root: Path) -> Path:
         "tools": {
             "retrieval.search": {"version": "v1", "adapter": "reranked", "timeout_ms": 6000, "retry": 1, "required": False},
             "retrieval.scope": {"version": "v1", "adapter": "corpus_map", "timeout_ms": 1000, "retry": 0, "required": False},
-            "retrieval.normalize": {"version": "v1", "adapter": "term_dict", "timeout_ms": 1000, "retry": 0, "required": False},
+            "terminology.canonicalize": {"version": "v1", "adapter": "vocab", "timeout_ms": 1000, "retry": 0, "required": False},
+            "terminology.expand": {"version": "v1", "adapter": "vocab", "timeout_ms": 1000, "retry": 0, "required": False},
             "submit_verdict": {"version": "v1", "adapter": "local", "timeout_ms": 1000, "retry": 0, "required": False},
             "memory.session_load": {"version": "v1", "adapter": "postgres", "timeout_ms": 1000, "retry": 0, "required": False},
             "memory.session_update": {"version": "v1", "adapter": "postgres", "timeout_ms": 1000, "retry": 0, "required": False},
@@ -73,7 +77,10 @@ def _finder_tools(store) -> dict:
         "retrieval.search": RetrievalSearchTool(
             retriever=LocalRetrieverTool(), reranker=IdentityReranker()),
         "retrieval.scope": RetrievalScopeTool(),
-        "retrieval.normalize": RetrievalNormalizeTool(),
+        "terminology.canonicalize": TerminologyCanonicalizeTool(
+            vocab=TerminologyVocab.from_yaml(_VOCAB)),
+        "terminology.expand": TerminologyExpandTool(
+            vocab=TerminologyVocab.from_yaml(_VOCAB)),
         "submit_verdict": SubmitVerdictTool(),
         "memory.session_load": SessionLoadTool(store),
         "memory.session_update": SessionUpdateTool(store, ttl_days=90),
@@ -88,13 +95,15 @@ class _ScopeTierClassifier:
     backend = "fake"
     policy_hash = "fake_finder"
 
-    def __init__(self, *, scope_tier: str | None = None, confidence: float = 0.8) -> None:
+    def __init__(self, *, scope_tier: str | None = None, confidence: float = 0.8,
+                 entities: dict | None = None) -> None:
         self._tier = scope_tier
         self._conf = confidence
+        self._entities = entities or {}
 
     async def classify(self, query_text, chat_history=()):
         return ClassificationResult(
-            scenario_object="O4", scenario_depth="D2", entities={},
+            scenario_object="O4", scenario_depth="D2", entities=dict(self._entities),
             confidence=self._conf, object_confidence=self._conf,
             depth_confidence=self._conf, scope_tier=self._tier,
             classifier_backend=self.backend, classifier_policy_hash=self.policy_hash,
@@ -219,7 +228,8 @@ def test_factory_builds_classifier_from_prompt_source() -> None:
 
 
 def _finder_script():
-    """scope→normalize→search→verdict 를 구동하는 FakeToolLLM 스크립트(1턴 1도구)."""
+    """scope→search→verdict 를 구동하는 FakeToolLLM 스크립트(1턴 1도구). 용어 정규화는
+    N1.5 conductor(terminology.canonicalize)로 상향 — Finder 루프엔 normalize 없음."""
     from app.adapters.llm.fake import FakeToolLLM
     from app.ports.llm import LLMToolResult, ToolCall
 
@@ -229,7 +239,6 @@ def _finder_script():
                              model_id="fake-tool")
     return FakeToolLLM(script=[
         r(ToolCall("c1", "retrieval.scope", {})),
-        r(ToolCall("c2", "retrieval.normalize", {"terms": ["ECCS"]})),
         r(ToolCall("c3", "retrieval.search", {"query_text": "i-SMR ECCS", "top_k": 3})),
         r(ToolCall("c4", "submit_verdict", {"sufficient": True, "reason": "충족"})),
     ])
@@ -258,8 +267,42 @@ async def test_finder_search_tools_recorded_in_event() -> None:
         events_root = Path(tmp) / "events" / "t" / "interaction_events"
         rec = json.loads(next(events_root.rglob("*.jsonl")).read_text(encoding="utf-8").splitlines()[0])
         names = {tc["name"] for tc in rec["tool_calls"]}
-        # Finder 도구가 ToolExecutor 경로로 기록된다("도구는 통제된다").
-        assert {"retrieval.scope", "retrieval.normalize", "retrieval.search", "submit_verdict"} <= names
+        # Finder 도구(scope/search/submit_verdict) + N1.5 conductor 의 terminology.
+        # canonicalize 가 모두 ToolExecutor 경로로 기록된다("도구는 통제된다").
+        assert {"retrieval.scope", "retrieval.search", "submit_verdict",
+                "terminology.canonicalize"} <= names
+
+
+@pytest.mark.asyncio
+async def test_n15_canonicalize_pins_concepts_and_annotates_prompt() -> None:
+    # N1.5 terminology.canonicalize(conductor-invoked, 보장) — 분류 entities("ECC")를
+    # 용어집으로 정규화(ECC→ECCS)해 (1) 이벤트 재현 핀, (2) 생성 프롬프트 병기.
+    with tempfile.TemporaryDirectory() as tmp:
+        clf = _ScopeTierClassifier(entities={"system": ["ECC"], "reactor_type": ["i-SMR"]})
+        runner, _ = _make_runner(Path(tmp), classifier=clf, llm=_finder_script())
+        req = AgentRequest(interaction_id="tc1", query_text="i-SMR ECC 요건", session_id="s1")
+        resp = await runner.run(req)
+        assert resp.refusal_reason is None
+
+        root = Path(tmp) / "events" / "t"
+        rec = json.loads(
+            next((root / "interaction_events").rglob("*.jsonl"))
+            .read_text(encoding="utf-8").splitlines()[0]
+        )
+        # (1) 재현 핀 — vocab_sha + 매핑된 concept_ids(ECC→ECCS, i-SMR).
+        term = rec["query_understanding"]["terminology"]
+        assert term["vocab_sha"]
+        assert set(term["concept_ids"]) == {"ECCS", "i-SMR"}
+        assert term["num_canonical"] == 2
+
+        # (2) 생성 프롬프트에 정규형·정의 병기(검색 질의는 query_en 불변).
+        prec = json.loads(
+            next((root / "prompt_render_records").rglob("*.json")).read_text(encoding="utf-8")
+        )
+        prompt_text = prec["rendered_prompt"]
+        assert "TERMINOLOGY" in prompt_text
+        assert "ECCS" in prompt_text
+        assert "Emergency Core Cooling System" in prompt_text  # 정의 병기.
 
 
 @pytest.mark.asyncio

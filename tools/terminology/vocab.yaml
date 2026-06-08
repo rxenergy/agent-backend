@@ -1,0 +1,59 @@
+# Terminology Controlled Vocabulary (ISO 25964) — agentic_finder
+# 설계: docs/plans/terminology_normalization_strategy.v1.md
+#
+# concept 단위(preferred term + UF/BT/NT/RT). TerminologyVocab(backend/app/application/
+# terminology/vocab.py)가 로드해 두 결정론 연산에 쓴다:
+#   canonicalize(N1.5, 정밀): surface/uf → preferred + definition
+#   expand(Finder recover, 재현): term → uf/nt(기본) + rt(opt-in)
+#
+# ⚠️ PROVISIONAL SEED — 현 retrieval_normalize._TERM_DICT + data/synonyms/domain.yaml
+# 을 통합한 소수 시드. nt/rt(상하위·관련어)는 도메인 검증 전이라 비워 둔다(억지 생성
+# 금지 — 규제 용어는 의미가 안전·법적 중요). 운영 자산은 IAEA INIS Thesaurus(BT/NT/RT,
+# 다국어) 부분 채택 + 큐레이션으로 확장(strategy §2/§11 #1). v3.1 data/synonyms 와는
+# 분리 유지(variant 격리, strategy §11 #2).
+#
+# 규약: 미등록 term 은 passthrough(원형 보존). surface(preferred+uf) 충돌 시 boot fail-fast.
+
+version: v1
+concepts:
+  - id: ECCS
+    preferred: ECCS
+    definition_en: Emergency Core Cooling System
+    definition_ko: 비상노심냉각계통
+    uf: [ECC, "emergency core cooling", "Emergency Core Cooling System", 비상노심냉각계통]
+
+  - id: i-SMR
+    preferred: i-SMR
+    definition_en: innovative SMR
+    definition_ko: 혁신형 소형모듈원자로
+    uf: [l-SMR, ISMR, "innovative SMR", 혁신형소형모듈원자로, 혁신형 소형모듈원자로]
+
+  - id: RAI
+    preferred: RAI
+    definition_en: Request for Additional Information
+    definition_ko: 추가정보요청
+    uf: ["Request for Additional Information", 추가정보요청]
+
+  - id: FSAR
+    preferred: FSAR
+    definition_en: Final Safety Analysis Report
+    definition_ko: 최종안전성분석보고서
+    uf: ["Final Safety Analysis Report", 최종안전성분석보고서]
+
+  - id: RCS
+    preferred: RCS
+    definition_en: Reactor Coolant System
+    definition_ko: 원자로냉각재계통
+    uf: ["Reactor Coolant System", 원자로냉각재계통]
+
+  - id: LOCA
+    preferred: LOCA
+    definition_en: Loss-of-Coolant Accident
+    definition_ko: 냉각재상실사고
+    uf: ["Loss-of-Coolant Accident", 냉각재상실사고]
+
+  - id: NuScale
+    preferred: NuScale
+    definition_en: NuScale Power Module
+    definition_ko: ""
+    uf: ["NuScale Power Module", NPM]

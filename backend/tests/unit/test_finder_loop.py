@@ -9,11 +9,12 @@ import yaml
 from app.adapters.event_sink.filesystem import FilesystemEventSink
 from app.adapters.llm.fake import FakeToolLLM
 from app.adapters.reranker.identity import IdentityReranker
-from app.adapters.tools.retrieval_normalize import RetrievalNormalizeTool
 from app.adapters.tools.retrieval_scope import RetrievalScopeTool
 from app.adapters.tools.retrieval_search import RetrievalSearchTool
 from app.adapters.tools.retriever_local import LocalRetrieverTool
 from app.adapters.tools.submit_verdict import SubmitVerdictTool
+from app.adapters.tools.terminology_expand import TerminologyExpandTool
+from app.application.terminology.vocab import TerminologyVocab
 from app.application.agents.finder_loop import (
     FINDER_TOOL_SPECS,
     run_finder,
@@ -37,13 +38,14 @@ _SPEC = AnswerSpec(
     required_slots=(AnswerSlot(name="governing_clause"), AnswerSlot(name="requirement_text")),
     depth="D2", instantiation_method="llm",
 )
+_VOCAB = Path(__file__).resolve().parents[3] / "tools" / "terminology" / "vocab.yaml"
 
 
 def _executor(tmp: Path) -> ToolExecutor:
     body = {"tools": {
         "retrieval.search": {"version": "v1", "adapter": "reranked", "timeout_ms": 6000, "retry": 0, "required": False},
         "retrieval.scope": {"version": "v1", "adapter": "corpus_map", "timeout_ms": 1000, "retry": 0, "required": False},
-        "retrieval.normalize": {"version": "v1", "adapter": "term_dict", "timeout_ms": 1000, "retry": 0, "required": False},
+        "terminology.expand": {"version": "v1", "adapter": "vocab", "timeout_ms": 1000, "retry": 0, "required": False},
         "submit_verdict": {"version": "v1", "adapter": "local", "timeout_ms": 1000, "retry": 0, "required": False},
     }}
     p = tmp / "tools.yaml"
@@ -53,7 +55,7 @@ def _executor(tmp: Path) -> ToolExecutor:
     tools = {
         "retrieval.search": RetrievalSearchTool(retriever=LocalRetrieverTool(), reranker=IdentityReranker()),
         "retrieval.scope": RetrievalScopeTool(),
-        "retrieval.normalize": RetrievalNormalizeTool(),
+        "terminology.expand": TerminologyExpandTool(vocab=TerminologyVocab.from_yaml(_VOCAB)),
         "submit_verdict": SubmitVerdictTool(),
     }
     return ToolExecutor(registry=registry, tools=tools, event_sink=sink)
@@ -69,12 +71,13 @@ def _scope() -> ToolCall:
     return ToolCall("c-scope", "retrieval.scope", {})
 
 
-def _normalize(*terms) -> ToolCall:
-    return ToolCall("c-norm", "retrieval.normalize", {"terms": list(terms)})
-
-
 def _search(q="i-SMR ECCS", top_k=3) -> ToolCall:
     return ToolCall("c-search", "retrieval.search", {"query_text": q, "top_k": top_k})
+
+
+def _expand(*terms, relations=("uf",)) -> ToolCall:
+    return ToolCall("c-expand", "terminology.expand",
+                    {"terms": list(terms), "relations": list(relations)})
 
 
 def _verdict(sufficient=True, missing=None, reason="ok") -> ToolCall:
@@ -93,11 +96,11 @@ async def _run(llm, ex, *, recover_limit=3, max_turns=10):
 
 @pytest.mark.asyncio
 async def test_exit_on_submit_verdict() -> None:
-    # scope → normalize → search → verdict. 직렬(1턴 1도구). verdict 캡처 후 종료.
+    # scope → search → verdict. 직렬(1턴 1도구). verdict 캡처 후 종료. 용어 정규화는
+    # N1.5 conductor(terminology.canonicalize)로 상향 — Finder 루프엔 normalize 없음.
     with tempfile.TemporaryDirectory() as tmp:
         llm = FakeToolLLM(script=[
             _r(_scope()),
-            _r(_normalize("ECCS")),
             _r(_search()),
             _r(_verdict(sufficient=True, reason="슬롯 충족")),
         ])
@@ -108,7 +111,7 @@ async def test_exit_on_submit_verdict() -> None:
         assert len(result.finder_rounds) == 1     # 검색 라운드 1건.
         rnd = result.finder_rounds[0]
         assert rnd.num_chunks >= 1
-        assert rnd.normalized_terms == ("ECCS",)  # normalize 가 라운드에 귀속.
+        assert rnd.normalized_terms == ()         # 정규화는 라운드 단위 아님(N1.5 conductor).
         assert rnd.scope_params.get("mode") == "off"  # CorpusMap.default → off.
         assert rnd.reranker_score_dist            # 점수 분포 계측.
         assert rnd.verdict_sufficient is True      # verdict 가 직전 검색 라운드에 귀속.
@@ -146,7 +149,7 @@ async def test_exit_on_max_turns_backstop_when_no_tool_calls() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_calls_routed_through_executor_records() -> None:
-    # "도구는 통제된다" — scope/normalize/search/submit_verdict 모두 ToolExecutor 경로로
+    # "도구는 통제된다" — scope/search/submit_verdict 모두 ToolExecutor 경로로
     # record 된다(submit_verdict 도 no-op tool 로 동일 기록).
     with tempfile.TemporaryDirectory() as tmp:
         recorded: list[str] = []
@@ -179,8 +182,42 @@ async def test_search_failure_is_fed_back_not_raised() -> None:
         assert result.finder_rounds[0].num_chunks == 0
 
 
-def test_tools_schema_hash_is_stable_and_covers_four_tools() -> None:
+def test_tools_schema_hash_is_stable_and_covers_finder_tools() -> None:
+    # 용어 정규화(canonicalize)는 N1.5 conductor 로 상향. Finder 도구 set =
+    # scope/search/terminology.expand(recover 전용)/submit_verdict 4종.
     assert {t.name for t in FINDER_TOOL_SPECS} == {
-        "retrieval.scope", "retrieval.normalize", "retrieval.search", "submit_verdict"}
+        "retrieval.scope", "retrieval.search", "terminology.expand", "submit_verdict"}
     assert tools_schema_hash() == tools_schema_hash()  # 결정론(재현 핀).
     assert len(tools_schema_hash()) == 16
+
+
+@pytest.mark.asyncio
+async def test_expand_recover_gate_attributes_to_next_search() -> None:
+    # recover 게이트: 첫 검색 후 terminology.expand → 확장 term 이 *다음* 검색 라운드에
+    # 귀속(첫 검색 라운드는 () — 정밀 우선).
+    with tempfile.TemporaryDirectory() as tmp:
+        llm = FakeToolLLM(script=[
+            _r(_search()),                       # 첫 검색(searched_once=True).
+            _r(_expand("ECCS")),                 # recover 확장(uf 동의어).
+            _r(_search(q="ECCS ECC")),           # 재검색.
+            _r(_verdict()),
+        ])
+        result = await _run(llm, _executor(Path(tmp)))
+        assert len(result.finder_rounds) == 2
+        assert result.finder_rounds[0].expanded_terms == ()       # 첫 검색엔 확장 없음.
+        assert "ECC" in result.finder_rounds[1].expanded_terms     # 재검색에 확장 귀속.
+        assert "uf" in result.finder_rounds[1].expand_relations
+
+
+@pytest.mark.asyncio
+async def test_expand_before_first_search_is_noop() -> None:
+    # 첫 검색 전 expand 는 게이트로 무시(no-op 통지) — 검색 라운드에 확장 미귀속.
+    with tempfile.TemporaryDirectory() as tmp:
+        llm = FakeToolLLM(script=[
+            _r(_expand("ECCS")),    # 첫 검색 전 — no-op.
+            _r(_search()),
+            _r(_verdict()),
+        ])
+        result = await _run(llm, _executor(Path(tmp)))
+        assert len(result.finder_rounds) == 1
+        assert result.finder_rounds[0].expanded_terms == ()       # 게이트로 미적용.

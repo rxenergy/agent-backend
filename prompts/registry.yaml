@@ -160,7 +160,7 @@ answer_spec_prompts:
 finder_prompts:
   finder_v1:
     profile_version: v1
-    prompt:        {path: finder/finder_v1.md, version: v1, sha256: "3ec1cb6004087dcef2f908ddb6c81ca10ee4acc5fdb20ad6b76d9662e9ff331f"}
+    prompt:        {path: finder/finder_v1.md, version: v1, sha256: "cf2bc04362e3ab85195daff4e830053381eac5ef38df7b7d97d52ee160c7628f"}
     model_options: {temperature: 0.0, max_tokens: 600}
 
 prompt_profiles:
