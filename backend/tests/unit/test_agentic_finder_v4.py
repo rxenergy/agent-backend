@@ -18,6 +18,7 @@ from app.adapters.tools.retriever_local import LocalRetrieverTool
 from app.adapters.tools.retrieval_search import RetrievalSearchTool
 from app.adapters.tools.retrieval_scope import RetrievalScopeTool
 from app.adapters.tools.terminology_canonicalize import TerminologyCanonicalizeTool
+from app.adapters.tools.terminology_expand import TerminologyExpandTool
 from app.application.terminology.vocab import TerminologyVocab
 from app.adapters.tools.submit_verdict import SubmitVerdictTool
 from app.application.agents.agentic_finder_v4 import (
@@ -57,6 +58,7 @@ def _tool_registry_yaml(root: Path) -> Path:
             "retrieval.search": {"version": "v1", "adapter": "reranked", "timeout_ms": 6000, "retry": 1, "required": False},
             "retrieval.scope": {"version": "v1", "adapter": "corpus_map", "timeout_ms": 1000, "retry": 0, "required": False},
             "terminology.canonicalize": {"version": "v1", "adapter": "vocab", "timeout_ms": 1000, "retry": 0, "required": False},
+            "terminology.expand": {"version": "v1", "adapter": "vocab", "timeout_ms": 1000, "retry": 0, "required": False},
             "submit_verdict": {"version": "v1", "adapter": "local", "timeout_ms": 1000, "retry": 0, "required": False},
             "memory.session_load": {"version": "v1", "adapter": "postgres", "timeout_ms": 1000, "retry": 0, "required": False},
             "memory.session_update": {"version": "v1", "adapter": "postgres", "timeout_ms": 1000, "retry": 0, "required": False},
@@ -76,6 +78,8 @@ def _finder_tools(store) -> dict:
             retriever=LocalRetrieverTool(), reranker=IdentityReranker()),
         "retrieval.scope": RetrievalScopeTool(),
         "terminology.canonicalize": TerminologyCanonicalizeTool(
+            vocab=TerminologyVocab.from_yaml(_VOCAB)),
+        "terminology.expand": TerminologyExpandTool(
             vocab=TerminologyVocab.from_yaml(_VOCAB)),
         "submit_verdict": SubmitVerdictTool(),
         "memory.session_load": SessionLoadTool(store),

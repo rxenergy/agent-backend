@@ -56,6 +56,7 @@ variants:
       - retrieval.search
       - retrieval.scope
       - terminology.canonicalize
+      - terminology.expand
       - submit_verdict
       - memory.session_load
       - memory.session_update

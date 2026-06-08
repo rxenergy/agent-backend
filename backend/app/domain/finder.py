@@ -55,10 +55,14 @@ class FinderRound:
 
     round_index: int
     query: str = ""
-    normalized_terms: tuple[str, ...] = ()
+    normalized_terms: tuple[str, ...] = ()       # N1.5 canonicalize 산출(라운드 단위 아님 → ()).
     scope_params: dict[str, object] = field(default_factory=dict)
     num_chunks: int = 0
     verdict_sufficient: bool | None = None  # submit_verdict 산출(없으면 None).
     missing_slots: tuple[str, ...] = ()
     verdict_reason: str | None = None
     reranker_score_dist: tuple[float, ...] = ()
+    # P3 recover 확장(terminology.expand, 시소러스) — 이 검색에 반영된 동의어/하위어와
+    # 사용한 관계 유형(uf/nt/rt). 첫 검색은 (), recover 라운드에서만 채워진다(선택적 확장).
+    expanded_terms: tuple[str, ...] = ()
+    expand_relations: tuple[str, ...] = ()

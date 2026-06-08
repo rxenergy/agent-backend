@@ -28,9 +28,11 @@ _TRACER = get_tracer("agent")
 _VERDICT_TOOL = "submit_verdict"
 _SEARCH_TOOL = "retrieval.search"
 _SCOPE_TOOL = "retrieval.scope"
+_EXPAND_TOOL = "terminology.expand"
 # 용어 정규화(canonicalize)는 N1.5 conductor-invoked 로 상향됨(terminology.canonicalize,
 # 보장 실행) — Finder 도구 set 에서 제거. 검색범위 확장(terminology.expand, 시소러스)은
-# recover 전용으로 P3 에서 추가된다. 설계: terminology_normalization_strategy.v1.md.
+# **recover 전용**(첫 검색 후, searched_once 코드 게이트) — 선택적 확장으로 query drift
+# 를 통제한다. 설계: terminology_normalization_strategy.v1.md §3.3/§4.
 
 # LLM-facing 도구 정의(중립 ToolSpec). registry(tools/registry.yaml)는 *실행 정책*
 # (timeout/retry/span)을, 이 ToolSpec 집합은 *모델이 보는 인자 스키마*를 정한다 —
@@ -61,6 +63,25 @@ FINDER_TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "min_token_count": {"type": "integer"},
             },
             "required": ["query_text"],
+        },
+    ),
+    ToolSpec(
+        name=_EXPAND_TOOL,
+        description=("(recover 전용) 검색이 불충분할 때만 용어의 동의어·하위어로 검색 "
+                     "범위를 넓힌다. 첫 검색에는 쓰지 않는다 — 먼저 retrieval.search 로 "
+                     "정밀 검색 후, 부족하면 이 도구로 확장해 재검색한다. uf(동의어)/"
+                     "nt(하위어)가 기본, rt(관련어)는 주제 이탈 위험이 있어 신중히."),
+        parameters={
+            "type": "object",
+            "properties": {
+                "terms": {"type": "array", "items": {"type": "string"},
+                          "description": "확장할 용어(정규형 권장)"},
+                "relations": {"type": "array",
+                              "items": {"type": "string", "enum": ["uf", "nt", "rt"]},
+                              "description": "관계 유형(기본 uf,nt)"},
+                "max_per_term": {"type": "integer"},
+            },
+            "required": ["terms"],
         },
     ),
     ToolSpec(
@@ -151,8 +172,10 @@ async def run_finder(
     searched_once = False
     chunks_by_id: dict[str, RetrievedChunk] = {}
     finder_rounds: list[FinderRound] = []
-    # per-round 누적기(직렬 도구 호출 — scope 는 search 전 별도 턴).
+    # per-round 누적기(직렬 도구 호출 — scope/expand 는 search 전 별도 턴).
     pending_scope: dict[str, Any] = {}
+    pending_expanded: tuple[str, ...] = ()      # recover 확장 term(다음 search 라운드 귀속).
+    pending_relations: tuple[str, ...] = ()     # 사용한 관계 유형(uf/nt/rt).
     llm_calls = 0
     turns_used = 0
 
@@ -209,16 +232,43 @@ async def run_finder(
                         chunks_by_id[c.chunk_id] = c
                     # per-search FinderRound 확정(advisor: 1 라운드 = 1 검색).
                     # normalized_terms 는 () — 정규화는 N1.5 conductor(라운드 단위 아님,
-                    # query_understanding.terminology 가 핀). P3 에서 recover 확장
-                    # expanded_terms 필드 추가 예정.
+                    # query_understanding.terminology 가 핀). expanded_terms 는 직전
+                    # recover 확장(terminology.expand)이 이 검색에 반영된 term.
                     finder_rounds.append(FinderRound(
                         round_index=len(finder_rounds),
                         query=str((call.arguments or {}).get("query_text") or query_text),
                         scope_params=pending_scope,
                         num_chunks=len(new_chunks),
                         reranker_score_dist=tuple(rerank_scores),
+                        expanded_terms=tuple(dict.fromkeys(pending_expanded)),
+                        expand_relations=tuple(dict.fromkeys(pending_relations)),
                     ))
                     pending_scope = {}
+                    pending_expanded, pending_relations = (), ()
+                elif call.name == _EXPAND_TOOL:
+                    # recover 게이트(§3.3): 첫 검색 후(searched_once)에만 확장을 적용한다
+                    # (정밀 우선). 첫 검색 전 호출은 no-op 통지로 되먹여 LLM 이 먼저 검색하게
+                    # 한다. 확장 term 은 다음 search 라운드에 귀속(query drift 통제).
+                    if searched_once and ok:
+                        new_expanded = tuple(
+                            (out.output or {}).get("expanded_terms", []) or [])
+                        pending_expanded = pending_expanded + new_expanded
+                        pending_relations = pending_relations + tuple(
+                            str(x) for x in
+                            ((call.arguments or {}).get("relations") or ("uf", "nt")))
+                        messages.append(ChatMessage(
+                            role="tool", content=_serialize(out.output),
+                            tool_call_id=call.id, is_error=not ok))
+                    else:
+                        messages.append(ChatMessage(
+                            role="tool",
+                            content=_serialize({
+                                "expanded_terms": [],
+                                "note": ("terminology.expand 는 recover 전용 — 먼저 "
+                                         "retrieval.search 로 정밀 검색하라."),
+                            }),
+                            tool_call_id=call.id, is_error=False))
+                    continue
                 messages.append(ChatMessage(
                     role="tool", content=_serialize(out.output),
                     tool_call_id=call.id, is_error=not ok))

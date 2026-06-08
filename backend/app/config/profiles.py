@@ -455,6 +455,7 @@ async def build_container(settings: Settings) -> AppContainer:
         from app.adapters.tools.retrieval_search import RetrievalSearchTool
         from app.adapters.tools.retrieval_scope import RetrievalScopeTool
         from app.adapters.tools.terminology_canonicalize import TerminologyCanonicalizeTool
+        from app.adapters.tools.terminology_expand import TerminologyExpandTool
         from app.adapters.tools.submit_verdict import SubmitVerdictTool
 
         tools = {
@@ -469,6 +470,7 @@ async def build_container(settings: Settings) -> AppContainer:
                 min_token_count=settings.retriever_min_token_count,
             ),
             "terminology.canonicalize": TerminologyCanonicalizeTool(vocab=terminology_vocab),
+            "terminology.expand": TerminologyExpandTool(vocab=terminology_vocab),
             "submit_verdict": SubmitVerdictTool(),
             # v3.1 Node 5 reranker — RRF 대체. opensearch 경로는 SPLADE sparse 모델 기반
             # (query×doc 희소 벡터 내적), local 경로는 결정론 lexical fake. 둘 다 동일

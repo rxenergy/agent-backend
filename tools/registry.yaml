@@ -67,6 +67,16 @@ tools:
     retry: 0
     required: false
 
+  # terminology.expand — 검색범위 확장(시소러스 ISO 25964 결정론 lookup). Finder-LLM-
+  # invoked, **recover 전용**(첫 검색 후 searched_once 코드 게이트). UF/NT 기본, RT opt-in.
+  # 보강용 required:false(루프 도구 — 실패는 is_error 로 LLM 되먹임).
+  terminology.expand:
+    version: v1
+    adapter: vocab
+    timeout_ms: 1000
+    retry: 0
+    required: false
+
   # submit_verdict — Finder 종료/충분성 판정 캡처(no-op). 인자=verdict.
   submit_verdict:
     version: v1
