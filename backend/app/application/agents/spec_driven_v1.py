@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import re
 import time
 from typing import Any, AsyncIterator
 
@@ -41,6 +42,8 @@ _TRACER = get_tracer("agent")
 
 SPEC_DRIVEN_VARIANT_ID = "spec_driven_v1"
 _SEARCH_TOOL = "retrieval.search"
+# gap-answer(0-chunk)에서 모델이 무근거로 남긴 인용 마커 제거용(결정=코드 안전망).
+_CITE_RE = re.compile(r"\s*\[cite-\d+\]")
 
 
 def _sha16(text: str) -> str:
@@ -81,6 +84,7 @@ class SpecDrivenRunner:
         citation_contract_path: str | None = None,
         retriever_top_k: int = 3,
         max_queries: int = 6,
+        max_context_chunks: int = 8,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
@@ -96,6 +100,7 @@ class SpecDrivenRunner:
         self._generation_source = generation_source
         self._top_k = retriever_top_k
         self._max_queries = max_queries
+        self._max_context_chunks = max_context_chunks
         self._citation_contract: str | None = None
         if citation_contract_path:
             from pathlib import Path
@@ -254,9 +259,14 @@ class SpecDrivenRunner:
                             chunks_by_id[c.chunk_id] = c
                 rs.set_attribute("retrieval.num_chunks", len(chunks_by_id))
                 oi.set_kind(rs, oi.KIND_RETRIEVER)
-            chunks = sorted(chunks_by_id.values(), key=lambda c: c.score, reverse=True)
+            merged = sorted(chunks_by_id.values(), key=lambda c: c.score, reverse=True)
+            # post-merge top-K cap(설계 §3.2) — 소형모델 컨텍스트 보호. no silent cap:
+            # 절단 여부를 핀에 기록한다.
+            chunks_capped = len(merged) > self._max_context_chunks
+            chunks = merged[: self._max_context_chunks]
             evidence_gap = not chunks
             await emit_step("retrieval", "ok", num_chunks=len(chunks),
+                            merged=len(merged), capped=chunks_capped,
                             evidence_gap=evidence_gap)
 
             # 재현 핀(원칙 5) — spec→query→retrieval 경로를 query_understanding 백에.
@@ -283,6 +293,8 @@ class SpecDrivenRunner:
                     },
                     "retrieval": {
                         "num_chunks": len(chunks),
+                        "merged": len(merged),
+                        "capped": chunks_capped,
                         "per_query_counts": per_query_counts,
                     },
                     "evidence_gap": evidence_gap,
@@ -335,10 +347,15 @@ class SpecDrivenRunner:
             chunk_ids = [c.chunk_id for c in chunks]
             # v1 은 검증 미수행(stub) → SKIPPED. gap 경로는 근거 0건이라 인용도 없음.
             terminal_outcome = "answer_with_gaps" if evidence_gap else "answer"
+            answer_text = llm_result.text
+            if evidence_gap:
+                # 근거 0건인데 모델이 [cite-N] 을 남겼다면 제거(무근거 인용 차단 —
+                # 프롬프트 hard-forbid 의 결정론 backstop, advisor #2).
+                answer_text = _CITE_RE.sub("", answer_text).strip()
 
             response = AgentResponse(
                 interaction_id=request.interaction_id,
-                answer_text=llm_result.text,
+                answer_text=answer_text,
                 citations=citations,
                 refusal_reason=None,  # gap-answer 는 거부 아님(사용자 #3).
                 verification_status=VerificationStatus.SKIPPED.value,
@@ -544,4 +561,5 @@ def _build_spec_driven(spec: VariantSpec, deps: AgentDeps) -> "SpecDrivenRunner"
         citation_contract_path=t.get("citation_contract_path"),
         retriever_top_k=t.get("retriever_top_k", 3),
         max_queries=t.get("spec_driven_max_queries", 6),
+        max_context_chunks=t.get("spec_driven_max_context_chunks", 8),
     )

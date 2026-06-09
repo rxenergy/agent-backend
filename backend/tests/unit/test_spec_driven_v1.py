@@ -216,6 +216,8 @@ async def test_gap_answer_on_zero_chunks_not_refusal() -> None:
         resp = await runner.run(_req())
         assert resp.refusal_reason is None  # gap-answer 는 거부 아님(사용자 #3).
         assert resp.citations == ()  # 근거 0건 → 인용 없음.
+        # 무근거 [cite-N] 마커는 결정론 backstop 으로 제거된다(advisor #2).
+        assert "[cite-" not in resp.answer_text
         pin = _event(tmp)["query_understanding"]["spec_driven"]
         assert pin["evidence_gap"] is True
         assert pin["retrieval"]["num_chunks"] == 0
