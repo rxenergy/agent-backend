@@ -197,6 +197,31 @@ react_generation_prompts:
     prompt:        {path: react/react_generation_v1.md, version: v1, sha256: "752a248efccd9ba85739165c4109333c199658f17bd835b2c222d6f7aabed665"}
     model_options: {temperature: 0.1, max_tokens: 2000}
 
+# spec_driven_v1 — 검색 앞단 두 모델 노드(N1 Define Spec / N2 Query Formulation) +
+# N4 Generation 프롬프트. 설계: docs/plans/spec_driven_agent.design.v1.md. N1/N2 는
+# guided decoding(json_schema)용 output_schema 동반, N4 는 자유 텍스트(free-text)라
+# 스키마 없음. SpecDrivenAnswerSpecSource/SpecDrivenQuerySource/SpecDrivenGenerationSource
+# 가 boot 시 sha 검증(무단 편집 차단, 원칙 5).
+spec_driven_answer_spec_prompts:
+  spec_driven_answer_spec_v1:
+    profile_version: v1
+    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "ae995e409ee6329157c17451b7e893a9fe53cc117aecf0f7404229e99fd777e7"}
+    output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "a6fd1cd29b966866715b41f1052f03d351ead8ebd96ffd97e3f8f9ba626a7087"}
+    model_options: {temperature: 0.0, max_tokens: 500}
+
+spec_driven_query_prompts:
+  spec_driven_query_v1:
+    profile_version: v1
+    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "c117013e7160c1dcf052afa35e888767b532c68ee06dc3f9690399ad3be385e7"}
+    output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "2d73f59c8199920fa46158347fb6993ca3b080e9f25505a910c4eaa91cb7f445"}
+    model_options: {temperature: 0.0, max_tokens: 500}
+
+spec_driven_generation_prompts:
+  spec_driven_generation_v1:
+    profile_version: v1
+    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "6587ed5e7c842d1a3f6bebea00a5773dad121f2f04a290d4beef8871576c0562"}
+    model_options: {temperature: 0.1, max_tokens: 2000}
+
 prompt_profiles:
 
   # === O1 Vendor ===

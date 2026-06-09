@@ -98,3 +98,16 @@ variants:
       - verification.faithfulness_check
     required_scenarios: []
     capability_tags: [react, agentic, stateless, tool_calling, retrieval, keyword_fidelity]
+
+  # spec_driven_v1 — 검색 앞단 두 모델 노드(N1 Define Spec → N2 Query Formulation)를 둔
+  # 선형 검색 Agent(ReAct·결정론 워크플로우 둘 다 최소화). 설계:
+  # docs/plans/spec_driven_agent.design.v1.md. N1/N2 는 application instantiator(utility
+  # LLM + json_schema, registry 도구 아님), N3 만 retrieval.search 도구. 명시적 참조 우선
+  # (리터럴 키워드 → BM25 lexical, collection boost). 분류기·scenario·메모리 없음(단일턴).
+  # v1 은 coverage 재검색·검증 미수행(stub). 근거 0건이면 gap-answer(거부 아님).
+  spec_driven_v1:
+    compatible_llms: ["*"]
+    required_tools:
+      - retrieval.search
+    required_scenarios: []
+    capability_tags: [spec_driven, retrieval, stateless, keyword_fidelity]

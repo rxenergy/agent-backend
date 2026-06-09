@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "spec_driven_answer_spec_v1",
+  "description": "spec_driven_v1 N1 Define Spec 산출. explicit_references = 질의에 명시적으로 지칭된 규제 문서/조문(리터럴 보존). required_slots = 답을 떠받칠 근거 조각(슬롯별 lexical keywords). governing_normative_class = 답을 anchor 할 권위 등급. answer_structure = 합성 논리 구조의 짧은 서술.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["intent", "explicit_references", "required_slots"],
+  "properties": {
+    "intent": {"type": "string"},
+    "explicit_references": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "governing_normative_class": {
+      "type": ["string", "null"],
+      "enum": ["binding", "guidance", "review_record", "applicant_claim", "mixed", null]
+    },
+    "required_slots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "keywords"],
+        "properties": {
+          "name": {"type": "string"},
+          "keywords": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "description": {"type": "string"},
+          "required": {"type": "boolean"}
+        }
+      }
+    },
+    "answer_structure": {"type": ["string", "null"]}
+  }
+}
