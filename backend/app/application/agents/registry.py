@@ -65,6 +65,12 @@ class AgentDeps:
     # react_minimal 의 react_retrieval_v1 과 별개 profile(react_retrieval_echo_v1)이라
     # echo variant 의 retrieval policy_hash 가 구별된다. None 이면 N1 부트 배선 오류.
     react_echo_retrieval_prompt_source: Any = None
+    # spec_driven_v1 — 검색 앞단 두 모델 노드 + 생성 프롬프트 source(registry 호스팅, sha
+    # 핀). N1 Define Spec / N2 Query Formulation / N4 Generation. None 이면 변형이 run()
+    # 에서 부트 배선 오류로 처리(프롬프트는 코드 인라인 금지).
+    spec_driven_answer_spec_source: Any = None
+    spec_driven_query_source: Any = None
+    spec_driven_generation_source: Any = None
     summarizer: "ConversationSummarizer | None" = None
     # v3.1 (hierarchical_corrective) Node 4 룰 기반 plan 선택기. None 이면
     # 변형이 단일 hybrid 폴백(RetrievalPlanner.default)을 쓴다.

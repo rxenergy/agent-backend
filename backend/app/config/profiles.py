@@ -55,6 +55,11 @@ from app.application.prompting.react_source import (
     ReactGenerationPromptSource,
     ReactRetrievalPromptSource,
 )
+from app.application.prompting.spec_driven_source import (
+    SpecDrivenAnswerSpecSource,
+    SpecDrivenGenerationSource,
+    SpecDrivenQuerySource,
+)
 from app.application.prompting.hybrid_source import HybridPromptSource
 from app.application.prompting.local_source import LocalPromptSource
 from app.application.prompting.phoenix_source import (
@@ -271,6 +276,9 @@ async def build_container(settings: Settings) -> AppContainer:
     react_retrieval_prompt_source: Any = None
     react_generation_prompt_source: Any = None
     react_echo_retrieval_prompt_source: Any = None
+    spec_driven_answer_spec_source: Any = None
+    spec_driven_query_source: Any = None
+    spec_driven_generation_source: Any = None
     summarizer: ConversationSummarizer | None = None
     retrieval_planner: Any = None
     retrieval_evaluator: Any = None
@@ -543,6 +551,17 @@ async def build_container(settings: Settings) -> AppContainer:
         react_echo_retrieval_prompt_source = ReactRetrievalPromptSource(
             Path(settings.prompt_local_dir), profile_id="react_retrieval_echo_v1"
         )
+        # spec_driven_v1 N1/N2/N4 프롬프트 source(registry 호스팅) — 동일 fail-fast sha
+        # 검증. N1/N2 는 json_schema guided(output_schema 동반), N4 는 자유 텍스트.
+        spec_driven_answer_spec_source = SpecDrivenAnswerSpecSource(
+            Path(settings.prompt_local_dir)
+        )
+        spec_driven_query_source = SpecDrivenQuerySource(
+            Path(settings.prompt_local_dir)
+        )
+        spec_driven_generation_source = SpecDrivenGenerationSource(
+            Path(settings.prompt_local_dir)
+        )
         if settings.classifier_backend == "rule":
             classifier = RuleClassifier()
         elif settings.classifier_backend == "llm":
@@ -584,6 +603,9 @@ async def build_container(settings: Settings) -> AppContainer:
         react_retrieval_prompt_source=react_retrieval_prompt_source,
         react_generation_prompt_source=react_generation_prompt_source,
         react_echo_retrieval_prompt_source=react_echo_retrieval_prompt_source,
+        spec_driven_answer_spec_source=spec_driven_answer_spec_source,
+        spec_driven_query_source=spec_driven_query_source,
+        spec_driven_generation_source=spec_driven_generation_source,
         summarizer=summarizer,
         retrieval_planner=retrieval_planner,
         retrieval_evaluator=retrieval_evaluator,
@@ -611,6 +633,8 @@ async def build_container(settings: Settings) -> AppContainer:
             "active_cells_mode": settings.active_cells_mode,
             # react_minimal_v1 — ReAct 루프 턴 backstop(submit_response 미발동 시 종료).
             "react_max_turns": settings.react_max_turns,
+            # spec_driven_v1 — N2 per-slot 멀티쿼리 상한(초과분 절단, no silent cap).
+            "spec_driven_max_queries": getattr(settings, "spec_driven_max_queries", 6),
             # v3.1 (hierarchical_corrective). Ignored by other variants.
             "llm_call_budget": getattr(settings, "llm_call_budget", 8),
             "citation_contract_path": str(
