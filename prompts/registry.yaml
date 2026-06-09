@@ -205,7 +205,7 @@ react_generation_prompts:
 spec_driven_answer_spec_prompts:
   spec_driven_answer_spec_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "ae995e409ee6329157c17451b7e893a9fe53cc117aecf0f7404229e99fd777e7"}
+    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "b9938d7d04c63e98f655f23b3515ead1626b35dd69c486b54e9b31322c7bcd24"}
     output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "a6fd1cd29b966866715b41f1052f03d351ead8ebd96ffd97e3f8f9ba626a7087"}
     model_options: {temperature: 0.0, max_tokens: 500}
 

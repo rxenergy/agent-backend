@@ -22,13 +22,68 @@
 
 ## required_slots — 무엇을 근거로
 
-답을 방어하는 데 필요한 근거 조각만 남긴다. 각 슬롯:
-- `name` — 슬롯 식별자(영어, 예: `governing_clause`, `requirement_text`, `design_feature`, `definition`, `applicability`, `condition_exception`, `effective_version`).
-- `keywords` — 그 슬롯을 검색할 lexical 앵커(**영어**, 리터럴). 질의 용어를 정규화하지 말고 그대로 쓰되, 약어는 전개형 병기(예: `["ECCS", "emergency core cooling system"]`). 관련 explicit_reference 토큰을 넣어도 된다.
-- `description` — 그 슬롯이 답에서 무엇을 떠받치는지 한 줄.
+너의 일은 근거가 *참이라고 주장*하는 게 아니라, 답을 방어하려면 *무엇을 검색해야 하는지*를 슬롯으로 정하는 것이다. keywords 는 답 내용이 아니라 **그 근거를 회수할 BM25 검색 앵커**다.
+
+각 슬롯:
+- `name` — 슬롯 식별자(영어). 아래 §슬롯 카탈로그에서 고른다.
+- `keywords` — 그 슬롯을 검색할 lexical 앵커(**영어**, 리터럴). 아래 §키워드 은행에서 관련 토큰을 가져온다.
+- `description` — 그 슬롯이 답에서 *무엇을 떠받치는지* 한 줄(한국어 가능). N8 생성이 이 한 줄로 슬롯별 답 부분을 만든다 → 슬롯명을 되풀이하지 말고 역할을 적어라(예: "조문이 요구하는 5개 정량 기준 — 답의 본문").
 - `required` — 답 방어에 필수면 true, 보강이면 false.
 
-후보 슬롯(prior, 질의에 맞게 가감): `governing_clause`(지배 조문) · `requirement_text`(요건 본문) · `design_feature`(설계 특징) · `applicability`(적용 범위) · `condition_exception`(조건·예외) · `effective_version`(발효·개정) · `definition`(정의).
+규모: 슬롯 2–4개. 필수(required=true) 1–2개 + 보강(required=false)로 나눈다. 과분해 금지(뒤 검색 노드가 슬롯당 1쿼리, 상한 4).
+
+### keywords 구성 규칙 (기계적 — 그대로 따른다)
+
+1. **약어 + 전개형 병기**: `ECCS` → `["ECCS", "emergency core cooling system"]`. 약어만 쓰지 마라.
+2. **정량 기준 토큰 포함**: 기준 수치를 알면 그대로 토큰화(`"2200 F"`, `"17 percent ECR"`, `"25 rem"`). 코퍼스에서 강한 lexical 신호다.
+3. **관련 explicit_reference 합류**: 그 슬롯이 거는 규제 ID(`10 CFR 50.46` 등)를 그 슬롯 keywords 에 리터럴로 넣는다.
+4. **정규화·재작성 금지, 영어.** 표면형을 바꾸지 마라.
+
+### 슬롯 카탈로그 (질의에 맞게 가감 — 무게는 §normative weight 와 맞춘다)
+
+- `governing_clause` — 답을 거는 지배 조문 (binding). 권위 anchor.
+- `acceptance_criteria` / `requirement_text` — 조문이 요구하는 정량·정성 기준 (binding). 답의 본문.
+- `acceptable_method` — 기준 충족을 입증하는 *수용 가능한* 해석 방법 (guidance). required 기준과 **분리**(지침을 요건으로 격상 금지).
+- `design_feature` — 신청자가 FSAR/DCA 에 기술한 설계 구현 (applicant_claim).
+- `definition` — 질의가 묻는 용어의 규제상 정의.
+- `applicability` — 기준이 적용되는 노형·사고·license 단계 범위.
+- `condition_exception` — 적용 조건·예외·면제(exemption/alternative).
+- `effective_version` — 발효·개정(version-as-identity: superseded 판=오답).
+- `review_record` — 규제기관 심사 판단(SER/FSER/RAI).
+
+### 키워드 은행 (영어 코퍼스 lexical 앵커 — 관련 항목을 keywords 로 가져온다)
+
+**A. 권위·법령 (binding → governing_clause):**
+`10 CFR 50.46` ECCS 수용기준(LWR) · `10 CFR 50.34` SAR contents of application · `10 CFR Part 52` design certification combined license (DCA/COL/ESP) · `10 CFR 50.55a` codes and standards ASME BPVC Section III · `10 CFR 50.67` accident source term dose · `10 CFR 50 Appendix A` general design criteria GDC (예: `GDC 35` ECCS, `GDC 17` electric power systems) · `10 CFR 50 Appendix B` quality assurance criteria · `10 CFR 50 Appendix K` ECCS evaluation model conservative · (KR) `원자력안전법` Nuclear Safety Act · `NSSC 고시` · `KINS-RG`
+
+**B. 정량·수용 기준 (binding → acceptance_criteria):**
+`peak cladding temperature` PCT `2200 F` (1204 C) · `maximum cladding oxidation` `17 percent ECR` equivalent cladding reacted · `whole core hydrogen generation` `1 percent` · `coolable geometry` · `long-term cooling` · `total effective dose equivalent` TEDE `25 rem` · `single failure criterion` · `defense in depth`
+
+**C. 수용 방법·지침 (guidance → acceptable_method):**
+`RG 1.157` best-estimate ECCS calculation · `RG 1.203` EMDAP evaluation model development and assessment process · `NUREG-0800` standard review plan SRP · `SRP 6.3` emergency core cooling system · `SRP 15` accident analysis · `DSRS` design-specific review standard (NuScale) · `ISG` interim staff guidance
+
+**D. 설계·신청자 주장 (applicant_claim → design_feature):**
+`FSAR` final safety analysis report · `DCA` design certification application · `Topical Report` · `NuScale` passive ECCS, natural circulation, `reactor vent valve`, `reactor recirculation valve`, `decay heat removal system` DHRS · `safety-related` · `important to safety`
+
+**E. 적용·조건·버전 (applicability / condition_exception / effective_version):**
+`design basis accident` DBA · `loss-of-coolant accident` LOCA · `anticipated operational occurrence` AOO · `exemption` `10 CFR 50.12` · `alternative` `10 CFR 50.55a(z)` · `revision` Rev · `effective date` · `superseded`
+
+## 슬롯 구성 예시 (이 풍부함·구성을 모방하라 — 토픽이 다르면 keywords 도 그 토픽 어휘로 바꾼다. ECCS 토큰을 무관 질의에 흘리지 마라)
+
+질의: 신형 경수로 ECCS가 만족해야 하는 수용 기준이 뭐야?
+{"intent":"requirement","explicit_references":[],"governing_normative_class":"binding","required_slots":[{"name":"governing_clause","keywords":["10 CFR 50.46","ECCS acceptance criteria","emergency core cooling system","light-water reactor"],"description":"ECCS 수용기준을 규율하는 구속 조문 — 답의 권위 anchor","required":true},{"name":"acceptance_criteria","keywords":["peak cladding temperature","PCT","2200 F","maximum cladding oxidation","17 percent ECR","whole core hydrogen generation","1 percent","coolable geometry","long-term cooling"],"description":"조문이 요구하는 5개 정량·정성 기준 — 답의 본문","required":true},{"name":"acceptable_method","keywords":["RG 1.157","best-estimate ECCS","10 CFR 50 Appendix K","ECCS evaluation model","SRP 6.3","NUREG-0800"],"description":"기준 충족을 입증하는 수용 가능한 해석방법(지침) — required 기준과 분리","required":false},{"name":"applicability","keywords":["light-water reactor","loss-of-coolant accident","LOCA","applicability"],"description":"기준이 적용되는 노형·사고 조건 범위","required":false}],"answer_structure":"지배조문(요건)→5개 정량 수용기준→적용 노형·사고→(보강)수용 해석방법"}
+
+질의: 10 CFR 50 Appendix B에서 'safety-related'는 어떻게 정의돼?
+{"intent":"definition","explicit_references":["10 CFR 50 Appendix B"],"governing_normative_class":"binding","required_slots":[{"name":"definition","keywords":["safety-related","definition","important to safety","quality assurance","10 CFR 50 Appendix B"],"description":"질의가 묻는 용어의 규제상 정의 원문 — 답의 핵심","required":true},{"name":"governing_clause","keywords":["10 CFR 50 Appendix B","quality assurance criteria","10 CFR 50.2","definitions"],"description":"정의를 담거나 지배하는 조문(정의 조항 10 CFR 50.2 포함)","required":true},{"name":"effective_version","keywords":["revision","effective date","10 CFR 50 Appendix B"],"description":"정의의 발효·개정(원문 인용 시 rev 표기)","required":false}],"answer_structure":"정의가 정하는 바 1문장→규제 정의 원문(verbatim)→출처(조항·rev)"}
+
+질의: NuScale ECCS는 능동 안전계통 없이 어떻게 노심냉각을 보장해?
+{"intent":"design_feature","explicit_references":["NuScale"],"governing_normative_class":"applicant_claim","required_slots":[{"name":"design_feature","keywords":["NuScale ECCS","emergency core cooling system","passive","natural circulation","reactor vent valve","reactor recirculation valve","decay heat removal system","DHRS"],"description":"신청자가 FSAR/DCA에 기술한 설계 구현 방식 — 답의 본문(신청자 주장 무게)","required":true},{"name":"governing_clause","keywords":["GDC 35","general design criteria","10 CFR 50 Appendix A","10 CFR 50.46","emergency core cooling"],"description":"설계가 만족해야 하는 구속 요건(GDC 35 등) — 설계 주장을 거는 권위","required":true},{"name":"acceptable_method","keywords":["DSRS","design-specific review standard","NUREG-0800","SRP 6.3"],"description":"NuScale 설계 심사에 적용된 심사기준(DSRS)","required":false},{"name":"review_record","keywords":["safety evaluation report","SER","FSER","NuScale ECCS"],"description":"규제기관이 설계를 어떻게 판단했는지(심사 기록)","required":false}],"answer_structure":"지배 요건(GDC 35/50.46)→신청자 설계(passive ECCS·자연순환)→충족 연결(주장 vs 판단 구분)"}
+
+질의: NuScale ECCS 밸브 관련해서 NRC가 제기한 RAI와 NuScale 응답은?
+{"intent":"review_record","explicit_references":["NuScale"],"governing_normative_class":"review_record","required_slots":[{"name":"review_record","keywords":["request for additional information","RAI","NuScale ECCS","NRC question","applicant response","safety evaluation report","SER"],"description":"NRC 우려(질의문)와 노형 응답을 구분해 떠받치는 심사기록 — 답의 중심","required":true},{"name":"design_feature","keywords":["NuScale ECCS","reactor vent valve","reactor recirculation valve","emergency core cooling system"],"description":"RAI 가 다루는 노형 설계 대상","required":true},{"name":"governing_clause","keywords":["GDC 35","10 CFR 50.46","emergency core cooling"],"description":"RAI 의 규제 근거 조항","required":false}],"answer_structure":"NRC 우려(RAI 질의)→노형 응답(주장·날짜)→규제 근거 — 질의·응답·날짜 구분"}
+
+질의: NuScale 설계가 GDC 35(ECCS) 요건을 어떻게 충족하지?
+{"intent":"compliance","explicit_references":["GDC 35","NuScale"],"governing_normative_class":"mixed","required_slots":[{"name":"governing_clause","keywords":["GDC 35","general design criteria","10 CFR 50 Appendix A","emergency core cooling","10 CFR 50.46"],"description":"충족 사슬의 요건 끝(구속) — 무엇을 만족해야 하나","required":true},{"name":"design_feature","keywords":["NuScale ECCS","passive","natural circulation","reactor vent valve","decay heat removal system","DHRS","FSAR"],"description":"충족 사슬의 설계 끝(신청자 주장) — 어떻게 처리했나","required":true},{"name":"review_record","keywords":["safety evaluation report","SER","FSER","NuScale","ECCS"],"description":"NRC 가 충족을 인정했는지(주장 vs 판단 구분)","required":false},{"name":"acceptable_method","keywords":["RG 1.157","DSRS","SRP 6.3","best-estimate ECCS"],"description":"충족 입증에 쓰인 수용 가능한 방법","required":false}],"answer_structure":"지배 요건(GDC 35·구속)→신청자 설계(passive ECCS·주장)→충족 연결(SER 판단 vs FSAR 주장)→양쪽 출처"}
 
 ## 언어 seam (중요)
 
@@ -36,8 +91,6 @@
 
 ## 출력
 
-JSON 하나로만 출력한다(설명·코드펜스 금지). 형식:
-
-{"intent":"compliance","explicit_references":["10 CFR 50.46","GDC 35"],"governing_normative_class":"binding","required_slots":[{"name":"governing_clause","keywords":["10 CFR 50.46","ECCS acceptance criteria"],"description":"질의를 규율하는 구속 조문","required":true},{"name":"requirement_text","keywords":["peak cladding temperature","2200 F"],"description":"조문이 요구하는 정량 기준","required":true}],"answer_structure":"지배조문→정량 요건→적용 노형"}
+JSON 하나로만 출력한다(설명·코드펜스 금지). 질의에 가장 가까운 예시를 골라 필드·형식·풍부함을 모방하되, 질의 토픽이 다르면 keywords 도 그 토픽 어휘로 바꾼다(예시의 ECCS 토큰을 무관한 질의에 흘리지 마라).
 
 질의: {query}
