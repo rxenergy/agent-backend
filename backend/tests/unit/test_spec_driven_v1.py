@@ -436,6 +436,19 @@ def test_slot_floor_no_required_is_pure_topk() -> None:
     assert cov["floored_slots"] == []
 
 
+@pytest.mark.asyncio
+async def test_context_budget_is_ten_and_fetch_fills_to_budget() -> None:
+    # cap=10(기본) + per-query fetch=budget 으로 단일 쿼리로도 10개를 채울 수 있게 구성.
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = _build(Path(tmp), _script())
+        assert runner._max_context_chunks == 10
+        await runner.run(_req())
+        pin = _event(tmp)["query_understanding"]["spec_driven"]["retrieval"]
+        assert pin["budget"] == 10           # context 상한 = 10
+        assert pin["fetch_k"] == 10          # per-query fetch = budget(top_k 3 < 10)
+        assert pin["num_chunks"] <= 10       # cap 준수
+
+
 # ── thinking 은 모델 출력 중심 ───────────────────────────────────────────────
 # spec_driven_v1 은 step renderer 를 우회하므로(thinking_renderer._LLM_THINKING_VARIANTS)
 # Thought 블록은 모델 산출(N0 triage.rationale · N1/N2/N4 native CoT)로 구성된다. runner

@@ -91,7 +91,7 @@ class SpecDrivenRunner:
         citation_contract_path: str | None = None,
         retriever_top_k: int = 3,
         max_queries: int = 6,
-        max_context_chunks: int = 8,
+        max_context_chunks: int = 10,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
@@ -298,11 +298,16 @@ class SpecDrivenRunner:
             # 슬롯 귀속 유지(merge 로 소실되던 정보) — per-slot floor 의 입력.
             slots_by_chunk: dict[str, set[str]] = {}
             per_query_counts: list[int] = []
+            # per-query fetch 깊이 — context 예산(max_context_chunks)을 *단일 쿼리로도*
+            # 채울 수 있게 budget 만큼 fetch(merge·dedup·floor 가 best 를 고름). retriever
+            # operating point(하이브리드 가중치)는 config retriever_top_k 로 별도 선택되므로
+            # per-call top_k(=fetch 깊이)를 키워도 가중치엔 영향 없음(profiles.py 주석).
+            per_query_k = max(self._top_k, self._max_context_chunks)
             with _TRACER.start_as_current_span("agent.retrieval") as rs:
                 for q in queries:
                     out = await self._tools.invoke(
                         _SEARCH_TOOL,
-                        {"query_text": q.query_text, "top_k": self._top_k,
+                        {"query_text": q.query_text, "top_k": per_query_k,
                          "target": q.target, "filters": _NOISE_FILTER},
                         ctx,
                     )
@@ -329,6 +334,7 @@ class SpecDrivenRunner:
             evidence_gap = not chunks
             await emit_step("retrieval", "ok", num_chunks=len(chunks),
                             merged=len(merged), capped=chunks_capped,
+                            fetch_k=per_query_k, budget=self._max_context_chunks,
                             uncovered_required=len(coverage["uncovered_required"]),
                             evidence_gap=evidence_gap)
 
@@ -359,6 +365,8 @@ class SpecDrivenRunner:
                     "retrieval": {
                         "num_chunks": len(chunks),
                         "merged": len(merged),
+                        "budget": self._max_context_chunks,
+                        "fetch_k": per_query_k,
                         "capped": chunks_capped,
                         "per_query_counts": per_query_counts,
                         "filters": dict(_NOISE_FILTER),
@@ -580,10 +588,11 @@ class SpecDrivenRunner:
             # 0-chunk hard-forbid: 사전 지식 답변 금지(CLAUDE.md #6, advisor #1).
             parts.append(
                 "# EVIDENCE GAP (NO RESULTS)\n"
-                "검색에서 근거를 한 건도 찾지 못했다. 사전 지식·기억으로 규제 사실을 "
-                "지어내 답하지 마라(인용 마커도 쓰지 마라 — 근거 없음). 다음만 기술하라: "
-                "(1) 어떤 명시적 참조·키워드로 찾았는지, (2) 무엇을 확인하지 못했는지, "
-                "(3) 방어 가능한 답을 위해 무엇이 더 필요한지. Confidence 는 낮다고 명시하라."
+                "Retrieval found no evidence at all. Do not fabricate regulatory facts "
+                "from prior knowledge or memory (and do not use citation markers — there is "
+                "no evidence). State only: (1) which explicit references / keywords you "
+                "searched, (2) what you could not verify, (3) what more is needed for a "
+                "defensible answer. State explicitly that confidence is low."
             )
         parts.append("# QUERY\n" + query_text)
         # 출력-언어 trailer — # QUERY *뒤*(최고 recency, react_minimal 와 동일 lesson).
@@ -786,5 +795,5 @@ def _build_spec_driven(spec: VariantSpec, deps: AgentDeps) -> "SpecDrivenRunner"
         citation_contract_path=t.get("citation_contract_path"),
         retriever_top_k=t.get("retriever_top_k", 3),
         max_queries=t.get("spec_driven_max_queries", 6),
-        max_context_chunks=t.get("spec_driven_max_context_chunks", 8),
+        max_context_chunks=t.get("spec_driven_max_context_chunks", 10),
     )

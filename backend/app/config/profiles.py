@@ -650,7 +650,7 @@ async def build_container(settings: Settings) -> AppContainer:
             # spec_driven_v1 — N2 per-slot 멀티쿼리 상한 + 병합 후 top-K cap(no silent cap).
             "spec_driven_max_queries": getattr(settings, "spec_driven_max_queries", 6),
             "spec_driven_max_context_chunks": getattr(
-                settings, "spec_driven_max_context_chunks", 8),
+                settings, "spec_driven_max_context_chunks", 10),
             # v3.1 (hierarchical_corrective). Ignored by other variants.
             "llm_call_budget": getattr(settings, "llm_call_budget", 8),
             "citation_contract_path": str(
