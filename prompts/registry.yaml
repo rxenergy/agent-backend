@@ -205,16 +205,16 @@ react_generation_prompts:
 spec_driven_answer_spec_prompts:
   spec_driven_answer_spec_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "b9938d7d04c63e98f655f23b3515ead1626b35dd69c486b54e9b31322c7bcd24"}
-    output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "a6fd1cd29b966866715b41f1052f03d351ead8ebd96ffd97e3f8f9ba626a7087"}
-    model_options: {temperature: 0.0, max_tokens: 500}
+    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "de6a669a66461b8906b3b30d871c88ac540d6bae514d6a3fcf75fd4097b28189"}
+    output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "f654847aac843728e3dc1c45020d5c6f6e66a075a449189ec6aaf9c553fcf959"}
+    model_options: {temperature: 0.0, max_tokens: 700}
 
 spec_driven_query_prompts:
   spec_driven_query_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "c117013e7160c1dcf052afa35e888767b532c68ee06dc3f9690399ad3be385e7"}
-    output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "2d73f59c8199920fa46158347fb6993ca3b080e9f25505a910c4eaa91cb7f445"}
-    model_options: {temperature: 0.0, max_tokens: 500}
+    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "0ad1eaab4b185223d3e1619263263df0b24339bbf127d664f2520cc28be866d8"}
+    output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "3105db9425bfb002c2e7b464b114cf6fef6c72ebf0aa0385a6af0ca23d16a75d"}
+    model_options: {temperature: 0.0, max_tokens: 700}
 
 spec_driven_generation_prompts:
   spec_driven_generation_v1:

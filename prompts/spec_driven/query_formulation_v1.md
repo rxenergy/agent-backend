@@ -14,11 +14,13 @@
 
 5. **query_text 는 영어.** 슬롯 keywords 가 영어이므로 쿼리도 영어로 조립한다.
 
+6. **reasoning 을 가장 먼저 쓴다.** 출력 JSON의 **첫 필드는 `reasoning`**: 쿼리를 만들기 *전에*, 어떤 슬롯·명시적 참조를 어떤 lexical 앵커·collection 으로 옮길지 1–2문장(한국어 가능)으로 적고, 그 다음 `queries` 를 이 판단에 맞춰 조립한다(선행 사고, 사후 정당화 아님).
+
 ## 출력
 
-JSON 하나로만 출력한다(설명·코드펜스 금지). 형식:
+JSON 하나로만 출력한다(설명·코드펜스 금지). 형식(reasoning 이 첫 필드):
 
-{"queries":[{"slot_name":"governing_clause","query_text":"10 CFR 50.46 ECCS acceptance criteria peak cladding temperature","collection":"10CFR"},{"slot_name":"design_feature","query_text":"NuScale ECCS passive valve natural circulation","collection":"DSRS"}]}
+{"reasoning":"지배 조문 슬롯은 명시적 참조 10 CFR 50.46 을 verbatim 으로 싣고 10CFR 컬렉션을 boost, 설계 슬롯은 NuScale 설계 어휘로 DSRS 를 boost.","queries":[{"slot_name":"governing_clause","query_text":"10 CFR 50.46 ECCS acceptance criteria peak cladding temperature","collection":"10CFR"},{"slot_name":"design_feature","query_text":"NuScale ECCS passive valve natural circulation","collection":"DSRS"}]}
 
 원질의(원어): {query}
 
