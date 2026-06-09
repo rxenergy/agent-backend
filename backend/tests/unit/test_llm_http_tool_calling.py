@@ -67,8 +67,9 @@ async def test_openai_serializes_tools_and_choice(monkeypatch):
         tool_choice="required",
     )
     # 직렬화: tools → function 형태, tool_choice 그대로, parallel False.
+    # 도구 이름은 와이어에서 `.`→`_` 정규화(provider 이름 패턴 ^[a-zA-Z0-9_-]$).
     assert captured["tools"][0]["type"] == "function"
-    assert captured["tools"][0]["function"]["name"] == "retrieval.scope"
+    assert captured["tools"][0]["function"]["name"] == "retrieval_scope"
     assert captured["tools"][1]["function"]["parameters"] == _VERDICT.parameters
     assert captured["tool_choice"] == "required"
     assert captured["parallel_tool_calls"] is False
@@ -80,6 +81,8 @@ async def test_openai_serializes_tools_and_choice(monkeypatch):
 
 
 async def test_openai_parses_tool_calls_and_json_loads_arguments(monkeypatch):
+    # 모델은 와이어 이름(정규화된 `retrieval_scope`)으로 호출을 돌려준다 —
+    # 어댑터가 요청 tools 역매핑으로 원래 점 이름(`retrieval.scope`)으로 복원해야 한다.
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -95,7 +98,7 @@ async def test_openai_parses_tool_calls_and_json_loads_arguments(monkeypatch):
                                     "id": "call_1",
                                     "type": "function",
                                     "function": {
-                                        "name": "retrieval.search",
+                                        "name": "retrieval_scope",
                                         "arguments": '{"q": "i-SMR ECCS", "k": 5}',
                                     },
                                 }
@@ -116,7 +119,8 @@ async def test_openai_parses_tool_calls_and_json_loads_arguments(monkeypatch):
     assert len(r.tool_calls) == 1
     tc = r.tool_calls[0]
     assert tc.id == "call_1"
-    assert tc.name == "retrieval.search"
+    # 와이어 `retrieval_scope` → registry 점 이름으로 복원.
+    assert tc.name == "retrieval.scope"
     # OpenAI arguments(JSON 문자열) → 파싱된 dict.
     assert tc.arguments == {"q": "i-SMR ECCS", "k": 5}
 
@@ -163,6 +167,8 @@ async def test_openai_serializes_assistant_and_tool_messages(monkeypatch):
     wire = captured["messages"]
     assert wire[0] == {"role": "system", "content": "finder"}
     assert wire[2]["role"] == "assistant"
+    # 멀티턴 재직렬화: 히스토리의 tool_use 이름도 와이어에서 정규화(turn 2+ 400 방지).
+    assert wire[2]["tool_calls"][0]["function"]["name"] == "retrieval_search"
     # arguments 는 다시 JSON 문자열로 직렬화.
     assert wire[2]["tool_calls"][0]["function"]["arguments"] == '{"q": "a"}'
     assert wire[3] == {"role": "tool", "tool_call_id": "c1", "content": '{"chunks": []}'}
@@ -184,7 +190,8 @@ async def test_anthropic_serializes_tools_system_promotion(monkeypatch):
                 "stop_reason": "tool_use",
                 "content": [
                     {"type": "text", "text": "검색합니다"},
-                    {"type": "tool_use", "id": "tu_1", "name": "retrieval.search", "input": {"q": "z"}},
+                    # 와이어 이름(정규화된 `retrieval_scope`)으로 돌려준다 → 복원 검증.
+                    {"type": "tool_use", "id": "tu_1", "name": "retrieval_scope", "input": {"q": "z"}},
                 ],
                 "usage": {"input_tokens": 7, "output_tokens": 3},
             },
@@ -202,18 +209,19 @@ async def test_anthropic_serializes_tools_system_promotion(monkeypatch):
         tools=[_SCOPE, _VERDICT],
         tool_choice="required",
     )
-    # input_schema 매핑 + system 승격 + required→any + 직렬 비활성.
+    # input_schema 매핑 + system 승격 + required→any + 직렬 비활성. 도구 이름은
+    # 와이어에서 `.`→`_` 정규화(provider 이름 패턴).
     assert captured["tools"][0] == {
-        "name": "retrieval.scope",
+        "name": "retrieval_scope",
         "description": "검색 범위",
         "input_schema": _SCOPE.parameters,
     }
     assert captured["system"] == "finder 지시"
     assert all(m["role"] != "system" for m in captured["messages"])
     assert captured["tool_choice"] == {"type": "any", "disable_parallel_tool_use": True}
-    # 파싱: text 누적 + tool_use(input 은 이미 dict).
+    # 파싱: text 누적 + tool_use(input 은 이미 dict) + 이름 복원(registry 점 이름).
     assert r.text == "검색합니다"
-    assert r.tool_calls[0].name == "retrieval.search"
+    assert r.tool_calls[0].name == "retrieval.scope"
     assert r.tool_calls[0].arguments == {"q": "z"}
     # stop_reason tool_use → tool_calls 정규화.
     assert r.stop_reason == "tool_calls"
@@ -245,8 +253,8 @@ async def test_anthropic_tool_result_rides_user_turn(monkeypatch):
     ]
     await llm.generate_with_tools(msgs, tools=[_SCOPE])
     wire = captured["messages"]
-    # assistant tool_use 블록.
-    assert wire[1]["content"][0] == {"type": "tool_use", "id": "tu_1", "name": "retrieval.search", "input": {"q": "a"}}
+    # assistant tool_use 블록 — 히스토리 이름도 와이어에서 정규화(turn 2+ 400 방지).
+    assert wire[1]["content"][0] == {"type": "tool_use", "id": "tu_1", "name": "retrieval_search", "input": {"q": "a"}}
     # tool_result 는 user 턴 + is_error.
     assert wire[2]["role"] == "user"
     assert wire[2]["content"][0]["type"] == "tool_result"

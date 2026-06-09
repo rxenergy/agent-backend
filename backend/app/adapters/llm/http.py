@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, AsyncIterator, Literal
 
 import httpx
@@ -207,14 +208,16 @@ class HttpLLM(LLMPort):
         choice = (data.get("choices") or [{}])[0]
         message = choice.get("message") or {}
         text = message.get("content") or ""
+        restore = _restore_map(tools)
         tool_calls: list[ToolCall] = []
         for tc in message.get("tool_calls") or []:
             fn = tc.get("function") or {}
             raw_args = fn.get("arguments")
+            wire_name = str(fn.get("name") or "")
             tool_calls.append(
                 ToolCall(
                     id=str(tc.get("id") or ""),
-                    name=str(fn.get("name") or ""),
+                    name=restore.get(wire_name, wire_name),
                     arguments=_parse_json_args(raw_args),
                 )
             )
@@ -272,6 +275,7 @@ class HttpLLM(LLMPort):
             resp = await client.post(url, json=payload, headers=headers)
         _raise_for_status(resp)
         data = resp.json()
+        restore = _restore_map(tools)
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         for block in data.get("content") or []:
@@ -281,10 +285,11 @@ class HttpLLM(LLMPort):
             if btype == "text":
                 text_parts.append(block.get("text", ""))
             elif btype == "tool_use":
+                wire_name = str(block.get("name") or "")
                 tool_calls.append(
                     ToolCall(
                         id=str(block.get("id") or ""),
-                        name=str(block.get("name") or ""),
+                        name=restore.get(wire_name, wire_name),
                         arguments=dict(block.get("input") or {}),
                     )
                 )
@@ -616,6 +621,25 @@ def _rejects_sampling_params(model_id: str) -> bool:
 
 # ── 도구 호출 직렬화/파싱(중립 ↔ provider 와이어, 설계 §4) ──────────────────
 
+# Anthropic/OpenAI 둘 다 도구 이름이 `^[a-zA-Z0-9_-]{1,128}$` 를 만족해야 한다(미충족
+# 시 400). 우리 registry 이름은 점 네임스페이스(예: `retrieval.search`)라 와이어에서만
+# `.` → `_` 로 치환해 보내고(아래 _wire_tool_name), 응답의 tool_call 이름은 요청에 실은
+# `tools` 목록으로 만든 역매핑으로 원래 점 이름으로 복원한다(_restore_map). 중립 타입은
+# 점 이름을 유지(원칙 #4) — finder_loop 의 registry 호출/이름 매칭은 불변.
+_DISALLOWED_TOOL_NAME = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _wire_tool_name(name: str) -> str:
+    """registry 도구 이름 → provider 와이어 이름. 허용 패턴 밖 문자(주로 `.`)를 `_` 로
+    치환. 유효 이름은 불변(idempotent)."""
+    return _DISALLOWED_TOOL_NAME.sub("_", name)
+
+
+def _restore_map(tools: list[ToolSpec]) -> dict[str, str]:
+    """와이어 이름 → 원래(점) 이름 역매핑. 요청에 실은 tools 로 만들어 복원이 정확하다
+    (맹목 `_`→`.` 역치환 금지 — submit_verdict 같은 이름을 망가뜨린다)."""
+    return {_wire_tool_name(t.name): t.name for t in tools}
+
 
 def _parse_json_args(raw: Any) -> dict[str, Any]:
     """OpenAI `function.arguments` 는 JSON *문자열* 이므로 dict 로 파싱한다.
@@ -636,7 +660,7 @@ def _openai_tool(tool: ToolSpec) -> dict[str, Any]:
     return {
         "type": "function",
         "function": {
-            "name": tool.name,
+            "name": _wire_tool_name(tool.name),
             "description": tool.description,
             "parameters": tool.parameters,
         },
@@ -645,7 +669,8 @@ def _openai_tool(tool: ToolSpec) -> dict[str, Any]:
 
 def _openai_tool_choice(choice: ToolChoice) -> Any:
     if choice.startswith("tool:"):
-        return {"type": "function", "function": {"name": choice[len("tool:"):]}}
+        return {"type": "function",
+                "function": {"name": _wire_tool_name(choice[len("tool:"):])}}
     # "auto" | "required" | "none" 은 그대로 전달.
     return choice
 
@@ -659,7 +684,7 @@ def _openai_message(msg: ChatMessage) -> dict[str, Any]:
                     "id": tc.id,
                     "type": "function",
                     "function": {
-                        "name": tc.name,
+                        "name": _wire_tool_name(tc.name),
                         "arguments": json.dumps(tc.arguments, ensure_ascii=False),
                     },
                 }
@@ -677,7 +702,7 @@ def _openai_message(msg: ChatMessage) -> dict[str, Any]:
 
 def _anthropic_tool(tool: ToolSpec) -> dict[str, Any]:
     return {
-        "name": tool.name,
+        "name": _wire_tool_name(tool.name),
         "description": tool.description,
         "input_schema": tool.parameters,
     }
@@ -685,7 +710,8 @@ def _anthropic_tool(tool: ToolSpec) -> dict[str, Any]:
 
 def _anthropic_tool_choice(choice: ToolChoice, parallel_tool_calls: bool) -> dict[str, Any]:
     if choice.startswith("tool:"):
-        out: dict[str, Any] = {"type": "tool", "name": choice[len("tool:"):]}
+        out: dict[str, Any] = {"type": "tool",
+                               "name": _wire_tool_name(choice[len("tool:"):])}
     elif choice == "required":
         out = {"type": "any"}
     elif choice == "none":
@@ -704,7 +730,8 @@ def _anthropic_message(msg: ChatMessage) -> dict[str, Any]:
             content.append({"type": "text", "text": msg.content})
         for tc in msg.tool_calls:
             content.append(
-                {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.arguments}
+                {"type": "tool_use", "id": tc.id,
+                 "name": _wire_tool_name(tc.name), "input": tc.arguments}
             )
         return {"role": "assistant", "content": content}
     if msg.role == "tool":
