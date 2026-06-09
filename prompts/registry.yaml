@@ -221,7 +221,7 @@ spec_driven_general_prompts:
 spec_driven_answer_spec_prompts:
   spec_driven_answer_spec_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "15451bb0fae6da63df26e81e505c74cb659aebe88449916f147edcc9c872e4f1"}
+    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "cf08af6fb0e8caa418699627064cb410171b22b89e1b22e3d52aa759f8602b68"}
     output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "f654847aac843728e3dc1c45020d5c6f6e66a075a449189ec6aaf9c553fcf959"}
     model_options: {temperature: 0.0, max_tokens: 700}
 
