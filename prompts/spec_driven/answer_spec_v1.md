@@ -67,22 +67,33 @@
 - **발효 버전** — 어느 개정이 유효한가(superseded 판 = 오답).
 - **정의** — 용어의 규제상 의미.
 
-### 기초 용어 (개념 인식·명명용 정의 — 토픽이 없으면 그 토픽의 정확한 용어·reg ID 를 직접 쓴다)
+### 규제 주소 지도 (토픽 → 지배 규정·문서 = *어디서 찾을지*. 값 없음 — 코퍼스가 답한다)
 
-- **ECCS** (emergency core cooling system) — LOCA 시 노심 냉각을 보장하는 안전계통.
-- **LOCA** (loss-of-coolant accident) — 냉각재 압력경계 파단으로 냉각재를 상실하는 가정 사고.
-- **DBA** (design basis accident) / **AOO** (anticipated operational occurrence) — 설계가 견뎌야 할 가정 사고 / 운전 중 예상 과도.
-- **acceptance criteria** — 안전 기능이 충족해야 할 합격 기준(구체 값·항목은 조문에).
-- **safety-related / important to safety** — 안전 기능 수행 여부에 따른 SSC 분류.
-- **SSC** (structures, systems, and components) — 구조·계통·기기.
-- **single failure criterion** — 단일 고장에도 안전 기능을 유지해야 한다는 요건.
-- **defense in depth** — 다중·다층 방어 원칙.
-- **GDC** (general design criteria) — 10 CFR 50 Appendix A 의 최소 설계 요건.
-- **fracture toughness / irradiation embrittlement** — RPV 재료의 파괴 저항 / 중성자 조사에 의한 취화.
-- **PTS** (pressurized thermal shock) — RPV 건전성 현안인 가압 열충격.
-- **design basis / licensing basis** — 설계기준 / 인허가기준.
-- **(F)SAR** (final safety analysis report) — 신청자의 안전성분석보고서.
-- **DCA/COL/ESP** — 설계인증 / 복합운영허가 / 부지사전승인 신청.
+질의 토픽의 권위 *주소* 를 여기서 골라 슬롯 keywords·explicit_references 에 쓴다. 여기 없는 토픽은 그 토픽의 정확한 reg ID 를 직접 쓴다. (괄호는 그 조문이 다루는 개념 라벨일 뿐 값 아님)
+
+**원자로·안전계통:** ECCS·노심냉각 → `10 CFR 50.46`·`GDC 35`·`10 CFR 50 Appendix K`·`RG 1.157`/`RG 1.203`·`SRP 6.3` / 잔열제거(RHR) → `GDC 34`·`SRP 5.4` / 반응도제어·정지 → `GDC 26`·`GDC 27`·`GDC 28` · 미정지과도 `10 CFR 50.62`(ATWS) / 전력계통 → `GDC 17`·`10 CFR 50.63`(SBO)
+
+**격납·핵분열생성물 차단:** 격납건전성 → `GDC 16`·`GDC 50`–`GDC 57`·`10 CFR 50 Appendix J`(누설시험) / 격납 열제거·대기정화 → `GDC 38`–`GDC 43` / 수소·가연성기체 → `10 CFR 50.44`
+
+**RPV·재료·기계:** RPV 파괴인성·취화 → `10 CFR 50 Appendix G`·`Appendix H`(감시)·`10 CFR 50.61`/`50.61a`(PTS)·`RG 1.99` / 코드·규격 → `10 CFR 50.55a`(ASME BPVC Sec III/XI) / 지진·자연현상 → `GDC 2`·`10 CFR 50 Appendix S`·`RG 1.60`/`RG 1.61`
+
+**계측제어(I&C)·보호계통:** 보호·안전계통 → `GDC 20`–`GDC 25`·`10 CFR 50.55a(h)`(IEEE 603)·`RG 1.152`(디지털) / 제어실 → `GDC 19`
+
+**방사선·선량·부지:** 사고 선량·소스텀 → `10 CFR 50.67`·`RG 1.183`(AST)·`10 CFR Part 100`(부지) / 방사선방호 → `10 CFR Part 20`
+
+**품질·행정·인허가:** 품질보증 → `10 CFR 50 Appendix B` / 결함보고 → `10 CFR Part 21` / 운영허가·설계인증 → `10 CFR Part 50`/`10 CFR Part 52`(DCA/COL/ESP) / 기술지침서 → `10 CFR 50.36` / 환경검증(EQ) → `10 CFR 50.49` / 화재방호 → `10 CFR 50.48`·`Appendix R`
+
+**문서 유형(무게):** 구속=`10 CFR`·`GDC` / 지침=`RG`·`SRP`(NUREG-0800)·`DSRS`·`ISG` / 심사기록=`SER`/`FSER`·`RAI` / 신청자=`FSAR`·`DCA`·`Topical Report` / 통지=`Generic Letter`·`Information Notice`·`Bulletin`
+
+**(KR) 한국 제도(US-NRC 와 별개 관할 — 혼용 금지):** `원자력안전법`·`시행령`·`시행규칙` · `NSSC 고시`(원자력안전위원회) · `KINS-RG`(KINS 규제지침) · 안전심사지침
+
+### 기초 용어 (개념 인식·명명용 — 토픽이 없으면 정확한 용어·reg ID 를 직접 쓴다)
+
+- **사고·과도:** `LOCA` 냉각재상실사고 · `DBA` 설계기준사고 · `AOO` 예상운전과도 · `ATWS` 미정지예상과도 · `SBO` 소외전원상실 · `LOOP` 외부전원상실 · `PTS` 가압열충격 · severe accident 중대사고
+- **계통·구조:** `ECCS` 비상노심냉각 · `RHR`/`DHRS` 잔열제거 · `RCS` 원자로냉각재계통 · `RCPB` 냉각재압력경계 · containment 격납건물 · `RPV` 원자로압력용기 · spent fuel pool 사용후핵연료저장조 · `I&C` 계측제어
+- **안전 개념:** `SSC` 구조·계통·기기 · safety-related/important to safety 안전관련 분류 · safety function 안전기능 · single failure criterion 단일고장기준 · common-cause failure 공통원인고장 · redundancy/diversity 다중성·다양성 · defense in depth 심층방어 · design basis/licensing basis 설계·인허가 기준 · source term 소스텀 · `TEDE` 총유효선량 · decay heat 붕괴열 · reactivity 반응도 · fracture toughness/embrittlement 파괴인성·조사취화
+- **요건·심사:** acceptance criteria 합격기준(값은 조문에) · `GDC` 일반설계기준(50 App A) · technical specifications 기술지침서 · `EQ` 환경검증 · `ISI`/`IST` 가동중검사·시험 · `PRA` 확률론적위험도평가 · QA 품질보증
+- **인허가·문서:** `(F)SAR` 안전성분석보고서 · `DCA`/`COL`/`ESP` 설계인증·복합운영허가·부지사전승인 · `SER`/`FSER` 안전성평가보고서 · `RAI` 추가정보요청 · `SRP`(NUREG-0800)/`DSRS` 심사지침 · `RG` 규제지침 · `ISG` 잠정실무지침
 
 ## 슬롯 구성 예시 (모델 생성 결과 — 세분화 + 주소-not-내용. 어휘는 질의 토픽으로 바꾼다)
 
