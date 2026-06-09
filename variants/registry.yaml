@@ -83,3 +83,18 @@ variants:
       - verification.faithfulness_check
     required_scenarios: []
     capability_tags: [react, agentic, stateless, tool_calling, retrieval]
+
+  # react_echo_v1 — react_minimal_v1 의 도구-최소(echo) 변형. Phase 1 ReAct 루프 도구를
+  # retrieval.search + submit_response 로 좁히고(scope/정규화/확장 도구 제거) 검색 질의
+  # 작성을 모델 추론에 맡긴다(키워드-보존형 react_retrieval_echo_v1 프롬프트). 루프
+  # mechanics·생성·검증 harness 는 react_minimal_v1 과 공유(실험 변수=도구셋+검색 프롬프트
+  # 만). required_tools 가 루프 도구 2개 + 생성 후 관측 검증 2개 → 풀 tool 스택 트리거.
+  react_echo_v1:
+    compatible_llms: ["*"]
+    required_tools:
+      - retrieval.search
+      - submit_response
+      - verification.citation_check
+      - verification.faithfulness_check
+    required_scenarios: []
+    capability_tags: [react, agentic, stateless, tool_calling, retrieval, keyword_fidelity]
