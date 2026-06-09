@@ -18,7 +18,7 @@ from app.application.agents.events import (
     emit_tool_nowait,
     unbind_emitter,
 )
-from app.application.agents.react_loop import ReactResult, run_react
+from app.application.agents.react_loop import REACT_TOOL_SPECS, ReactResult, run_react
 from app.application.agents.registry import AgentDeps, register_variant
 from app.application.agents.llm_router import LLMRouter, UnknownLLMError
 from app.application.context.pack import ContextBuilder, ContextPack
@@ -62,6 +62,12 @@ class ReactMinimalRunner:
     Phase 2 Generation — 단일 ReAct 생성 프롬프트(O×D resolver 미사용) + ContextBuilder
       + 인용 계약. 생성 후 검증은 *관측 전용*(D1, [[generation-verification-coupling]]):
       스트리밍 텍스트는 되돌릴 수 없으므로 사전 게이트가 아니라 audit 다."""
+
+    # Phase 1 ReAct 루프에 노출하는 도구 세트(독립 변수). react_echo_v1 은 이 한 줄만
+    # REACT_ECHO_TOOL_SPECS 로 override 해 도구-최소 변형이 된다 — 루프 mechanics·생성·
+    # 검증·이벤트 발행 harness 는 공유한다(실험 변수 격리). tools_schema_hash 는 이 세트
+    # 에서 파생되므로 두 variant 의 InteractionEvent 는 자연히 구별된다(원칙 5).
+    _tool_specs = REACT_TOOL_SPECS
 
     def __init__(
         self,
@@ -219,6 +225,7 @@ class ReactMinimalRunner:
                 record=record,
                 max_turns=self._react_max_turns,
                 model_options=self._react_retrieval_source.model_options or None,
+                tool_specs=self._tool_specs,
             )
             for ref in react.tool_result_refs:
                 if ref not in tool_result_refs:

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
         "agentic_finder_v4",
         "hierarchical_corrective_v3_1",
         "react_minimal_v1",
+        "react_echo_v1",
         "fake_echo_v0",
     ]
     default_variant: str = "agentic_finder_v4"

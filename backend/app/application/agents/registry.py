@@ -61,6 +61,10 @@ class AgentDeps:
     # react_minimal_v1 N2 Generation 프롬프트 source(registry 호스팅, sha 핀).
     # None 이면 변형이 N2 에서 부트 배선 오류로 처리.
     react_generation_prompt_source: Any = None
+    # react_echo_v1 N1 Retrieval 프롬프트 source(키워드-보존형, registry 호스팅 sha 핀).
+    # react_minimal 의 react_retrieval_v1 과 별개 profile(react_retrieval_echo_v1)이라
+    # echo variant 의 retrieval policy_hash 가 구별된다. None 이면 N1 부트 배선 오류.
+    react_echo_retrieval_prompt_source: Any = None
     summarizer: "ConversationSummarizer | None" = None
     # v3.1 (hierarchical_corrective) Node 4 룰 기반 plan 선택기. None 이면
     # 변형이 단일 hybrid 폴백(RetrievalPlanner.default)을 쓴다.

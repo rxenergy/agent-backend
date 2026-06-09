@@ -40,6 +40,32 @@ VALID_OUTCOMES = frozenset(
 )
 _FALLBACK_OUTCOME = "insufficient_evidence"
 
+# submit_response ToolSpec — 두 도구 세트(REACT_TOOL_SPECS / REACT_ECHO_TOOL_SPECS)가
+# 동일 종료 계약을 공유하도록 단일 출처로 둔다(enum=VALID_OUTCOMES 단일 정의). conductor
+# 의 outcome→RefusalReason 매핑은 세트와 무관하게 동일하다.
+_SUBMIT_RESPONSE_SPEC = ToolSpec(
+    name="submit_response",
+    description=(
+        "Finish the retrieval phase with your judgment. outcome='answer' when the "
+        "evidence covers the question; 'out_of_scope' when the query is off-domain / "
+        "asks you to fabricate or to give legal-licensing authority; 'clarification' "
+        "when you must ask which reactor / regulation / RAI; 'insufficient_evidence' "
+        "when you searched but key facts are missing."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "outcome": {
+                "type": "string",
+                "enum": sorted(VALID_OUTCOMES),
+            },
+            "reason": {"type": "string"},
+            "missing_info": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["outcome", "reason"],
+    },
+)
+
 # LLM-facing 도구 정의(중립 ToolSpec). registry(tools/registry.yaml)는 *실행 정책*
 # (timeout/retry/span)을, 이 ToolSpec 집합은 *모델이 보는 인자 스키마*를 정한다.
 # tools_schema_hash(재현 핀)는 이 집합의 canonical sha. 설명은 영어(소형 모델 대상
@@ -140,28 +166,38 @@ REACT_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "required": ["query_text"],
         },
     ),
+    _SUBMIT_RESPONSE_SPEC,
+)
+
+# react_echo_v1 N1 — 도구-최소 ReAct 세트(retrieval.search + submit_response 만).
+# confidence.scope·terminology.canonicalize·terminology.expand·retrieval.scope 를 제거해
+# *검색 질의 작성을 전적으로 모델 추론에 맡긴다*(docs/plans 의 echo variant). 핵심은
+# 질의 원문의 도메인 키워드(노형명·규제 ID·RAI 번호·기술 약어)를 보존한 query_text 를
+# 모델이 직접 만드는 것 — 정규화/확장 도구가 키워드를 치환·소실시키지 않는다. retrieval
+# .search 스펙도 target/filters 를 빼 query_text 단일 입력으로 좁힌다(retrieval.scope
+# 부재). submit_response 는 동일 종료 계약(_SUBMIT_RESPONSE_SPEC)을 공유한다.
+REACT_ECHO_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
-        name="submit_response",
+        name="retrieval.search",
         description=(
-            "Finish the retrieval phase with your judgment. outcome='answer' when the "
-            "evidence covers the question; 'out_of_scope' when the query is off-domain / "
-            "asks you to fabricate or to give legal-licensing authority; 'clarification' "
-            "when you must ask which reactor / regulation / RAI; 'insufficient_evidence' "
-            "when you searched but key facts are missing."
+            "Hybrid search over the indexed corpus (reranked). Build query_text by "
+            "PRESERVING the domain keywords of the user's question verbatim — reactor "
+            "names (NuScale, i-SMR), regulation ids (10 CFR 50.46, RG 1.157, GDC 35), "
+            "RAI numbers, technical acronyms (ECCS, LOCA, DNBR). Add canonical / "
+            "synonym forms alongside them; never drop or paraphrase a keyword away. "
+            "Inspect the returned chunks yourself; re-search to fill gaps, still "
+            "keeping the original keywords."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "outcome": {
-                    "type": "string",
-                    "enum": sorted(VALID_OUTCOMES),
-                },
-                "reason": {"type": "string"},
-                "missing_info": {"type": "array", "items": {"type": "string"}},
+                "query_text": {"type": "string"},
+                "top_k": {"type": "integer"},
             },
-            "required": ["outcome", "reason"],
+            "required": ["query_text"],
         },
     ),
+    _SUBMIT_RESPONSE_SPEC,
 )
 
 
@@ -206,6 +242,7 @@ async def run_react(
     record: Callable[[Any], None],
     max_turns: int = 8,
     model_options: dict[str, Any] | None = None,
+    tool_specs: tuple[ToolSpec, ...] = REACT_TOOL_SPECS,
 ) -> ReactResult:
     """ReAct Retrieval 루프. 종료 = (submit_response | max_turns backstop). chunks 를
     누적해 Generation 으로 넘긴다. 모델 추론(Thought)은 assistant.content 에 실려
@@ -229,7 +266,7 @@ async def run_react(
     with _TRACER.start_as_current_span("agent.react_retrieval") as agent_span:
         oi.set_kind(agent_span, oi.KIND_AGENT)
         agent_span.set_attribute("react.max_turns", max_turns)
-        agent_span.set_attribute("react.tools_schema_hash", tools_schema_hash())
+        agent_span.set_attribute("react.tools_schema_hash", tools_schema_hash(tool_specs))
         if retrieval_policy_hash:
             agent_span.set_attribute("react.policy_hash", retrieval_policy_hash)
 
@@ -239,7 +276,7 @@ async def run_react(
                 oi.set_kind(s, oi.KIND_LLM)
                 r = await llm.generate_with_tools(
                     messages,
-                    tools=list(REACT_TOOL_SPECS),
+                    tools=list(tool_specs),
                     tool_choice="required",  # D2: 매 턴 도구 호출 강제(추론은 content 보존).
                     model_options=model_options,
                 )
@@ -320,7 +357,7 @@ async def run_react(
         turns_used=turns_used,
         llm_calls=llm_calls,
         retrieval_policy_hash=retrieval_policy_hash,
-        tools_schema_hash=tools_schema_hash(),
+        tools_schema_hash=tools_schema_hash(tool_specs),
         term_coverage=term_coverage,
         corpus_map_hash=corpus_map_hash,
         scope_mode=scope_mode,

@@ -270,6 +270,7 @@ async def build_container(settings: Settings) -> AppContainer:
     finder_prompt_source: Any = None
     react_retrieval_prompt_source: Any = None
     react_generation_prompt_source: Any = None
+    react_echo_retrieval_prompt_source: Any = None
     summarizer: ConversationSummarizer | None = None
     retrieval_planner: Any = None
     retrieval_evaluator: Any = None
@@ -536,6 +537,12 @@ async def build_container(settings: Settings) -> AppContainer:
         react_generation_prompt_source = ReactGenerationPromptSource(
             Path(settings.prompt_local_dir)
         )
+        # react_echo_v1 N1 — 도구-최소 키워드-보존 프롬프트(react_retrieval_v1 과 별개
+        # profile). 동일 ReactRetrievalPromptSource 로더, profile_id 만 다르다(N2 Generation
+        # 은 react_generation_prompt_source 공유).
+        react_echo_retrieval_prompt_source = ReactRetrievalPromptSource(
+            Path(settings.prompt_local_dir), profile_id="react_retrieval_echo_v1"
+        )
         if settings.classifier_backend == "rule":
             classifier = RuleClassifier()
         elif settings.classifier_backend == "llm":
@@ -576,6 +583,7 @@ async def build_container(settings: Settings) -> AppContainer:
         finder_prompt_source=finder_prompt_source,
         react_retrieval_prompt_source=react_retrieval_prompt_source,
         react_generation_prompt_source=react_generation_prompt_source,
+        react_echo_retrieval_prompt_source=react_echo_retrieval_prompt_source,
         summarizer=summarizer,
         retrieval_planner=retrieval_planner,
         retrieval_evaluator=retrieval_evaluator,

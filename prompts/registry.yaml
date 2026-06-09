@@ -175,6 +175,16 @@ react_retrieval_prompts:
     profile_version: v1
     prompt:        {path: react/react_retrieval_v1.md, version: v1, sha256: "d91dd8f4fc5609d887ac93e03e3d62e583a49b1d8bc7dafe6166429654257630"}
     model_options: {temperature: 0.0, max_tokens: 600}
+  # react_echo_v1 N1 — 도구-최소(retrieval.search + submit_response) 키워드-보존형 프롬프트.
+  #   confidence.scope·terminology.*·retrieval.scope 도구 부재를 전제로 검색 질의 작성을
+  #   모델 추론에 맡기되 도메인 키워드(노형명·규제 ID·RAI 번호·기술 약어) 보존을 1급 규율로
+  #   삼는다. `ReactRetrievalPromptSource(profile_id="react_retrieval_echo_v1")` 가 boot 시
+  #   sha 검증(react_retrieval_v1 과 동일 fail-fast). policy_hash = 본문 sha → echo variant
+  #   전용 query_understanding.react_retrieval.policy_hash 핀.
+  react_retrieval_echo_v1:
+    profile_version: v1
+    prompt:        {path: react/react_retrieval_echo_v1.md, version: v1, sha256: "e2c09619783ddc98612129184731e2451bba2df5a25251462cfc3dcaea58f219"}
+    model_options: {temperature: 0.0, max_tokens: 600}
 
 # react_minimal_v1 N2 Generation(근거 답변) 프롬프트 (react_minimal_workflow.v1).
 #   O×D PromptResolver 를 쓰지 않는다(분류기 없음 → scenario_object/depth 없음). 단일
