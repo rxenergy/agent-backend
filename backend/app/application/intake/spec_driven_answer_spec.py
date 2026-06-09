@@ -4,6 +4,8 @@ import hashlib
 import json
 from typing import Any
 
+from app.application.agents.events import LazyReasoning, current_emitter
+from app.application.intake.reasoning_capture import extract_reasoning, stream_capture
 from app.domain.spec_driven import AnswerSpec, SpecSlot
 from app.observability import openinference as oi
 from app.observability.otel import get_tracer
@@ -47,7 +49,9 @@ class SpecDrivenAnswerSpecInstantiator:
         self._model_options = dict(model_options or {"temperature": 0.0})
         self._policy_hash = policy_hash
 
-    async def instantiate(self, query_text: str) -> AnswerSpec:
+    async def instantiate(
+        self, query_text: str, *, reasoning_label: str | None = None
+    ) -> AnswerSpec:
         # .replace (not .format): 프롬프트 본문에 JSON 예시의 { } 가 있어 .format 은
         # KeyError. LLMClassifier/AnswerSpecInstantiator 와 동일 idiom.
         prompt = self._prompt.replace("{query}", query_text)
@@ -61,14 +65,31 @@ class SpecDrivenAnswerSpecInstantiator:
                     GrammarSpec(kind="json_schema", value=self._schema)
                     if self._schema else None
                 )
-                res = await self._llm.generate(
-                    prompt, model_options=dict(self._model_options), grammar=grammar,
-                )
+                # emitter 활성 시 streaming 으로 native CoT 를 thinking 에 흘리고
+                # (없으면 구조화 `reasoning` 필드 backstop) — 설계 D2/D3. 비활성(run)
+                # 이면 현행 non-stream 그대로(비용 0, 회귀 없음).
+                em = current_emitter()
+                lazy = LazyReasoning(reasoning_label) if em.active else None
+                if lazy is not None:
+                    res = await stream_capture(
+                        self._llm, prompt,
+                        model_options=dict(self._model_options),
+                        grammar=grammar, lazy=lazy,
+                    )
+                else:
+                    res = await self._llm.generate(
+                        prompt, model_options=dict(self._model_options),
+                        grammar=grammar,
+                    )
                 oi.set_llm(
                     span, model_name=res.model_id, prompt=prompt, completion=res.text,
                     prompt_tokens=int(res.token_usage.get("prompt_tokens", 0)),
                     completion_tokens=int(res.token_usage.get("completion_tokens", 0)),
                 )
+                # native CoT 가 없었으면(소형/Gemma) 구조화 reasoning 필드를 backstop
+                # 으로 emit — 노드당 1소스(중복 억제), N4 토큰 이전이라 #24295 안전.
+                if lazy is not None and not lazy.emitted:
+                    await lazy.feed(extract_reasoning(res.text))
                 parsed = _parse(res.text)
                 if parsed is not None and parsed["required_slots"]:
                     spec = _build(parsed, "llm", self._policy_hash)

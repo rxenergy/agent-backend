@@ -86,6 +86,77 @@ class FakeEchoLLM(LLMPort):
         )
 
 
+class FakeReasoningLLM(LLMPort):
+    """Streaming fake for spec_driven_v1 thinking tests.
+
+    Emits a fixed `reasoning` chain-of-thought (when non-empty) followed by
+    `content` as the body, mirroring a reasoning model's `reasoning_content`/
+    `content` split. `reasoning != ""` exercises the native-CoT path; leaving it
+    "" exercises the structured-`reasoning`-field backstop (set `content` to JSON
+    that carries a `reasoning` key). `generate` (non-stream) returns `content`."""
+
+    def __init__(
+        self, *, content: str, reasoning: str = "", model_id: str = "fake-reasoning"
+    ) -> None:
+        self._content = content
+        self._reasoning = reasoning
+        self._model_id = model_id
+        self.last_grammar: GrammarSpec | None = None
+
+    @property
+    def model_id(self) -> str:
+        return self._model_id
+
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        model_options: dict[str, Any] | None = None,
+        grammar: GrammarSpec | None = None,
+    ) -> LLMResult:
+        self.last_grammar = grammar
+        return LLMResult(
+            text=self._content,
+            token_usage={"prompt_tokens": len(prompt),
+                         "completion_tokens": len(self._content)},
+            model_id=self._model_id,
+        )
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        *,
+        model_options: dict[str, Any] | None = None,
+        grammar: GrammarSpec | None = None,
+    ) -> AsyncIterator[LLMTokenDelta]:
+        self.last_grammar = grammar
+        if self._reasoning:
+            yield LLMTokenDelta(reasoning=self._reasoning)
+        if self._content:
+            yield LLMTokenDelta(content=self._content)
+        yield LLMTokenDelta(
+            finish_reason="stop",
+            token_usage={"prompt_tokens": len(prompt),
+                         "completion_tokens": len(self._content)},
+            model_id=self._model_id,
+        )
+
+    async def generate_with_tools(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: list[ToolSpec],
+        tool_choice: ToolChoice = "auto",
+        model_options: dict[str, Any] | None = None,
+        parallel_tool_calls: bool = False,
+    ) -> LLMToolResult:
+        return LLMToolResult(
+            text="", tool_calls=(), stop_reason="stop",
+            token_usage={"prompt_tokens": 0, "completion_tokens": 0},
+            model_id=self._model_id,
+        )
+
+
 class FakeToolLLM(LLMPort):
     """도구 호출 루프 단위 테스트용 controllable fake(설계 §6).
 

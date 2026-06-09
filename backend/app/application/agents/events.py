@@ -107,6 +107,34 @@ async def emit_reasoning(content: str) -> None:
                                  ts=time.monotonic()))
 
 
+class LazyReasoning:
+    """Emit `reasoning` deltas under a one-time, lazy phase header.
+
+    A spec_driven_v1-style node (define_spec / query_formulation / generation)
+    may or may not produce reasoning — native CoT only flows from reasoning
+    models, and the structured-rationale backstop may be empty. The header
+    (`**<label>**`) is emitted *only* on the first non-empty reasoning text, so
+    a node that produces no reasoning leaves no empty header in the OpenWebUI
+    Thought block (design D5). `emitted` lets the caller decide whether to fall
+    back to the structured `reasoning` field after native CoT came up empty
+    (design D2/D3 — one source per node, no duplication).
+    """
+
+    def __init__(self, label: str | None) -> None:
+        self._label = label
+        self._opened = False
+        self.emitted = False
+
+    async def feed(self, text: str) -> None:
+        if not text:
+            return
+        if not self._opened and self._label:
+            await emit_reasoning(f"\n**{self._label}**\n")
+            self._opened = True
+        await emit_reasoning(text)
+        self.emitted = True
+
+
 def emit_step_nowait(name: str, status: str, **payload: Any) -> None:
     """Sync variant for use inside non-async helpers. Queue is unbounded so
     `put_nowait` never blocks."""

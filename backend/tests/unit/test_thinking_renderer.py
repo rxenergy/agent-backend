@@ -373,3 +373,39 @@ def test_default_union_uses_v3_summary_for_v3_steps():
     weak = _r(_step("retrieval_evaluate", "ok", overall="WEAK", num_pass=1,
                     diagnosis_reason="근거 매칭이 약합니다."))
     assert "부분적" in weak[0]
+
+
+# --- spec_driven_v1: LLM-thinking variant → deterministic narration OFF -------
+# spec_driven_v1 surfaces thinking via the LLM nodes' own output (native CoT /
+# structured reasoning field → `reasoning` events, renderer-bypassed). The
+# renderer must produce NO step/tool narration for it (design D1). This also
+# pins the gap-answer regression: the old union fallback mapped `retrieval`
+# 0-chunk to the v2 English handler whose line says "refuse rather than guess",
+# contradicting spec_driven_v1's gap-answer design.
+_SD = "spec_driven_v1"
+
+
+def test_spec_driven_v1_steps_emit_no_narration():
+    for ev in (
+        _step("define_spec", "ok", num_slots=3, num_refs=1),
+        _step("query_formulation", "ok", num_queries=4),
+        _step("retrieval", "started", num_queries=4),
+        _step("context_build", "ok"),
+        _step("prompt_render", "ok"),
+        _step("generation", "started", llm_id="x"),
+    ):
+        assert _r(ev, variant_id=_SD) == []
+
+
+def test_spec_driven_v1_zero_chunk_retrieval_not_refuse_framed():
+    # The whole reason for the short-circuit: 0-chunk must NOT yield a refuse line.
+    lines = _r(_step("retrieval", "ok", num_chunks=0, evidence_gap=True), variant_id=_SD)
+    assert lines == []
+    joined = " ".join(lines)
+    assert "refuse" not in joined and "거부" not in joined
+
+
+def test_spec_driven_v1_tool_failure_not_narrated():
+    # tool events bypass the variant table via _render_tool; the short-circuit
+    # must cover them too (empty-table alternative would leak the English line).
+    assert _r(_tool("retrieval.search", "error", error_code="timeout"), variant_id=_SD) == []

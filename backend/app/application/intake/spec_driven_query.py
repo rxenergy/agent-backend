@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+from app.application.agents.events import LazyReasoning, current_emitter
+from app.application.intake.reasoning_capture import extract_reasoning, stream_capture
 from app.domain.spec_driven import AnswerSpec, FormulatedQuery
 from app.observability import openinference as oi
 from app.observability.otel import get_tracer
@@ -71,7 +73,7 @@ class QueryFormulator:
         self._policy_hash = policy_hash
 
     async def formulate(
-        self, query_text: str, spec: AnswerSpec
+        self, query_text: str, spec: AnswerSpec, *, reasoning_label: str | None = None
     ) -> tuple[tuple[FormulatedQuery, ...], str]:
         prompt = (
             self._prompt
@@ -90,14 +92,28 @@ class QueryFormulator:
                     GrammarSpec(kind="json_schema", value=self._schema)
                     if self._schema else None
                 )
-                res = await self._llm.generate(
-                    prompt, model_options=dict(self._model_options), grammar=grammar,
-                )
+                # emitter 활성 시 streaming(native CoT→thinking, 없으면 reasoning 필드
+                # backstop) — N1 과 동형(설계 D2/D3). 비활성이면 현행 non-stream.
+                em = current_emitter()
+                lazy = LazyReasoning(reasoning_label) if em.active else None
+                if lazy is not None:
+                    res = await stream_capture(
+                        self._llm, prompt,
+                        model_options=dict(self._model_options),
+                        grammar=grammar, lazy=lazy,
+                    )
+                else:
+                    res = await self._llm.generate(
+                        prompt, model_options=dict(self._model_options),
+                        grammar=grammar,
+                    )
                 oi.set_llm(
                     span, model_name=res.model_id, prompt=prompt, completion=res.text,
                     prompt_tokens=int(res.token_usage.get("prompt_tokens", 0)),
                     completion_tokens=int(res.token_usage.get("completion_tokens", 0)),
                 )
+                if lazy is not None and not lazy.emitted:
+                    await lazy.feed(extract_reasoning(res.text))
                 queries = _parse(res.text)
             except Exception:  # noqa: BLE001 — 미가용/파싱불가 → 결정론 fallback
                 queries = ()

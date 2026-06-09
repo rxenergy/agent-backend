@@ -43,6 +43,13 @@ StepHandler = Callable[..., list[str]]
 
 Verbosity = Literal["summary", "detailed", "off"]
 
+# Variants whose thinking surface is the LLM nodes' own output (native CoT or a
+# structured `reasoning` field), not deterministic step/tool narration. For
+# these, `render()` short-circuits to [] so no narration line is produced; the
+# `reasoning` events the runner emits go straight to `delta.reasoning_content`
+# at the API layer (renderer-bypassed). See spec_driven_thinking_output.design.v1.md.
+_LLM_THINKING_VARIANTS: frozenset[str] = frozenset({"spec_driven_v1"})
+
 
 def render(
     event: AgentEvent,
@@ -72,6 +79,13 @@ def render(
     sensible output.
     """
     if verbosity == "off":
+        return []
+    if variant_id in _LLM_THINKING_VARIANTS:
+        # 이 variant 들은 thinking 을 LLM 노드의 산출(native CoT / 구조화 rationale
+        # 필드 → `reasoning` 이벤트)로 직접 구성한다. 결정론 step/tool narration 은
+        # 끄고(이 분기에서 []), `reasoning` 이벤트는 openai_compat 가 renderer 미경유로
+        # `reasoning_content` 에 직접 싣는다. step/tool 은 `smr_agent.event` 사이드채널·
+        # OTel·metrics 로만 흐른다(narration 아님). 설계: spec_driven_thinking_output.design.v1.md.
         return []
     if event.kind == "step":
         table = _select_table(variant_id or "", verbosity)

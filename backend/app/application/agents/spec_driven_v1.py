@@ -10,9 +10,9 @@ from typing import Any, AsyncIterator
 from app.application.agents.events import (
     AgentEvent,
     EventEmitter,
+    LazyReasoning,
     bind_emitter,
     current_emitter,
-    emit_reasoning,
     emit_step,
     emit_token,
     emit_tool_nowait,
@@ -215,7 +215,8 @@ class SpecDrivenRunner:
                 model_options=self._answer_spec_source.model_options or None,
                 policy_hash=self._answer_spec_source.policy_hash,
             )
-            spec = await n1.instantiate(request.query_text)
+            spec = await n1.instantiate(request.query_text,
+                                        reasoning_label="답변 사양 정의")
             await emit_step("define_spec", "ok", method=spec.instantiation_method,
                             num_slots=len(spec.required_slots),
                             num_refs=len(spec.explicit_references))
@@ -229,7 +230,8 @@ class SpecDrivenRunner:
                 model_options=self._query_source.model_options or None,
                 policy_hash=self._query_source.policy_hash,
             )
-            queries, formulation_method = await n2.formulate(request.query_text, spec)
+            queries, formulation_method = await n2.formulate(
+                request.query_text, spec, reasoning_label="검색 쿼리 생성")
             truncated = False
             if len(queries) > self._max_queries:
                 truncated = True
@@ -454,12 +456,16 @@ class SpecDrivenRunner:
         text_buf: list[str] = []
         token_usage: dict[str, int] = {}
         model_id: str | None = None
+        # N4 native CoT 를 "답변 작성" 페이즈 헤더 아래로(reasoning 모델 한정; 없으면
+        # 헤더도 안 뜸 — onprem Gemma 는 무음). reasoning 은 본문 토큰 이전 순서를
+        # 상속한다(설계 §8 #1, #24295).
+        lazy = LazyReasoning("답변 작성")
         async for delta in llm.generate_stream(prompt):
             if delta.content:
                 text_buf.append(delta.content)
                 await emit_token(delta.content)
             if delta.reasoning:
-                await emit_reasoning(delta.reasoning)
+                await lazy.feed(delta.reasoning)
             if delta.token_usage:
                 token_usage = dict(delta.token_usage)
             if delta.model_id:
