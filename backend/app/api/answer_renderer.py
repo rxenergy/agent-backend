@@ -31,9 +31,14 @@ from app.application.context.citation_format import adams_url
 # 매칭한 뒤 개별 cite-N 으로 분해한다(결정=코드 — [[model_over_rule]]).
 _CITE_GROUP_RE = re.compile(r"\[\s*cite-\d+(?:[\s,;]+cite-\d+)*\s*\]")
 _CITE_ID_RE = re.compile(r"cite-\d+")
-# `format_citation` 출력: "[cite-0] [RG-1.206, Section C.I.4, p. 12, Rev. 5]".
-# 앞의 [cite-N] 토큰을 떼고 바깥 대괄호 안의 사람용 라벨만 추출.
-_FORMATTED_RE = re.compile(r"^\[cite-\d+\]\s*\[(.*)\]\s*$")
+# `format_citation` 출력: "[cite-0] [RG-1.206, Section C.I.4, p. 12, Rev. 5] (권고·비구속 지침)".
+# 선행 [cite-N] 과 바깥 대괄호를 떼고 사람용 라벨(+ 권위 태그)만 추출한다.
+# 주의: 권위 태그 " (…)" 가 뒤에 붙으므로 `$` 로 닫지 않고 꼬리(group 2)를 따로 받는다
+# — 안 그러면 매칭 실패로 fallback 이 [cite-N] 접두를 그대로 남긴다(이 버그가 References
+# 에 `[cite-4]` 가 새던 원인).
+_FORMATTED_RE = re.compile(r"^\[cite-\d+\]\s*\[(.*)\]\s*(.*)$")
+# fallback — 예상 밖 형식이라도 최소한 선행 [cite-N] 접두만 떼어낸다.
+_CITE_PREFIX_RE = re.compile(r"^\s*\[cite-\d+\]\s*")
 # 결합형 prefix 홀드백용 — `[` 뒤에 cite-그룹으로 *자랄 수 있는* 문자만(c/i/t/e,
 # 숫자, `-`, 구분자, 공백). `]` 가 닫히거나 알파벳 밖 문자가 나오면 즉시 판정한다.
 _GROUP_PREFIX_CHARS = frozenset("cite-0123456789,; \t\n\r")
@@ -70,29 +75,36 @@ def _citation_label(c) -> str:
     if c.formatted:
         m = _FORMATTED_RE.match(c.formatted)
         if m:
-            return m.group(1).strip()
-        return c.formatted.strip()
+            inner, tail = m.group(1).strip(), m.group(2).strip()
+            return f"{inner} {tail}".strip() if tail else inner
+        # 예상 밖 형식 — 선행 [cite-N] 접두만 떼고 나머지는 보존.
+        return _CITE_PREFIX_RE.sub("", c.formatted).strip()
     return c.document_id or c.citation_id
 
 
 def references_section(citations, renumber: dict[str, int]) -> str:
-    """본문에서 참조된 인용만, 표시번호순. ADAMS URL 파생되면 마크다운 링크."""
+    """본문에서 참조된 인용만, **본문 등장 순서(표시번호순)**로 나열한다. 각 줄은
+    본문 마커와 동일한 `[N]` 형식으로 시작한다(`[cite-N]`·`N.` 아님 — 본문↔근거
+    번호가 한눈에 매칭). ADAMS URL 파생되면 라벨에 마크다운 링크."""
     if not renumber:
         return ""
     by_id = {c.citation_id: c for c in citations}
     lines: list[str] = []
+    # renumber 값(표시번호)은 본문 첫 등장 순으로 부여되므로 그 순으로 정렬하면
+    # 곧 본문 출력 순서다.
     for cid, num in sorted(renumber.items(), key=lambda kv: kv[1]):
         c = by_id.get(cid)
         if c is None:
             # 후보에 없는 참조(계약 위반 가능) — KeyError 대신 가시 표기.
-            lines.append(f"{num}. (근거 메타 없음: {cid})")
+            lines.append(f"[{num}] (근거 메타 없음: {cid})")
             continue
         label = _citation_label(c)
         url = adams_url(c.document_id)
-        lines.append(f"{num}. [{label}]({url})" if url else f"{num}. {label}")
-    # 헤더와 리스트 사이 빈 줄 필수 — 일부 마크다운 파서(marked.js 등)는 빈 줄이
-    # 없으면 리스트를 헤더 단락에 붙여 한 줄로 렌더한다.
-    return "**근거 (References)**\n\n" + "\n".join(lines)
+        lines.append(f"[{num}] [{label}]({url})" if url else f"[{num}] {label}")
+    # 헤더와 본문 사이 빈 줄 필수(marked.js 단락 병합 방지). 항목은 마크다운 hard
+    # break("  \n")로 줄을 나눈다 — `[N]` 줄은 리스트가 아니라 단일 `\n`이면 한 줄로
+    # 접힌다(ordered-list `N.` 의 줄바꿈 의미를 잃은 대가).
+    return "**근거 (References)**\n\n" + "  \n".join(lines)
 
 
 def caveat_callouts(response) -> str:

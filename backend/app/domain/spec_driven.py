@@ -52,6 +52,24 @@ class AnswerSpec:
 
 
 @dataclass(frozen=True)
+class TriageDecision:
+    """N0 Triage Node 산출 — 라우팅 판정(설계 spec_driven_general_query_routing.design.v1).
+
+    `route` 는 **소형 모델 단독**으로 낸다(결정론 룰/정규식 없음 — 사용자 결정 G2):
+    질의가 코퍼스 근거 없이 도메인 추론으로 *방어 가능*하면 `general`, 특정 조문·문서·
+    정량값·개정판·신청자 주장을 지칭/요구하면 `retrieval`. 코드는 이 값을 *교정하지
+    않는다*. `references_specifics` 는 모델이 채우는 자기검증 신호(결정론 게이트 아님 —
+    감사·CoT 구조화용). `triage_method`("llm"|"fallback")로 silent degrade 방지 —
+    fallback 은 모델 응답 파싱불가 시 안전 기본값(retrieval)이지 라우팅 규칙이 아니다."""
+
+    route: str = "retrieval"  # "retrieval" | "general"
+    references_specifics: bool = True  # 안전 기본값(불확실=특정성 있음=retrieval).
+    rationale: str = ""
+    triage_method: str = "stub"  # "llm" | "fallback" | "stub"
+    policy_hash: str | None = None
+
+
+@dataclass(frozen=True)
 class FormulatedQuery:
     """N2 Query Formulation Node 산출 — 슬롯 1개에 대한 구체 검색쿼리(per-slot, 설계 §3.2).
 

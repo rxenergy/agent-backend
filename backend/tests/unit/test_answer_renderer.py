@@ -84,18 +84,40 @@ def test_references_links_adams_and_plain_fallback():
     m = {"cite-0": 1, "cite-1": 2}
     out = references_section(cites, m)
     assert "**근거 (References)**" in out
+    # 본문 마커와 동일한 [N] 형식([cite-N]·N. 아님).
+    assert "[cite-" not in out
     # ADAMS → 마크다운 링크.
-    assert "1. [ML18002A422, Section C.I.4, p. 12, Rev. 5]" \
+    assert "[1] [ML18002A422, Section C.I.4, p. 12, Rev. 5]" \
            "(https://www.nrc.gov/docs/ML1800/ML18002A422.pdf)" in out
     # 비-ADAMS → 평문(링크 없음).
-    assert "2. RG-1.206, Section 1.1, p. 3, Rev. 2" in out
-    assert "(http" not in out.split("2. ")[1]
+    assert "[2] RG-1.206, Section 1.1, p. 3, Rev. 2" in out
+    assert "(http" not in out.split("[2] ")[1]
+
+
+def test_references_strips_cite_prefix_with_weight_tag():
+    # format_citation 은 inner 대괄호 뒤에 권위 태그 " (…)" 를 붙인다 — 라벨이
+    # [cite-N] 접두 없이, 태그는 보존한 채 나와야 한다(이전엔 매칭 실패로 [cite-N] 새던 버그).
+    cites = [_cite("cite-4", document_id="ML23304A389",
+                   formatted="[cite-4] [ML23304A389, Chapter (preamble) > #41, p. 6]"
+                             " (신청자 주장)")]
+    out = references_section(cites, {"cite-4": 1})
+    assert "[cite-4]" not in out
+    assert "[1] [ML23304A389, Chapter (preamble) > #41, p. 6 (신청자 주장)]" in out
+
+
+def test_references_in_body_appearance_order():
+    # 본문 등장 순서대로(표시번호순) — cite-9 가 먼저면 [1], cite-2 가 [2].
+    cites = [_cite("cite-2", document_id="RG-2", formatted="[cite-2] [RG-2, p. 2]"),
+             _cite("cite-9", document_id="RG-9", formatted="[cite-9] [RG-9, p. 9]")]
+    out = references_section(cites, {"cite-9": 1, "cite-2": 2})
+    lines = [ln for ln in out.splitlines() if ln.startswith("[")]
+    assert lines[0].startswith("[1] RG-9") and lines[1].startswith("[2] RG-2")
 
 
 def test_references_missing_citation_is_visible_not_crash():
     # 본문이 후보에 없는 cite 를 참조(계약 위반) → KeyError 대신 가시 표기.
     out = references_section([], {"cite-3": 1})
-    assert "1. (근거 메타 없음: cite-3)" in out
+    assert "[1] (근거 메타 없음: cite-3)" in out
 
 
 def test_references_empty_when_no_refs():
@@ -190,8 +212,8 @@ def test_stream_renumber_feeds_trailer():
     r = _resp("a[cite-5] b[cite-2]", citations=cites)
     trailer = answer_trailer(r, rw.renumber)
     # 스트리밍 renumber 가 trailer References 번호와 일치(1=cite-5, 2=cite-2).
-    assert "1. [ML18002A422, p. 1]" in trailer
-    assert "2. RG-9, p. 2" in trailer
+    assert "[1] [ML18002A422, p. 1]" in trailer
+    assert "[2] RG-9, p. 2" in trailer
 
 
 # --- 결합 인용(combined markers) — 한 대괄호에 묶인 cite-N 들 -----------------

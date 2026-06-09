@@ -84,6 +84,33 @@ class _SpecDrivenPromptSource:
         return content.decode("utf-8")
 
 
+class SpecDrivenTriageSource(_SpecDrivenPromptSource):
+    """N0 Triage Node 프롬프트 source(json_schema guided — route 판정)."""
+
+    registry_key = "spec_driven_triage_prompts"
+    has_schema = True
+
+    def __init__(
+        self, prompt_dir: str | Path, *, profile_id: str = "spec_driven_triage_v1"
+    ) -> None:
+        super().__init__(prompt_dir, profile_id=profile_id)
+
+
+class SpecDrivenGeneralSource(_SpecDrivenPromptSource):
+    """N4-G General Generation 프롬프트 source(자유 텍스트 — 스키마 없음).
+
+    RAG 비대상 도메인 질의를 모델 추론으로 직답할 때의 시스템 프롬프트. 범위 한정 날조
+    가드(특정 조문 원문·정량값·개정판·신청자 주장 hard-forbid)를 담는다."""
+
+    registry_key = "spec_driven_general_prompts"
+    has_schema = False
+
+    def __init__(
+        self, prompt_dir: str | Path, *, profile_id: str = "spec_driven_general_v1"
+    ) -> None:
+        super().__init__(prompt_dir, profile_id=profile_id)
+
+
 class SpecDrivenAnswerSpecSource(_SpecDrivenPromptSource):
     """N1 Define Spec Node 프롬프트 source(json_schema guided)."""
 

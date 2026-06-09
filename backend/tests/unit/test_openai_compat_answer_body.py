@@ -110,7 +110,7 @@ def test_non_streaming_composes_links_refs_callout():
     # References + ADAMS 링크 + 평문 fallback.
     assert "**근거 (References)**" in content
     assert "https://www.nrc.gov/docs/ML1800/ML18002A422.pdf" in content
-    assert "2. RG-1.206, Section 1.1, p. 3, Rev. 2" in content
+    assert "[2] RG-1.206, Section 1.1, p. 3, Rev. 2" in content
     # 규제 미검증 callout(boundary 합성).
     assert "**규제 근거 미검증**" in content
 

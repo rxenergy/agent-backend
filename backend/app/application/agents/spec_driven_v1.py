@@ -26,6 +26,7 @@ from app.application.intake.spec_driven_answer_spec import (
     SpecDrivenAnswerSpecInstantiator,
 )
 from app.application.intake.spec_driven_query import QueryFormulator
+from app.application.intake.spec_driven_triage import SpecDrivenTriage
 from app.domain.agents import VariantSpec
 from app.domain.errors import RefusalReason, VerificationStatus
 from app.domain.interaction import AgentRequest, AgentResponse, Citation, ToolCallRecord
@@ -42,6 +43,9 @@ _TRACER = get_tracer("agent")
 
 SPEC_DRIVEN_VARIANT_ID = "spec_driven_v1"
 _SEARCH_TOOL = "retrieval.search"
+# 인덱싱 단계에서 표시한 노이즈 chunk(noise:true — 목차·헤더·fragment 등) 를 검색
+# 모집단에서 hard-scope 로 제외(filters → OpenSearch term). local retriever 는 무시.
+_NOISE_FILTER: dict[str, Any] = {"noise": False}
 # gap-answer(0-chunk)에서 모델이 무근거로 남긴 인용 마커 제거용(결정=코드 안전망).
 _CITE_RE = re.compile(r"\s*\[cite-\d+\]")
 
@@ -81,6 +85,8 @@ class SpecDrivenRunner:
         answer_spec_source: Any = None,
         query_source: Any = None,
         generation_source: Any = None,
+        triage_source: Any = None,
+        general_source: Any = None,
         citation_contract_path: str | None = None,
         retriever_top_k: int = 3,
         max_queries: int = 6,
@@ -98,6 +104,8 @@ class SpecDrivenRunner:
         self._answer_spec_source = answer_spec_source
         self._query_source = query_source
         self._generation_source = generation_source
+        self._triage_source = triage_source
+        self._general_source = general_source
         self._top_k = retriever_top_k
         self._max_queries = max_queries
         self._max_context_chunks = max_context_chunks
@@ -180,9 +188,10 @@ class SpecDrivenRunner:
             )
 
         if self._answer_spec_source is None or self._query_source is None \
-                or self._generation_source is None:
+                or self._generation_source is None \
+                or self._triage_source is None or self._general_source is None:
             raise RuntimeError(
-                "spec_driven_v1 prompt sources not wired — N1/N2/N4 prompts are "
+                "spec_driven_v1 prompt sources not wired — N0/N1/N2/N4/N4-G prompts are "
                 "registry-hosted (prompts/registry.yaml spec_driven_* blocks)"
             )
 
@@ -205,6 +214,35 @@ class SpecDrivenRunner:
                 session_id=request.session_id, user_id=request.user_id,
                 project_id=request.project_id,
             )
+
+            # === N0 Triage Node (라우팅 판정 — 소형 모델 단독, 결정론 룰 없음) ====
+            await emit_step("triage", "started")
+            n0 = SpecDrivenTriage(
+                util,
+                prompt_body=self._triage_source.prompt_body,
+                schema=self._triage_source.schema or None,
+                model_options=self._triage_source.model_options or None,
+                policy_hash=self._triage_source.policy_hash,
+            )
+            triage = await n0.triage(request.query_text)
+            triage_pin: dict[str, Any] = {
+                "route": triage.route,
+                "references_specifics": triage.references_specifics,
+                "rationale": triage.rationale,
+                "method": triage.triage_method,
+                "policy_hash": triage.policy_hash,
+            }
+            await emit_step("triage", "ok", route=triage.route,
+                            method=triage.triage_method,
+                            references_specifics=triage.references_specifics)
+            root.set_attribute("spec_driven.route", triage.route)
+
+            # general 분기: N1/N2/N3 우회 → 모델 추론 직답(retrieval.search 0회).
+            if triage.route == "general":
+                return await self._run_general(
+                    request, started, tool_calls, llm=llm, llm_id=llm_id,
+                    triage_pin=triage_pin,
+                )
 
             # === N1 Define Spec Node =====================================
             await emit_step("define_spec", "started")
@@ -248,7 +286,7 @@ class SpecDrivenRunner:
                     out = await self._tools.invoke(
                         _SEARCH_TOOL,
                         {"query_text": q.query_text, "top_k": self._top_k,
-                         "target": q.target},
+                         "target": q.target, "filters": _NOISE_FILTER},
                         ctx,
                     )
                     record(out)
@@ -271,9 +309,11 @@ class SpecDrivenRunner:
                             merged=len(merged), capped=chunks_capped,
                             evidence_gap=evidence_gap)
 
-            # 재현 핀(원칙 5) — spec→query→retrieval 경로를 query_understanding 백에.
+            # 재현 핀(원칙 5) — triage→spec→query→retrieval 경로를 query_understanding 백에.
             qu_pin: dict[str, Any] = {
                 "spec_driven": {
+                    "route": "retrieval",
+                    "triage": triage_pin,
                     "spec": {
                         "intent": spec.intent,
                         "method": spec.instantiation_method,
@@ -298,6 +338,7 @@ class SpecDrivenRunner:
                         "merged": len(merged),
                         "capped": chunks_capped,
                         "per_query_counts": per_query_counts,
+                        "filters": dict(_NOISE_FILTER),
                     },
                     "evidence_gap": evidence_gap,
                 }
@@ -392,6 +433,109 @@ class SpecDrivenRunner:
                 s.set_attribute("interaction_id", request.interaction_id)
 
             return response
+
+    # ------------------------------------------------------------------
+    # N4-G General Generation — RAG 비대상 도메인 질의 직답(검색·도구·인용 없음).
+    # N0 가 route=general 로 보낸 경우만. 1급 outcome=general_answer,
+    # regulatory_grounding=parametric(grounded 답변과 감사상 구별 — 원칙 5·6).
+    # ------------------------------------------------------------------
+    async def _run_general(self, request: AgentRequest, started: float,
+                           tool_calls: list[ToolCallRecord], *, llm: LLMPort,
+                           llm_id: str, triage_pin: dict[str, Any]) -> AgentResponse:
+        metrics = get_metrics()
+        qu_pin: dict[str, Any] = {
+            "spec_driven": {"route": "general", "triage": triage_pin}
+        }
+
+        # 빈 pack — context_hash·snapshot 을 retrieval 경로와 동형으로 남긴다(재현).
+        await emit_step("context_build", "started")
+        with _TRACER.start_as_current_span("agent.context_build") as s:
+            pack = self._context_builder.build(
+                interaction_id=request.interaction_id,
+                query_text=request.query_text,
+                chat_history=(), conversation_summary=None,
+                scenario_object="n_a", scenario_depth="n_a",
+                entities={}, chunks=[], memory_refs=(), tool_result_refs=(),
+            )
+            s.set_attribute("context_hash", pack.context_hash)
+            oi.set_kind(s, oi.KIND_RETRIEVER)
+        await emit_step("context_build", "ok", context_hash=pack.context_hash)
+
+        await emit_step("prompt_render", "started")
+        rendered_text = self._render_general_prompt(request.query_text)
+        rendered_prompt_hash = _sha16(rendered_text)
+        await self._sink.write_context_snapshot(
+            request.interaction_id, self._context_builder.to_snapshot(pack),
+        )
+        await emit_step("prompt_render", "ok",
+                        profile_id="spec_driven_general_v1",
+                        rendered_prompt_hash=rendered_prompt_hash)
+
+        await emit_step("generation", "started", llm_id=llm_id, route="general")
+        llm_result = await self._generate(
+            request, rendered_text, started, tool_calls, llm=llm,
+            query_understanding=qu_pin,
+        )
+        if isinstance(llm_result, AgentResponse):
+            return llm_result  # LLM-unavailable refusal
+        await emit_step("generation", "ok",
+                        completion_tokens=llm_result.token_usage.get("completion_tokens", 0))
+        metrics.record_tokens(
+            prompt_tokens=int(llm_result.token_usage.get("prompt_tokens", 0)),
+            completion_tokens=int(llm_result.token_usage.get("completion_tokens", 0)),
+        )
+
+        # 근거 0건이므로 무근거 [cite-N] 마커 제거(프롬프트 hard-forbid 의 결정론 backstop).
+        answer_text = _CITE_RE.sub("", llm_result.text).strip()
+
+        response = AgentResponse(
+            interaction_id=request.interaction_id,
+            answer_text=answer_text,
+            citations=(),
+            refusal_reason=None,  # general 은 거부 아님.
+            verification_status=VerificationStatus.SKIPPED.value,
+            scenario_object="n_a", scenario_depth="n_a",
+            latency_ms=int((time.monotonic() - started) * 1000),
+            token_usage=dict(llm_result.token_usage),
+            llm_id=llm_id, model_id=llm_result.model_id,
+            regulatory_grounding="parametric",  # grounded 아님 — 감사 구별 핀.
+        )
+        metrics.record_terminal(outcome="general_answer", latency_ms=response.latency_ms,
+                                scenario_object="n_a", scenario_depth="n_a")
+
+        with _TRACER.start_as_current_span("event.persist") as s:
+            event = self._recorder.build(
+                request=request, response=response,
+                agent_variant=self.spec.variant_id,
+                retrieved_chunk_ids=(),
+                retrieval_confidence=0.0,
+                prompt_profile_id="spec_driven_general_v1",
+                prompt_version=self._general_source.prompt_version,
+                rendered_prompt_hash=rendered_prompt_hash,
+                prompt_composition_hash=self._general_source.policy_hash,
+                prompt_source="local",
+                context_hash=pack.context_hash,
+                started_at=started,
+                tool_calls=tuple(tool_calls),  # general 은 비어 있음(도구 0회).
+                regulatory_grounding="parametric",
+                query_understanding=qu_pin,
+            )
+            await self._recorder.persist(event)
+            s.set_attribute("interaction_id", request.interaction_id)
+
+        return response
+
+    def _render_general_prompt(self, query_text: str) -> str:
+        """N4-G 프롬프트 — general body + 원질의 + 출력-언어 trailer(최고 recency).
+        CONTEXT·ANSWER SPEC 블록 없음(근거 없는 추론 직답)."""
+        parts = [self._general_source.prompt_body.strip()]
+        parts.append("# QUERY\n" + query_text)
+        parts.append(
+            "# RESPONSE LANGUAGE\n"
+            "Write the final answer in the same language as the QUERY above "
+            "(Korean query → Korean answer)."
+        )
+        return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
     # Generation prompt 합성 — spec trailer 주입 + (0-chunk 시)gap trailer.
@@ -564,6 +708,8 @@ def _build_spec_driven(spec: VariantSpec, deps: AgentDeps) -> "SpecDrivenRunner"
         answer_spec_source=deps.spec_driven_answer_spec_source,
         query_source=deps.spec_driven_query_source,
         generation_source=deps.spec_driven_generation_source,
+        triage_source=deps.spec_driven_triage_source,
+        general_source=deps.spec_driven_general_source,
         citation_contract_path=t.get("citation_contract_path"),
         retriever_top_k=t.get("retriever_top_k", 3),
         max_queries=t.get("spec_driven_max_queries", 6),

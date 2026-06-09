@@ -57,8 +57,10 @@ from app.application.prompting.react_source import (
 )
 from app.application.prompting.spec_driven_source import (
     SpecDrivenAnswerSpecSource,
+    SpecDrivenGeneralSource,
     SpecDrivenGenerationSource,
     SpecDrivenQuerySource,
+    SpecDrivenTriageSource,
 )
 from app.application.prompting.hybrid_source import HybridPromptSource
 from app.application.prompting.local_source import LocalPromptSource
@@ -562,6 +564,13 @@ async def build_container(settings: Settings) -> AppContainer:
         spec_driven_generation_source = SpecDrivenGenerationSource(
             Path(settings.prompt_local_dir)
         )
+        # N0 Triage(라우팅 판정, json_schema guided) + N4-G General Generation(자유 텍스트).
+        spec_driven_triage_source = SpecDrivenTriageSource(
+            Path(settings.prompt_local_dir)
+        )
+        spec_driven_general_source = SpecDrivenGeneralSource(
+            Path(settings.prompt_local_dir)
+        )
         if settings.classifier_backend == "rule":
             classifier = RuleClassifier()
         elif settings.classifier_backend == "llm":
@@ -606,6 +615,8 @@ async def build_container(settings: Settings) -> AppContainer:
         spec_driven_answer_spec_source=spec_driven_answer_spec_source,
         spec_driven_query_source=spec_driven_query_source,
         spec_driven_generation_source=spec_driven_generation_source,
+        spec_driven_triage_source=spec_driven_triage_source,
+        spec_driven_general_source=spec_driven_general_source,
         summarizer=summarizer,
         retrieval_planner=retrieval_planner,
         retrieval_evaluator=retrieval_evaluator,

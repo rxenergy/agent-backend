@@ -71,6 +71,12 @@ class AgentDeps:
     spec_driven_answer_spec_source: Any = None
     spec_driven_query_source: Any = None
     spec_driven_generation_source: Any = None
+    # spec_driven_v1 N0 Triage(라우팅 판정) + N4-G General Generation(RAG 비대상 도메인
+    # 질의 직답) 프롬프트 source(registry 호스팅, sha 핀). 설계:
+    # docs/plans/spec_driven_general_query_routing.design.v1.md. None 이면 변형이 run()
+    # 에서 부트 배선 오류로 처리(프롬프트는 코드 인라인 금지).
+    spec_driven_triage_source: Any = None
+    spec_driven_general_source: Any = None
     summarizer: "ConversationSummarizer | None" = None
     # v3.1 (hierarchical_corrective) Node 4 룰 기반 plan 선택기. None 이면
     # 변형이 단일 hybrid 폴백(RetrievalPlanner.default)을 쓴다.
