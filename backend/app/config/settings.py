@@ -35,9 +35,13 @@ class Settings(BaseSettings):
     agent_variants_enabled: list[str] = [
         "agentic_finder_v4",
         "hierarchical_corrective_v3_1",
+        "react_minimal_v1",
         "fake_echo_v0",
     ]
     default_variant: str = "agentic_finder_v4"
+
+    # react_minimal_v1 — ReAct Retrieval 루프 턴 backstop(submit_response 미발동 시 종료).
+    react_max_turns: int = 8
 
     # Classifier (Node 1)
     classifier_backend: Literal["rule", "llm", "hybrid"] = "rule"

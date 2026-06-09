@@ -38,6 +38,13 @@ _FALLBACK_PROMPT = (
 )
 _DEFAULT_MODEL_OPTIONS = {"temperature": 0.0, "max_tokens": 200}
 
+# 분류 fallback 사유 코드 — 런타임 라우팅(runner)이 "모델 미도달(unavailable)"을
+# "질문 모호(clarification)"와 가르는 신호다. UNAVAILABLE 은 LLM 백엔드 가용성
+# 장애(예: DNS/연결 실패) → runner 가 LLM_UNAVAILABLE 로 종결, API 가 OpenAI 에러로
+# 변환한다. PARSE_FAILED 는 모델은 닿았으나 출력이 JSON 이 아님 → 기존 저신뢰 처리.
+REASON_LLM_UNAVAILABLE = "llm_classifier_unavailable"
+REASON_PARSE_FAILED = "llm_classifier_parse_failed"
+
 _RE_JSON = re.compile(r"\{.*\}", re.S)
 
 
@@ -99,7 +106,7 @@ class LLMClassifier:
                 span.record_exception(exc)
                 span.set_attribute("classifier.outcome", "unavailable")
                 span.set_attribute("classifier.upstream_error", str(exc)[:500])
-                return self._fallback(query_text, "llm_classifier_unavailable")
+                return self._fallback(query_text, REASON_LLM_UNAVAILABLE)
 
             oi.set_llm(
                 span, model_name=result.model_id, prompt=prompt,
@@ -113,7 +120,7 @@ class LLMClassifier:
                 # 보여 무엇을 냈는지 Phoenix 에서 확인 가능(guided 미적용/모델 일탈).
                 span.set_status(Status(StatusCode.ERROR, "llm_classifier_parse_failed"))
                 span.set_attribute("classifier.outcome", "parse_failed")
-                return self._fallback(query_text, "llm_classifier_parse_failed")
+                return self._fallback(query_text, REASON_PARSE_FAILED)
 
             obj = str(parsed.get("object", DEFAULT_OBJECT))
             dep = str(parsed.get("depth", DEFAULT_DEPTH))

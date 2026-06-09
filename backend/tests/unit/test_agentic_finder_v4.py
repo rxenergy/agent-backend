@@ -455,6 +455,58 @@ async def test_low_confidence_requests_clarification() -> None:
         assert resp.refusal_reason == "clarification_required"
 
 
+class _UnavailableClassifier:
+    """LLM 백엔드 미도달로 분류기가 fallback 한 모양 — confidence 0 +
+    low_confidence_reason=REASON_LLM_UNAVAILABLE(가용성 장애 신호)."""
+
+    backend = "llm"
+    policy_hash = "fake_unavail"
+
+    async def classify(self, query_text, chat_history=()):
+        from app.application.classification.llm import REASON_LLM_UNAVAILABLE
+        return ClassificationResult(
+            scenario_object="O4", scenario_depth="D2", entities={},
+            confidence=0.0, object_confidence=0.0, depth_confidence=0.0,
+            low_confidence_reason=REASON_LLM_UNAVAILABLE,
+            classifier_backend=self.backend, classifier_policy_hash=self.policy_hash,
+        )
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_returns_llm_unavailable_not_clarification() -> None:
+    # 모델 미도달은 "질문 모호(clarification)"가 아니라 LLM_UNAVAILABLE 로 종결해야
+    # 하며, threshold > 0 여도 clarification 로 새지 않는다.
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), classifier=_UnavailableClassifier(),
+            classification_threshold=0.5,
+        )
+        req = AgentRequest(interaction_id="fu", query_text="NuScale GDC 35",
+                           session_id="s1")
+        resp = await runner.run(req)
+        assert resp.refusal_reason == "llm_unavailable"
+        assert resp.refusal_reason != "clarification_required"
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_does_not_emit_intent_ok_step() -> None:
+    # "ok" emit 이전에 단락 → thinking 의 "…이해했습니다" 오해 라인이 안 나간다.
+    with tempfile.TemporaryDirectory() as tmp:
+        runner, _ = _make_runner(
+            Path(tmp), classifier=_UnavailableClassifier(),
+            classification_threshold=0.5,
+        )
+        req = AgentRequest(interaction_id="fu2", query_text="q", session_id="s1")
+        steps = [
+            (ev.name, ev.status)
+            async for ev in runner.run_stream(req)
+            if ev.kind == "step"
+        ]
+        # intent_classification 은 started → error 로만 나오고 ok 는 없어야 한다.
+        assert ("intent_classification", "ok") not in steps
+        assert ("intent_classification", "error") in steps
+
+
 @pytest.mark.asyncio
 async def test_run_stream_emits_step_events_then_final() -> None:
     with tempfile.TemporaryDirectory() as tmp:

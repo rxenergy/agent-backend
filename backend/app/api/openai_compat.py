@@ -7,8 +7,10 @@ import uuid
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+
+from app.domain.errors import RefusalReason
 
 from app.api.answer_renderer import (
     CiteStreamRewriter,
@@ -149,6 +151,27 @@ def _strip_task_scaffolding(text: str) -> str:
     return body.strip() or text
 
 
+# LLM 백엔드 미도달(모델 다운/네트워크 장애)일 때 사용자에게 보여줄 상태 메시지.
+# 내부 원인(DNS·hostname·Errno 등)은 절대 싣지 않는다 — 그건 로그/Phoenix span
+# (classifier.upstream_error)에만 남기고, 사용자에겐 "질문 문제 아님 + 가용성 장애"만.
+_LLM_UNAVAILABLE_MESSAGE = (
+    "언어 모델 백엔드에 연결할 수 없어 요청을 처리하지 못했습니다. "
+    "질문 내용의 문제가 아니라 모델 서비스 가용성 장애입니다. "
+    "잠시 후 다시 시도하거나 관리자에게 문의해 주세요."
+)
+
+
+def _openai_error_body(
+    message: str, *, type_: str, code: str, param: str | None = None
+) -> dict[str, Any]:
+    """OpenAI 에러 봉투(top-level `error`). 스펙: {message,type,param,code}."""
+    return {"error": {"message": message, "type": type_, "param": param, "code": code}}
+
+
+def _is_llm_unavailable(response) -> bool:
+    return getattr(response, "refusal_reason", None) == RefusalReason.LLM_UNAVAILABLE.value
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest, request: Request):
     container = request.app.state.container
@@ -252,6 +275,17 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     else:
         response = await runner.run(agent_request)
         thinking_lines = []
+
+    # 모델 백엔드 미도달 → OpenAI 스펙 에러(503)로 반환한다. 명료화 답변(200 content)
+    # 으로 둔갑시키지 않는다 — 사용자가 "질문 문제"로 오인하지 않도록 상태를 명시.
+    if _is_llm_unavailable(response):
+        return JSONResponse(
+            status_code=503,
+            content=_openai_error_body(
+                _LLM_UNAVAILABLE_MESSAGE, type_="server_error", code="llm_unavailable",
+            ),
+        )
+
     resolved_llm = response.llm_id or llm_id
     composite_id = f"{variant_id}@{resolved_llm}"
     smr_meta = _smr_agent_metadata(
@@ -491,6 +525,25 @@ async def _sse_stream_from_runner(
                 response = event.payload["response"]
                 resolved_llm = response.llm_id or fallback_llm
                 composite_id = f"{runner.spec.variant_id}@{resolved_llm}"
+                # 모델 백엔드 미도달 — 200 은 오프닝 프레임에서 이미 커밋되어 503 불가.
+                # in-band 로 알린다: 사람이 보는 클라이언트(OpenWebUI)가 확실히 렌더하도록
+                # content 상태 라인을 보내고, finish="error" + OpenAI 에러 봉투(smr.error)
+                # 로 구조화 종결한다. 명료화 답변으로 둔갑시키지 않는다.
+                if _is_llm_unavailable(response):
+                    yield _frame(
+                        interaction_id=interaction_id, composite_id=composite_id,
+                        created=created, delta={"content": _LLM_UNAVAILABLE_MESSAGE},
+                    )
+                    yield _frame(
+                        interaction_id=interaction_id, composite_id=composite_id,
+                        created=created, delta={}, finish="error",
+                        smr=_openai_error_body(
+                            _LLM_UNAVAILABLE_MESSAGE, type_="server_error",
+                            code="llm_unavailable",
+                        ),
+                    )
+                    final_yielded = True
+                    continue
                 smr_meta = _smr_agent_metadata(
                     interaction_id=interaction_id,
                     runner_variant=runner.spec.variant_id,

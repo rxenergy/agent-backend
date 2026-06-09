@@ -51,6 +51,10 @@ from app.application.prompting.information_need_source import InformationNeedPro
 from app.application.prompting.answer_spec_source import AnswerSpecPromptSource
 from app.application.prompting.query_translate_source import QueryTranslatePromptSource
 from app.application.prompting.finder_source import FinderPromptSource
+from app.application.prompting.react_source import (
+    ReactGenerationPromptSource,
+    ReactRetrievalPromptSource,
+)
 from app.application.prompting.hybrid_source import HybridPromptSource
 from app.application.prompting.local_source import LocalPromptSource
 from app.application.prompting.phoenix_source import (
@@ -264,6 +268,8 @@ async def build_container(settings: Settings) -> AppContainer:
     query_translate_prompt_source: Any = None
     answer_spec_prompt_source: Any = None
     finder_prompt_source: Any = None
+    react_retrieval_prompt_source: Any = None
+    react_generation_prompt_source: Any = None
     summarizer: ConversationSummarizer | None = None
     retrieval_planner: Any = None
     retrieval_evaluator: Any = None
@@ -457,6 +463,8 @@ async def build_container(settings: Settings) -> AppContainer:
         from app.adapters.tools.terminology_canonicalize import TerminologyCanonicalizeTool
         from app.adapters.tools.terminology_expand import TerminologyExpandTool
         from app.adapters.tools.submit_verdict import SubmitVerdictTool
+        from app.adapters.tools.submit_response import SubmitResponseTool
+        from app.adapters.tools.confidence_scope import ConfidenceScopeTool
 
         tools = {
             "retriever.search": retriever_tool,
@@ -472,6 +480,14 @@ async def build_container(settings: Settings) -> AppContainer:
             "terminology.canonicalize": TerminologyCanonicalizeTool(vocab=terminology_vocab),
             "terminology.expand": TerminologyExpandTool(vocab=terminology_vocab),
             "submit_verdict": SubmitVerdictTool(),
+            # react_minimal_v1 — 모델 주도 scope 자기진단(노출 전용) + ReAct 종료 신호.
+            "confidence.scope": ConfidenceScopeTool(
+                corpus_map=corpus_map,
+                vocab=terminology_vocab,
+                tau_high=settings.retrieval_scope_tau_high,
+                tau_low=settings.retrieval_scope_tau_low,
+            ),
+            "submit_response": SubmitResponseTool(),
             # v3.1 Node 5 reranker — RRF 대체. opensearch 경로는 SPLADE sparse 모델 기반
             # (query×doc 희소 벡터 내적), local 경로는 결정론 lexical fake. 둘 다 동일
             # retriever.rerank 도구 계약이라 dispatcher 무변경.
@@ -511,6 +527,15 @@ async def build_container(settings: Settings) -> AppContainer:
         # agentic_finder N3 Finder 시스템 프롬프트 source(registry 호스팅) — 동일
         # fail-fast sha 검증. finder_policy_hash 핀의 출처.
         finder_prompt_source = FinderPromptSource(Path(settings.prompt_local_dir))
+        # react_minimal_v1 N1/N2 프롬프트 source(registry 호스팅) — 동일 fail-fast
+        # sha 검증. policy_hash 핀(query_understanding.react_retrieval / prompt
+        # _composition_hash)의 출처.
+        react_retrieval_prompt_source = ReactRetrievalPromptSource(
+            Path(settings.prompt_local_dir)
+        )
+        react_generation_prompt_source = ReactGenerationPromptSource(
+            Path(settings.prompt_local_dir)
+        )
         if settings.classifier_backend == "rule":
             classifier = RuleClassifier()
         elif settings.classifier_backend == "llm":
@@ -549,6 +574,8 @@ async def build_container(settings: Settings) -> AppContainer:
         query_translate_prompt_source=query_translate_prompt_source,
         answer_spec_prompt_source=answer_spec_prompt_source,
         finder_prompt_source=finder_prompt_source,
+        react_retrieval_prompt_source=react_retrieval_prompt_source,
+        react_generation_prompt_source=react_generation_prompt_source,
         summarizer=summarizer,
         retrieval_planner=retrieval_planner,
         retrieval_evaluator=retrieval_evaluator,
@@ -574,6 +601,8 @@ async def build_container(settings: Settings) -> AppContainer:
             "section_merge_max_chunks": settings.section_merge_max_chunks,
             "context_token_budget": settings.context_token_budget,
             "active_cells_mode": settings.active_cells_mode,
+            # react_minimal_v1 — ReAct 루프 턴 backstop(submit_response 미발동 시 종료).
+            "react_max_turns": settings.react_max_turns,
             # v3.1 (hierarchical_corrective). Ignored by other variants.
             "llm_call_budget": getattr(settings, "llm_call_budget", 8),
             "citation_contract_path": str(

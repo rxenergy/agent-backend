@@ -24,6 +24,7 @@ from app.application.agents.llm_router import LLMRouter, UnknownLLMError
 from app.application.agents.registry import AgentDeps, register_variant
 from app.application.agents.sequential.nodes.classify import _HARDCODED_POLICY_HASH
 from app.application.classification.active_cells import is_active
+from app.application.classification.llm import REASON_LLM_UNAVAILABLE
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
 from app.application.memory.policies import decide_session_injection
@@ -346,6 +347,19 @@ class AgenticFinderRunner:
                     "depth_confidence": classification.depth_confidence,
                     "entities": entities,
                 })
+            # LLM 백엔드 미도달(분류기 fallback=unavailable)은 "질문 모호"가 아니라
+            # 가용성 장애다. "ok" emit(→ thinking "…이해했습니다") 이전에 단락해 오해
+            # 라인을 막고 LLM_UNAVAILABLE 로 종결한다(API 가 OpenAI 에러로 변환).
+            if classification.low_confidence_reason == REASON_LLM_UNAVAILABLE:
+                await emit_step("intent_classification", "error",
+                                error_code="llm_unavailable")
+                return await self._refuse(
+                    request, started, tool_calls, scenario_object, scenario_depth,
+                    RefusalReason.LLM_UNAVAILABLE, conf,
+                    verification_status=VerificationStatus.SKIPPED,
+                    error_code="llm_unavailable", classification=classification,
+                    query_understanding=qu_pin,
+                )
             await emit_step("intent_classification", "ok",
                             scenario_object=scenario_object,
                             scenario_depth=scenario_depth, confidence=conf)

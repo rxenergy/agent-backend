@@ -63,3 +63,23 @@ variants:
       - memory.approved_search
     required_scenarios: [O1, O2, O3, O4]
     capability_tags: [agentic, finder, tool_calling, retrieval, memory]
+
+  # react_minimal_v1 — 최소 2-Phase ReAct(Retrieval 루프 → Generation). 분류기·
+  # query_translate·memory·O×D resolver 없이 모델 추론이 워크플로우를 주도하는
+  # baseline(docs/plans/react_minimal_workflow.v1). 라우팅은 모델 주도(submit_response
+  # outcome → RefusalReason), scope 는 confidence.scope 로 노출. 생성 후 검증은 관측
+  # 전용(D1, generation-verification coupling). required_scenarios 비어 있음(분류기
+  # 없음 → O×D 미요구). required_tools 비어있지 않아 풀 tool 스택을 트리거한다.
+  react_minimal_v1:
+    compatible_llms: ["*"]
+    required_tools:
+      - confidence.scope
+      - terminology.canonicalize
+      - terminology.expand
+      - retrieval.scope
+      - retrieval.search
+      - submit_response
+      - verification.citation_check
+      - verification.faithfulness_check
+    required_scenarios: []
+    capability_tags: [react, agentic, stateless, tool_calling, retrieval]
