@@ -178,14 +178,18 @@ def format_citation(chunk: RetrievedChunk, citation_id: str) -> str:
     doc = chunk.document_id or "?"
     page = chunk.page if chunk.page is not None else "?"
     section = chunk.section or "?"
-    rev = chunk.revision or "?"
+    # revision 결손은 "Rev. ?"로 강제하지 않고 *생략*한다 — 없는 개정 번호를 지어낸
+    # 듯한 깨진 토큰("Rev. ?")을 출처 라인에 남기지 않기 위함. (page/section 은 형식
+    # 골격이라 "?"를 유지해 verification 이 결손을 잡게 둔다.)
+    rev = (chunk.revision or "").strip()
+    rev_part = f", Rev. {rev}" if rev else ""
     tag = f" ({weight_label(weight)})"
 
     if doc_type == REGULATION:
-        # [{doc}, Section {section}, p. {page}, Rev. {rev}]
-        return f"[{citation_id}] [{doc}, Section {section}, p. {page}, Rev. {rev}]{tag}"
+        # [{doc}, Section {section}, p. {page}{, Rev. {rev}}]
+        return f"[{citation_id}] [{doc}, Section {section}, p. {page}{rev_part}]{tag}"
     if doc_type == RAI:
         date = chunk.response_date or "?"
         return f"[{citation_id}] [{doc}, Response p. {page}, {date}]{tag}"
     # vendor (default)
-    return f"[{citation_id}] [{doc}, Chapter {section}, p. {page}, Rev. {rev}]{tag}"
+    return f"[{citation_id}] [{doc}, Chapter {section}, p. {page}{rev_part}]{tag}"

@@ -192,3 +192,48 @@ def test_stream_renumber_feeds_trailer():
     # 스트리밍 renumber 가 trailer References 번호와 일치(1=cite-5, 2=cite-2).
     assert "1. [ML18002A422, p. 1]" in trailer
     assert "2. RG-9, p. 2" in trailer
+
+
+# --- 결합 인용(combined markers) — 한 대괄호에 묶인 cite-N 들 -----------------
+
+
+def test_renumber_and_rewrite_combined_group():
+    # 모델이 계약을 어기고 결합 인용을 내도 개별 cite 로 분해·재번호한다.
+    m = renumber_map("자연순환[cite-0, cite-2] 과 가압[cite-2]")
+    assert m == {"cite-0": 1, "cite-2": 2}
+    out = rewrite_inline("자연순환[cite-0, cite-2] 과 가압[cite-2]", m)
+    # 결합형 → 분리된 대괄호(OpenWebUI 는 분리 토큰만 링크).
+    assert out == "자연순환[1][2] 과 가압[2]"
+
+
+def test_rewrite_combined_with_semicolon_and_space():
+    m = renumber_map("x[cite-1; cite-3] y[cite-0 cite-1]")
+    assert m == {"cite-1": 1, "cite-3": 2, "cite-0": 3}
+    out = rewrite_inline("x[cite-1; cite-3] y[cite-0 cite-1]", m)
+    assert out == "x[1][2] y[3][1]"
+
+
+def test_stream_rewriter_combined_group_one_token():
+    rw = CiteStreamRewriter()
+    out = rw.feed("자연순환[cite-0, cite-2] 끝") + rw.flush()
+    assert out == "자연순환[1][2] 끝"
+    assert rw.renumber == {"cite-0": 1, "cite-2": 2}
+
+
+def test_stream_rewriter_combined_group_split_across_tokens():
+    # advisor 회귀 — 결합형이 토큰 경계로 쪼개져도 닫힘 `]` 전에 raw 로 새지 않는다.
+    rw = CiteStreamRewriter()
+    out = ""
+    for tok in ["문장", "[cite-0,", " cite-", "2]", " 다음", "[cite-1, cite-0]", "."]:
+        out += rw.feed(tok)
+    out += rw.flush()
+    assert out == "문장[1][2] 다음[3][1]."
+    assert rw.renumber == {"cite-0": 1, "cite-2": 2, "cite-1": 3}
+
+
+def test_stream_rewriter_chemistry_bracket_not_overheld():
+    # `[cesium-137]` 같은 정상 대괄호는 그룹 알파벳 밖 문자(s)에서 즉시 통과.
+    rw = CiteStreamRewriter()
+    out = rw.feed("동위원소 [cesium-137] 측정[cite-0].") + rw.flush()
+    assert out == "동위원소 [cesium-137] 측정[1]."
+    assert rw.renumber == {"cite-0": 1}

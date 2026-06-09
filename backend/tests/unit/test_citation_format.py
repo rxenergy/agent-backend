@@ -56,6 +56,24 @@ def test_format_vendor() -> None:
     assert "Rev. 5" in s
 
 
+def test_format_omits_revision_when_absent() -> None:
+    # revision 결손 시 "Rev. ?"를 강제로 남기지 않는다(깨진 토큰 회피).
+    vendor = format_citation(
+        RetrievedChunk(chunk_id="ch1", document_id="nuscale-dc-tier2", score=0.9,
+                       page=6, section="(preamble) > #41", revision=None,
+                       doc_type=VENDOR),
+        "cite-2",
+    )
+    assert "Rev." not in vendor
+    assert "p. 6]" in vendor  # page 뒤에서 바로 닫힌다.
+    reg = format_citation(
+        RetrievedChunk(chunk_id="ch2", document_id="rg-1-157", score=0.9,
+                       page=12, section="4.2", revision="   ", doc_type=REGULATION),
+        "cite-0",
+    )
+    assert "Rev." not in reg  # 공백만 있는 revision 도 생략.
+
+
 def test_format_regulation() -> None:
     c = RetrievedChunk(
         chunk_id="ch1",

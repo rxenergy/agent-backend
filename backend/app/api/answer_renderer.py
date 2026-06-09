@@ -26,10 +26,17 @@ import re
 
 from app.application.context.citation_format import adams_url
 
-_CITE_RE = re.compile(r"\[(cite-\d+)\]")
+# 인용 마커 그룹 — 한 대괄호 안의 cite-N 하나 *또는* 결합형(쉼표/세미콜론/공백
+# 구분). 모델이 계약을 어기고 `[cite-0, cite-2]` 처럼 묶어 내도 깨지지 않게 그룹째
+# 매칭한 뒤 개별 cite-N 으로 분해한다(결정=코드 — [[model_over_rule]]).
+_CITE_GROUP_RE = re.compile(r"\[\s*cite-\d+(?:[\s,;]+cite-\d+)*\s*\]")
+_CITE_ID_RE = re.compile(r"cite-\d+")
 # `format_citation` 출력: "[cite-0] [RG-1.206, Section C.I.4, p. 12, Rev. 5]".
 # 앞의 [cite-N] 토큰을 떼고 바깥 대괄호 안의 사람용 라벨만 추출.
 _FORMATTED_RE = re.compile(r"^\[cite-\d+\]\s*\[(.*)\]\s*$")
+# 결합형 prefix 홀드백용 — `[` 뒤에 cite-그룹으로 *자랄 수 있는* 문자만(c/i/t/e,
+# 숫자, `-`, 구분자, 공백). `]` 가 닫히거나 알파벳 밖 문자가 나오면 즉시 판정한다.
+_GROUP_PREFIX_CHARS = frozenset("cite-0123456789,; \t\n\r")
 
 # answer_text 에 baking 되지 않는 고지(boundary 단일 합성). refusal_reason 이
 # None(정상) 또는 partial_answer(소프트)일 때만 본문에 trailer 를 단다.
@@ -37,21 +44,26 @@ _SOFT_OUTCOMES = (None, "partial_answer")
 
 
 def renumber_map(text: str) -> dict[str, int]:
-    """본문 등장 순서(첫 등장 기준)로 cite-id → 1-base 표시번호."""
+    """본문 등장 순서(첫 등장 기준)로 cite-id → 1-base 표시번호. 결합형
+    `[cite-0, cite-2]` 은 그룹 내 등장 순서대로 각 cite-id 를 매긴다."""
     seen: dict[str, int] = {}
-    for m in _CITE_RE.finditer(text or ""):
-        cid = m.group(1)
-        if cid not in seen:
-            seen[cid] = len(seen) + 1
+    for m in _CITE_GROUP_RE.finditer(text or ""):
+        for cid in _CITE_ID_RE.findall(m.group(0)):
+            if cid not in seen:
+                seen[cid] = len(seen) + 1
     return seen
 
 
 def rewrite_inline(text: str, renumber: dict[str, int]) -> str:
-    """본문 `[cite-N]` → 표시번호 `[n]`. 맵에 없는(계약 위반) cite-id 는 원형 유지."""
+    """본문 인용 그룹 → 표시번호. 단건 `[cite-N]`→`[n]`, 결합형
+    `[cite-0, cite-2]`→`[1][2]`(OpenWebUI 는 분리된 대괄호만 링크). 맵에 없는
+    (계약 위반) cite-id 가 그룹에 섞이면 그룹 원형을 유지한다."""
     def _repl(m: re.Match) -> str:
-        num = renumber.get(m.group(1))
-        return f"[{num}]" if num else m.group(0)
-    return _CITE_RE.sub(_repl, text or "")
+        cids = _CITE_ID_RE.findall(m.group(0))
+        if any(renumber.get(c) is None for c in cids):
+            return m.group(0)
+        return "".join(f"[{renumber[c]}]" for c in cids)
+    return _CITE_GROUP_RE.sub(_repl, text or "")
 
 
 def _citation_label(c) -> str:
@@ -125,20 +137,35 @@ def compose_answer_body(response) -> str:
     return display + (("\n\n" + trailer) if trailer else "")
 
 
-# `[cite-N]` 의 가능한 부분 prefix(토큰 경계에서 홀드백 판정용). `[`, `[c`, …,
-# `[cite-`, `[cite-12`(번호 미완) 까지. 정확히 이 prefix 로 *끝나면* 더 받아야 한다.
-_CITE_PREFIX_RE = re.compile(r"\[(c(i(t(e(-\d*)?)?)?)?)?$")
+def _is_group_prefix(buf: str) -> bool:
+    """`buf`(반드시 `[` 로 시작)가 아직 인용 그룹으로 *자랄 수 있는* 부분열인가.
+    `]` 가 아직 없고 `[` 뒤 모든 문자가 cite-그룹 알파벳이면 홀드백한다 —
+    결합형 `[cite-0, cite-2]` 가 토큰 경계(`[cite-0,` | ` cite-2]`)로 쪼개져
+    들어와도 닫힘 `]` 전에 raw 로 새지 않게 한다(advisor — 매칭 정규식만 넓히면
+    스트리밍에선 무효)."""
+    if "]" in buf:
+        return False  # 닫혔는데 그룹 매칭 실패 → 더 기다려도 안 됨.
+    return all(ch in _GROUP_PREFIX_CHARS for ch in buf[1:])
 
 
 class CiteStreamRewriter:
-    """스트리밍 토큰의 `[cite-N]` → `[n]` 치환기. 토큰 경계를 가로지르는 부분열을
-    버퍼링하고 first-appearance 로 `renumber` 맵을 증분 구축한다(종료 후 trailer 의
-    References 가 동일 번호 사용). `[cite-` prefix 로 *끝날* 때만 홀드백 — 정상 텍스트의
-    `[` 를 과홀드하지 않는다(`[1]`, `[foo` 등은 즉시 통과)."""
+    """스트리밍 토큰의 인용 그룹 → 표시번호 치환기. 단건 `[cite-N]`→`[n]`,
+    결합형 `[cite-0, cite-2]`→`[1][2]`. 토큰 경계를 가로지르는 부분열을 버퍼링하고
+    first-appearance 로 `renumber` 맵을 증분 구축한다(종료 후 trailer 의 References
+    가 동일 번호 사용). 그룹으로 자랄 수 없는 `[` 는 즉시 통과시킨다(`[1]`, `[item`
+    등은 과홀드하지 않음)."""
 
     def __init__(self) -> None:
         self.renumber: dict[str, int] = {}
         self._buf = ""
+
+    def _render_group(self, group_text: str) -> str:
+        parts: list[str] = []
+        for cid in _CITE_ID_RE.findall(group_text):
+            if cid not in self.renumber:
+                self.renumber[cid] = len(self.renumber) + 1
+            parts.append(f"[{self.renumber[cid]}]")
+        return "".join(parts)
 
     def feed(self, chunk: str) -> str:
         self._buf += chunk
@@ -152,17 +179,14 @@ class CiteStreamRewriter:
             if i > 0:
                 out.append(self._buf[:i])
                 self._buf = self._buf[i:]
-            m = _CITE_RE.match(self._buf)  # 완성된 [cite-N] ?
+            m = _CITE_GROUP_RE.match(self._buf)  # 완성된 [cite-N(, cite-M)*] ?
             if m:
-                cid = m.group(1)
-                if cid not in self.renumber:
-                    self.renumber[cid] = len(self.renumber) + 1
-                out.append(f"[{self.renumber[cid]}]")
+                out.append(self._render_group(m.group(0)))
                 self._buf = self._buf[m.end():]
                 continue
-            if _CITE_PREFIX_RE.match(self._buf):
-                break  # 아직 [cite-N] 으로 자랄 수 있음 → 더 받는다.
-            # 확정적으로 cite 마커 아님('[1]', '[foo' 등) → '[' 방출 후 계속.
+            if _is_group_prefix(self._buf):
+                break  # 아직 인용 그룹으로 자랄 수 있음 → 더 받는다.
+            # 확정적으로 cite 그룹 아님('[1]', '[item' 등) → '[' 방출 후 계속.
             out.append("[")
             self._buf = self._buf[1:]
         return "".join(out)
