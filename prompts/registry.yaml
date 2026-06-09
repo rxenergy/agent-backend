@@ -228,7 +228,7 @@ spec_driven_answer_spec_prompts:
 spec_driven_query_prompts:
   spec_driven_query_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "83a4c96bbb10128054fec486e335410effb1b052caa5814ef09adf6cae218305"}
+    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "2cbb132ebf58e60ebb570de63a6819de370d6e57ff19b90dbffc0ae5948e1a6c"}
     output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "fff044084a154f092abccb881404c9f13968c9327d5ff0b66bcf9414ab8a80db"}
     model_options: {temperature: 0.0, max_tokens: 700}
 
