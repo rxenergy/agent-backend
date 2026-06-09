@@ -18,6 +18,7 @@ from app.application.agents.spec_driven_v1 import (
     SPEC_DRIVEN_VARIANT_ID,
     SpecDrivenRunner,
     _render_spec_block,
+    _select_with_slot_floor,
 )
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
@@ -387,3 +388,108 @@ def test_render_general_prompt_no_context_block() -> None:
         # 출력-언어 trailer 가 최고 recency(맨 끝).
         assert "# RESPONSE LANGUAGE" in text
         assert text.rstrip().endswith("Korean answer).")
+
+
+# ── per-slot floor 선택(설계 §3.2) — 순수 함수 단위 검증 ──────────────────────
+from app.domain.retrieval import RetrievedChunk  # noqa: E402
+
+
+def _ch(cid: str, score: float) -> RetrievedChunk:
+    return RetrievedChunk(chunk_id=cid, document_id="d", score=score)
+
+
+def test_slot_floor_retains_low_score_required_slot() -> None:
+    # required 슬롯 z 의 유일 chunk(C)가 score 최하위라 전역 top-2 면 잘리지만,
+    # floor 가 먼저 확보 → C 생존, 나머지 예산은 최고 score A 로 채움(B 탈락).
+    merged = [_ch("A", 0.9), _ch("B", 0.8), _ch("C", 0.3)]
+    slots = {"A": {"x"}, "B": {"y"}, "C": {"z"}}
+    chunks, cov = _select_with_slot_floor(merged, slots, ("z",), budget=2)
+    ids = [c.chunk_id for c in chunks]
+    assert "C" in ids and "A" in ids and "B" not in ids
+    assert ids == ["A", "C"]  # 렌더 순서는 score desc 유지
+    assert cov["floored_slots"] == ["z"]
+    assert cov["uncovered_required"] == []
+
+
+def test_slot_floor_marks_uncovered_when_slot_has_no_chunk() -> None:
+    chunks, cov = _select_with_slot_floor([_ch("A", 0.9)], {"A": {"x"}},
+                                          ("z",), budget=8)
+    assert cov["uncovered_required"] == ["z"]
+    assert cov["covered_required"] == []
+
+
+def test_slot_floor_budget_smaller_than_required_count() -> None:
+    # budget 1 < required 2 → 앞선 required(p)만 floor, q 는 uncovered(no silent loss).
+    merged = [_ch("A", 0.9), _ch("B", 0.8)]
+    slots = {"A": {"p"}, "B": {"q"}}
+    chunks, cov = _select_with_slot_floor(merged, slots, ("p", "q"), budget=1)
+    assert [c.chunk_id for c in chunks] == ["A"]
+    assert cov["floored_slots"] == ["p"]
+    assert cov["uncovered_required"] == ["q"]
+
+
+def test_slot_floor_no_required_is_pure_topk() -> None:
+    # required 없음 → 순수 score top-K(기존 동작과 동일).
+    merged = [_ch("A", 0.9), _ch("B", 0.8), _ch("C", 0.3)]
+    chunks, cov = _select_with_slot_floor(merged, {}, (), budget=2)
+    assert [c.chunk_id for c in chunks] == ["A", "B"]
+    assert cov["floored_slots"] == []
+
+
+# ── thinking 은 모델 출력 중심 ───────────────────────────────────────────────
+# spec_driven_v1 은 step renderer 를 우회하므로(thinking_renderer._LLM_THINKING_VARIANTS)
+# Thought 블록은 모델 산출(N0 triage.rationale · N1/N2/N4 native CoT)로 구성된다. runner
+# 는 enum/카운트를 재서술한 정해진 텍스트를 싣지 않는다.
+
+# 결정론 재서술(정해진 텍스트) — 절대 thinking 에 나와선 안 되는 문자열.
+_CANNED_THINKING = ("라우팅:", "답변 사양:", "검색 쿼리", "근거 검색", "확보")
+
+
+async def _collect_reasoning_stream(runner, req) -> tuple[object, str]:
+    """run_stream 을 끝까지 돌려 reasoning 이벤트 content 를 이어붙인다."""
+    final = None
+    texts: list[str] = []
+    async for ev in runner.run_stream(req):
+        if ev.kind == "reasoning":
+            texts.append(ev.payload.get("content", ""))
+        if ev.kind == "final":
+            final = ev.payload["response"]
+    return final, "".join(texts)
+
+
+@pytest.mark.asyncio
+async def test_thinking_surfaces_model_triage_rationale_not_canned() -> None:
+    # N0 thinking 은 모델이 쓴 판정 사유(triage.rationale)를 그대로 보인다 — route enum/
+    # 플래그를 재서술한 정해진 텍스트가 아니다.
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = _build(Path(tmp), _script())
+        final, think = await _collect_reasoning_stream(runner, _req())
+        assert final is not None and final.refusal_reason is None
+        assert "특정 조문 지칭" in think          # 모델 산출(rationale)
+        for canned in _CANNED_THINKING:
+            assert canned not in think           # 결정론 재서술은 없다
+
+
+@pytest.mark.asyncio
+async def test_thinking_no_canned_text_on_gap_answer() -> None:
+    # 근거 0건이어도 thinking 에 결정론 gap 텍스트를 싣지 않는다(근거 유무는 N4 모델
+    # 답변/CoT 가 EVIDENCE GAP 블록으로 전달).
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = _build(Path(tmp), _script(), retriever=_EmptyRetriever())
+        final, think = await _collect_reasoning_stream(runner, _req())
+        assert final is not None and final.refusal_reason is None
+        for canned in _CANNED_THINKING:
+            assert canned not in think
+        assert "gap-answer" not in think and "근거 0건" not in think
+
+
+@pytest.mark.asyncio
+async def test_thinking_surfaces_model_rationale_on_general_route() -> None:
+    # general 우회도 N0 모델 rationale 을 보이고, 결정론 텍스트는 없다.
+    with tempfile.TemporaryDirectory() as tmp:
+        llm = _ScriptLLM(gen_texts=[_TRIAGE_GENERAL], stream_text=_GENERAL_ANSWER)
+        runner = _build(Path(tmp), llm, retriever=_SpyRetriever())
+        _, think = await _collect_reasoning_stream(runner, _req_general())
+        assert "일반 개념 — 추론 가능" in think    # 모델 산출(rationale)
+        for canned in _CANNED_THINKING:
+            assert canned not in think

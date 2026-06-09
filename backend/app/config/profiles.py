@@ -480,7 +480,10 @@ async def build_container(settings: Settings) -> AppContainer:
         tools = {
             "retriever.search": retriever_tool,
             "retrieval.search": RetrievalSearchTool(
-                retriever=retriever_tool, reranker=IdentityReranker()
+                retriever=retriever_tool, reranker=IdentityReranker(),
+                # 후보 풀 깊이를 최종 top_k 와 분리 — reranker 가 깊은 풀에서 상위
+                # top_k 를 고르게 한다(v3.1 dispatcher 와 같은 retrieval_fetch_k).
+                fetch_k=settings.retrieval_fetch_k,
             ),
             "retrieval.scope": RetrievalScopeTool(
                 corpus_map=corpus_map,

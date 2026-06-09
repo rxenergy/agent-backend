@@ -79,6 +79,51 @@ async def test_retrieval_search_tool_reorders_and_exposes_scores() -> None:
     assert out.rerank_scores == [0.9, 0.5, 0.2]
 
 
+class _RecordingRetriever:
+    """호출된 top_k(=fetch 풀 깊이)를 기록하고 풀 크기만큼 chunk 를 돌려준다."""
+
+    name = "retriever.search"
+    version = "v1"
+
+    def __init__(self, pool: int) -> None:
+        self.pool = pool
+        self.seen_top_k: int | None = None
+
+    async def invoke(self, tool_input, context):
+        self.seen_top_k = tool_input.top_k
+        chunks = [
+            RetrievedChunk(chunk_id=f"c{i}", document_id="d", score=1.0 - i / 100)
+            for i in range(self.pool)
+        ]
+        out = RetrieverSearchOutput(chunks=chunks)
+        return ToolResult(
+            tool_name=self.name, tool_version=self.version, status="success",
+            output=out.model_dump(mode="json"), latency_ms=0, input_hash="", trace_id=context.trace_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_retrieval_search_fetches_pool_then_trims_to_top_k() -> None:
+    # 내부 retriever 는 fetch_k 깊이(20)로 호출되고, 최종 출력은 top_k(3)로 절단된다
+    # (retrieve-then-rerank: 풀에서 상위 top_k 선택). 3→3 no-op rerank 해소.
+    retr = _RecordingRetriever(pool=20)
+    tool = RetrievalSearchTool(retriever=retr, reranker=IdentityReranker(), fetch_k=20)
+    result = await tool.invoke({"query_text": "ECCS", "top_k": 3}, _CTX)
+    assert retr.seen_top_k == 20  # 내부 retriever 는 깊은 풀로 fetch
+    out = RetrieverSearchOutput.model_validate(result.output)
+    assert len(out.chunks) == 3  # 최종은 top_k 로 절단
+    assert [c.chunk_id for c in out.chunks] == ["c0", "c1", "c2"]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_search_no_pool_when_top_k_exceeds_fetch_k() -> None:
+    # top_k >= fetch_k 면 분리 없음(passthrough) — 내부 retriever 는 top_k 로 호출.
+    retr = _RecordingRetriever(pool=5)
+    tool = RetrievalSearchTool(retriever=retr, reranker=IdentityReranker(), fetch_k=4)
+    await tool.invoke({"query_text": "q", "top_k": 10}, _CTX)
+    assert retr.seen_top_k == 10
+
+
 @pytest.mark.asyncio
 async def test_retrieval_search_propagates_inner_failure() -> None:
     tool = RetrievalSearchTool(retriever=_FailRetriever(), reranker=IdentityReranker())

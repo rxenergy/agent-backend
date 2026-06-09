@@ -13,6 +13,7 @@ from app.application.agents.events import (
     LazyReasoning,
     bind_emitter,
     current_emitter,
+    emit_reasoning,
     emit_step,
     emit_token,
     emit_tool_nowait,
@@ -236,6 +237,13 @@ class SpecDrivenRunner:
                             method=triage.triage_method,
                             references_specifics=triage.references_specifics)
             root.set_attribute("spec_driven.route", triage.route)
+            # thinking — 라우팅 판정 *근거*를 모델 산출(triage.rationale)로 전달한다. 이
+            # variant 은 step renderer 를 우회하므로(thinking_renderer._LLM_THINKING_VARIANTS)
+            # runner 가 reasoning 이벤트로 직접 Thought 블록에 싣되, route enum/플래그를
+            # 재서술한 정해진 텍스트가 아니라 모델이 쓴 판정 사유를 그대로 보인다. native
+            # CoT 가 없는 onprem 소형 모델에서도 rationale 은 모델 출력이라 가시.
+            if triage.rationale:
+                await emit_reasoning(f"\n**질의 분류**\n{triage.rationale}\n")
 
             # general 분기: N1/N2/N3 우회 → 모델 추론 직답(retrieval.search 0회).
             if triage.route == "general":
@@ -258,6 +266,8 @@ class SpecDrivenRunner:
             await emit_step("define_spec", "ok", method=spec.instantiation_method,
                             num_slots=len(spec.required_slots),
                             num_refs=len(spec.explicit_references))
+            # thinking 은 N1 LazyReasoning 이 native CoT(없으면 모델 rationale 필드)로
+            # `**답변 사양 정의**` 아래 직접 싣는다 — runner 가 카운트를 재서술하지 않는다.
 
             # === N2 Query Formulation Node ===============================
             await emit_step("query_formulation", "started")
@@ -276,10 +286,17 @@ class SpecDrivenRunner:
                 queries = queries[: self._max_queries]
             await emit_step("query_formulation", "ok", method=formulation_method,
                             num_queries=len(queries), truncated=truncated)
+            # thinking 은 N2 LazyReasoning 이 native CoT(없으면 모델 rationale 필드)로
+            # `**검색 쿼리 생성**` 아래 직접 싣는다 — runner 가 개수를 재서술하지 않는다.
 
             # === N3 Retrieval (per-slot 멀티쿼리 + 병합) ==================
+            # N3 은 LLM 노드가 아니라 모델 출력이 없다 — thinking 에 결정론 텍스트를 싣지
+            # 않는다(검색 단계·결과는 step/tool 사이드채널·OTel span 으로 흐른다). 근거
+            # 유무는 N4 프롬프트의 EVIDENCE GAP 블록을 통해 모델 답변/CoT 에 반영된다.
             await emit_step("retrieval", "started", num_queries=len(queries))
             chunks_by_id: dict[str, RetrievedChunk] = {}
+            # 슬롯 귀속 유지(merge 로 소실되던 정보) — per-slot floor 의 입력.
+            slots_by_chunk: dict[str, set[str]] = {}
             per_query_counts: list[int] = []
             with _TRACER.start_as_current_span("agent.retrieval") as rs:
                 for q in queries:
@@ -297,16 +314,22 @@ class SpecDrivenRunner:
                         prev = chunks_by_id.get(c.chunk_id)
                         if prev is None or c.score > prev.score:
                             chunks_by_id[c.chunk_id] = c
+                        slots_by_chunk.setdefault(c.chunk_id, set()).add(q.slot_name)
                 rs.set_attribute("retrieval.num_chunks", len(chunks_by_id))
                 oi.set_kind(rs, oi.KIND_RETRIEVER)
             merged = sorted(chunks_by_id.values(), key=lambda c: c.score, reverse=True)
-            # post-merge top-K cap(설계 §3.2) — 소형모델 컨텍스트 보호. no silent cap:
-            # 절단 여부를 핀에 기록한다.
-            chunks_capped = len(merged) > self._max_context_chunks
-            chunks = merged[: self._max_context_chunks]
+            # per-slot floor(설계 §3.2) — required 슬롯마다 최고 score chunk 1개를 먼저
+            # 확보한 뒤 남은 예산을 score 순으로 채운다. 전역 top-K cap 이 required 근거를
+            # 통째로 떨어뜨리던 문제 방지(no silent cap — coverage 를 핀에 기록).
+            required_names = tuple(s.name for s in spec.required_slots if s.required)
+            chunks, coverage = _select_with_slot_floor(
+                merged, slots_by_chunk, required_names, self._max_context_chunks
+            )
+            chunks_capped = len(merged) > len(chunks)
             evidence_gap = not chunks
             await emit_step("retrieval", "ok", num_chunks=len(chunks),
                             merged=len(merged), capped=chunks_capped,
+                            uncovered_required=len(coverage["uncovered_required"]),
                             evidence_gap=evidence_gap)
 
             # 재현 핀(원칙 5) — triage→spec→query→retrieval 경로를 query_understanding 백에.
@@ -339,6 +362,9 @@ class SpecDrivenRunner:
                         "capped": chunks_capped,
                         "per_query_counts": per_query_counts,
                         "filters": dict(_NOISE_FILTER),
+                        "floored_slots": coverage["floored_slots"],
+                        "covered_required_slots": coverage["covered_required"],
+                        "uncovered_required_slots": coverage["uncovered_required"],
                     },
                     "evidence_gap": evidence_gap,
                 }
@@ -674,6 +700,53 @@ def _parse_chunks(output: Any) -> list[RetrievedChunk]:
         except Exception:  # noqa: BLE001 — 깨진 chunk 는 건너뛴다(부분 진행).
             continue
     return chunks
+
+
+def _select_with_slot_floor(
+    merged: list[RetrievedChunk],
+    slots_by_chunk: dict[str, set[str]],
+    required_names: tuple[str, ...],
+    budget: int,
+) -> tuple[list[RetrievedChunk], dict[str, list[str]]]:
+    """per-slot floor 선택(설계 §3.2). `merged` 는 score 내림차순.
+
+    1) **floor** — required 슬롯마다 (아직 미선택) 최고 score chunk 1개 확보. required
+       근거가 전역 top-K 에 밀려 통째로 누락되는 것을 막는다.
+    2) **fill** — 남은 예산을 score 순으로 채운다.
+
+    렌더 순서는 score 내림차순(merged 순서) 유지. 슬롯 귀속은 N2 가 query.slot_name 을
+    spec 슬롯명과 일치시키는 것에 의존한다(불일치 슬롯은 floor 대상에서 빠져 fill 로). budget
+    이 required 슬롯 수보다 작으면 앞선 required 부터 floor 하고 나머지는 uncovered 로 남긴다.
+
+    반환: (선택 chunk[score desc], coverage{floored_slots, covered_required,
+    uncovered_required})."""
+    selected: set[str] = set()
+    floored_slots: list[str] = []
+    # floor phase — required 슬롯 순서대로 최고 score 미선택 chunk 1개.
+    for name in required_names:
+        if len(selected) >= budget:
+            break
+        for c in merged:  # score desc → 첫 매칭이 최고 score
+            if c.chunk_id in selected:
+                continue
+            if name in slots_by_chunk.get(c.chunk_id, ()):
+                selected.add(c.chunk_id)
+                floored_slots.append(name)
+                break
+    # fill phase — 남은 예산을 score 순으로.
+    for c in merged:
+        if len(selected) >= budget:
+            break
+        if c.chunk_id not in selected:
+            selected.add(c.chunk_id)
+    chunks = [c for c in merged if c.chunk_id in selected]  # score desc 유지
+    covered = {s for cid in selected for s in slots_by_chunk.get(cid, ())}
+    coverage = {
+        "floored_slots": floored_slots,
+        "covered_required": [n for n in required_names if n in covered],
+        "uncovered_required": [n for n in required_names if n not in covered],
+    }
+    return chunks, coverage
 
 
 def _to_citations(candidates) -> tuple[Citation, ...]:

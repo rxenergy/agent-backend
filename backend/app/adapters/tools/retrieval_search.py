@@ -26,9 +26,17 @@ class RetrievalSearchTool:
     name = "retrieval.search"
     version = "v1"
 
-    def __init__(self, *, retriever: Tool, reranker: RerankerPort) -> None:
+    def __init__(
+        self, *, retriever: Tool, reranker: RerankerPort, fetch_k: int = 20
+    ) -> None:
         self._retriever = retriever
         self._reranker = reranker
+        # retrieve-then-rerank 후보 풀 깊이 — 최종 top_k 와 *분리*. 내부 retriever 를
+        # top_k 만큼만 fetch 하면 reranker 가 검색이 이미 고른 같은 집합을 받아 재정렬이
+        # no-op 이 된다(690k 코퍼스에서 top_k=3 이면 3→3). fetch_k 깊이로 받아 reranker 가
+        # 그 풀에서 상위 top_k 를 고르게 한다(Nogueira & Cho retrieve-then-rerank).
+        # v3.1 dispatcher 와 동일한 retrieval_fetch_k 시맨틱. fetch_k<=top_k 면 passthrough.
+        self._fetch_k = fetch_k
 
     async def invoke(
         self,
@@ -38,7 +46,15 @@ class RetrievalSearchTool:
         if isinstance(tool_input, dict):
             tool_input = RetrieverSearchInput.model_validate(tool_input)
 
-        inner = await self._retriever.invoke(tool_input, context)
+        # 후보 풀(fetch_k)로 깊게 fetch → reranker 가 상위 top_k 절단. final_k 는
+        # 호출자가 요청한 최종 개수로 보존한다(rerank trim 키).
+        final_k = tool_input.top_k
+        pool_k = max(final_k, self._fetch_k)
+        retr_input = (
+            tool_input if pool_k == final_k
+            else tool_input.model_copy(update={"top_k": pool_k})
+        )
+        inner = await self._retriever.invoke(retr_input, context)
         if inner.status == "failed":
             # 내부 검색 실패는 그대로 전파(executor 가 retrieval.search 의 required
             # 정책으로 처리). reranker 는 타지 않는다.
@@ -47,7 +63,7 @@ class RetrievalSearchTool:
         raw_chunks = (inner.output or {}).get("chunks", []) or []
         chunks = [RetrievedChunk.model_validate(c) for c in raw_chunks]
         ranked = await self._reranker.rerank(
-            tool_input.query_text, chunks, top_k=tool_input.top_k
+            tool_input.query_text, chunks, top_k=final_k
         )
         output = RetrieverSearchOutput(
             chunks=[r.chunk for r in ranked],
