@@ -215,7 +215,7 @@ spec_driven_triage_prompts:
 spec_driven_general_prompts:
   spec_driven_general_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/general_v1.md, version: v1, sha256: "e6564f2d6bdf82bbb968ebb97f0e47c1b2e7612e68f50741677f6856284ad375"}
+    prompt:        {path: spec_driven/general_v1.md, version: v1, sha256: "d9642c25a175a187af94265fd3b049eb6309e2f48e9757287e0f71a894641a86"}
     model_options: {temperature: 0.3, max_tokens: 2000}
 
 spec_driven_answer_spec_prompts:
@@ -235,7 +235,7 @@ spec_driven_query_prompts:
 spec_driven_generation_prompts:
   spec_driven_generation_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "8f76407a025628d0fab2e69614fd422ce66136765055cf583aa51a5c5e4bf93a"}
+    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "a1f7472d03a73541f6a523da0356c05dfa16f3e01471f3d49410e22b8fe5ddb2"}
     model_options: {temperature: 0.1, max_tokens: 2000}
 
 prompt_profiles:

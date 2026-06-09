@@ -39,6 +39,9 @@ _CITE_ID_RE = re.compile(r"cite-\d+")
 _FORMATTED_RE = re.compile(r"^\[cite-\d+\]\s*\[(.*)\]\s*(.*)$")
 # fallback — 예상 밖 형식이라도 최소한 선행 [cite-N] 접두만 떼어낸다.
 _CITE_PREFIX_RE = re.compile(r"^\s*\[cite-\d+\]\s*")
+# 끝에 붙는 권위 태그 " (신청자 주장)" 등 — References 노출 차단용(꼬리 한정).
+# 라벨 중간 괄호(`(preamble)`, `Rev. 3 (2017)`)는 끝이 아니라 보존된다.
+_WEIGHT_TAG_RE = re.compile(r"\s*\([^()]*\)\s*$")
 # 결합형 prefix 홀드백용 — `[` 뒤에 cite-그룹으로 *자랄 수 있는* 문자만(c/i/t/e,
 # 숫자, `-`, 구분자, 공백). `]` 가 닫히거나 알파벳 밖 문자가 나오면 즉시 판정한다.
 _GROUP_PREFIX_CHARS = frozenset("cite-0123456789,; \t\n\r")
@@ -75,10 +78,12 @@ def _citation_label(c) -> str:
     if c.formatted:
         m = _FORMATTED_RE.match(c.formatted)
         if m:
-            inner, tail = m.group(1).strip(), m.group(2).strip()
-            return f"{inner} {tail}".strip() if tail else inner
-        # 예상 밖 형식 — 선행 [cite-N] 접두만 떼고 나머지는 보존.
-        return _CITE_PREFIX_RE.sub("", c.formatted).strip()
+            # group 2(권위 태그 "(신청자 주장)" 등)는 References 에 노출하지 않는다 —
+            # 권위 등급은 모델 보정용 CONTEXT 신호일 뿐, 사용자용 출처 라인엔 문서
+            # 식별 정보(inner)만 남긴다. 태그는 본문 권위 서술로 이미 반영된다.
+            return m.group(1).strip()
+        # 예상 밖 형식 — 선행 [cite-N] 접두만 떼고, 뒤따르는 권위 태그도 제거.
+        return _WEIGHT_TAG_RE.sub("", _CITE_PREFIX_RE.sub("", c.formatted)).strip()
     return c.document_id or c.citation_id
 
 

@@ -94,15 +94,25 @@ def test_references_links_adams_and_plain_fallback():
     assert "(http" not in out.split("[2] ")[1]
 
 
-def test_references_strips_cite_prefix_with_weight_tag():
-    # format_citation 은 inner 대괄호 뒤에 권위 태그 " (…)" 를 붙인다 — 라벨이
-    # [cite-N] 접두 없이, 태그는 보존한 채 나와야 한다(이전엔 매칭 실패로 [cite-N] 새던 버그).
+def test_references_strips_cite_prefix_and_weight_tag():
+    # format_citation 은 inner 대괄호 뒤에 권위 태그 " (…)" 를 붙인다 — References 엔
+    # [cite-N] 접두도, 권위 태그(신청자 주장 등)도 노출되지 않고 문서 식별 정보만 남는다.
     cites = [_cite("cite-4", document_id="ML23304A389",
                    formatted="[cite-4] [ML23304A389, Chapter (preamble) > #41, p. 6]"
                              " (신청자 주장)")]
     out = references_section(cites, {"cite-4": 1})
     assert "[cite-4]" not in out
-    assert "[1] [ML23304A389, Chapter (preamble) > #41, p. 6 (신청자 주장)]" in out
+    assert "신청자 주장" not in out  # 권위 태그 비노출
+    # 라벨 중간 괄호(preamble)는 보존.
+    assert "[1] [ML23304A389, Chapter (preamble) > #41, p. 6]" in out
+
+
+def test_references_fallback_strips_tag_without_inner_brackets():
+    # 예상 밖 형식(inner 대괄호 없음) → fallback 경로도 [cite-N] 접두·권위 태그를 제거.
+    cites = [_cite("cite-0", document_id="RG-9", formatted="[cite-0] RG-9, p. 2 (심사 기록)")]
+    out = references_section(cites, {"cite-0": 1})
+    assert "심사 기록" not in out and "[cite-0]" not in out
+    assert "[1] RG-9, p. 2" in out
 
 
 def test_references_in_body_appearance_order():
