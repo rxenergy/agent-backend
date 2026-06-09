@@ -1,12 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "spec_driven_answer_spec_v1",
-  "description": "spec_driven_v1 N1 Define Spec 산출. explicit_references = 질의에 명시적으로 지칭된 규제 문서/조문(리터럴 보존). required_slots = 답을 떠받칠 근거 조각(슬롯별 lexical keywords). governing_normative_class = 답을 anchor 할 권위 등급. answer_structure = 합성 논리 구조의 짧은 서술.",
+  "description": "spec_driven_v1 N1 Define Spec output. explicit_references = regulatory documents/clauses explicitly named in the query (literal preservation). required_slots = evidence pieces that support the answer (lexical keywords per slot). governing_normative_class = the authority class the answer is anchored on. answer_structure = a short description of the composition logic.",
   "type": "object",
   "additionalProperties": false,
   "required": ["reasoning", "intent", "explicit_references", "required_slots"],
   "properties": {
-    "reasoning": {"type": "string", "description": "사양을 정하기 *전에* 쓰는 1-3문장 근거(한국어 가능): 어떤 명시적 참조·권위 등급·슬롯을 왜 고르는지. guided decoding 이 이 필드를 먼저 디코딩하므로 이후 결정 필드가 여기에 조건화된다(선행 CoT)."},
+    "reasoning": {"type": "string", "description": "1-3 sentence rationale written *before* fixing the spec (the query's language is fine): which explicit references / authority class / slots you choose and why. Guided decoding decodes this field first, so the subsequent decision fields are conditioned on it (leading CoT)."},
     "intent": {"type": "string"},
     "explicit_references": {
       "type": "array",

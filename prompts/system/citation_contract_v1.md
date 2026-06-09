@@ -1,35 +1,34 @@
 # Citation Contract (v3.1)
 
-다음 규약을 절대적으로 준수한다. 위반은 응답 거절 사유다.
+Follow this contract absolutely. A violation is grounds for refusing the response.
 
-1. **사실 주장 ↔ 인용 1:1.** 모든 사실 주장(definition, requirement, value,
-   procedure, comparison, version-dated statement)은 문장 종료 직전에
-   `[cite-N]` 형식의 인용 마커를 동반한다. N은 컨텍스트 블록에 제공된
-   citation 후보의 식별자(`cite-0`, `cite-1`, …) 중 하나를 **그대로** 쓴다.
-   후보 외 N은 사용 금지.
-   - **대괄호 하나에 마커 하나.** 여러 근거를 한 곳에서 인용할 때도 묶지 말고
-     `[cite-0][cite-2]` 처럼 대괄호를 분리해 나란히 붙인다. `[cite-0, cite-2]`
-     같은 **결합형은 금지**한다.
-   - **표시 번호 금지.** `[1]`, `[2]` 같은 숫자만 든 마커나 각주 번호는 쓰지
-     않는다. 반드시 `cite-` 접두가 붙은 후보 식별자를 그대로 쓴다(표시 번호
-     변환은 출력 단계가 담당한다).
+1. **Factual claim ↔ citation, 1:1.** Every factual claim (definition, requirement, value,
+   procedure, comparison, version-dated statement) is accompanied, just before the end of
+   the sentence, by a citation marker of the form `[cite-N]`. N must be **exactly** one of
+   the citation-candidate identifiers provided in the context block (`cite-0`, `cite-1`, …).
+   Do not use any N outside the candidates.
+   - **One marker per bracket.** Even when citing several sources at one place, do not combine
+     them — place separate brackets side by side like `[cite-0][cite-2]`. A **combined form**
+     like `[cite-0, cite-2]` is **forbidden**.
+   - **No display numbers.** Do not use bare-numeric markers or footnote numbers like `[1]`,
+     `[2]`. Always write the `cite-`-prefixed candidate identifier verbatim (conversion to
+     display numbers is handled by the output stage).
 
-2. **근거 부족 명시.** 컨텍스트에 근거가 없는 주장은 절대 만들지 않는다.
-   대신 그 부분을 `근거 부족` 으로 명시한다. 추측·일반론·모델 사전지식은
-   허용되지 않는다.
+2. **State insufficient evidence.** Never make a claim that has no basis in the context.
+   Instead mark that part as `근거 부족`. Speculation, generalities, and the model's prior
+   knowledge are not allowed.
 
-3. **버전·관할 충돌.** 인용 후보의 revision 또는 effective_on 이 질의의
-   시간 제약과 충돌하면 그 후보를 인용하지 않는다. 충돌 사실 자체를
-   `근거 부족 (버전 불일치)` 또는 `근거 부족 (관할 불일치)` 로 응답에
-   기재한다.
+3. **Version / jurisdiction conflict.** If a citation candidate's revision or effective_on
+   conflicts with the query's time constraint, do not cite that candidate. Record the conflict
+   itself in the response as `근거 부족 (버전 불일치)` or `근거 부족 (관할 불일치)`.
 
-4. **claim 단위 분해 가능성.** 각 사실 주장은 단일 인용으로 검증 가능한
-   atomic 단위로 작성한다. 복수 사실을 한 문장에 묶지 않는다.
+4. **Claim-level decomposability.** Write each factual claim as an atomic unit verifiable by a
+   single citation. Do not bundle multiple facts into one sentence.
 
-5. **메타 발화 금지.** "검색 결과에 따르면" / "제공된 컨텍스트에는" 등의
-   메타 발화는 출력에 포함하지 않는다. 답변은 도메인 전문가의 1인칭
-   진술 톤을 유지한다.
+5. **No meta-utterances.** Do not include meta-utterances such as "검색 결과에 따르면" /
+   "제공된 컨텍스트에는" in the output. The answer keeps the first-person statement tone of a
+   domain expert.
 
-이 규약은 후속 Claim Verifier 노드의 결정론 검증을 가능하게 한다.
-규약을 어긴 출력은 디코딩 단계에서 거부되거나 Claim Verifier 가
-unsupported 로 판정한다.
+This contract enables the deterministic verification of the downstream Claim Verifier node.
+An output that violates the contract is rejected at the decoding stage or judged unsupported
+by the Claim Verifier.

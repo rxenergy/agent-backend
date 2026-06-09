@@ -1,12 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "spec_driven_query_formulation_v1",
-  "description": "spec_driven_v1 N2 Query Formulation 산출. queries = 슬롯별 검색쿼리. query_text = BM25 lexical 앵커(리터럴 keywords + explicit_reference 토큰 verbatim). collection = boost-scope(가산만, 선택).",
+  "description": "spec_driven_v1 N2 Query Formulation output. queries = one search query per slot. query_text = BM25 lexical anchors (literal keywords + explicit_reference tokens verbatim). collection = boost-scope (additive only, optional).",
   "type": "object",
   "additionalProperties": false,
   "required": ["reasoning", "queries"],
   "properties": {
-    "reasoning": {"type": "string", "description": "쿼리를 만들기 *전에* 쓰는 1-2문장 근거(한국어 가능): 어떤 슬롯·명시적 참조를 어떤 lexical 앵커·collection 으로 옮길지. guided decoding 이 이 필드를 먼저 디코딩하므로 이후 queries 가 여기에 조건화된다(선행 CoT)."},
+    "reasoning": {"type": "string", "description": "1-2 sentence rationale written *before* building the queries (the query's language is fine): which slots / explicit references you map to which lexical anchors / collection. Guided decoding decodes this field first, so the subsequent queries are conditioned on it (leading CoT)."},
     "queries": {
       "type": "array",
       "minItems": 1,
