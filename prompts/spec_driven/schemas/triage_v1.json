@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "spec_driven_triage_v1",
+  "description": "spec_driven_v1 N0 Triage 산출 — 라우팅 판정(소형 모델 단독, 결정론 룰 없음). route=general 은 코퍼스 근거 없이 도메인 추론으로 방어 가능한 질의에만; 특정 조문·문서·정량값·개정판·신청자 주장을 지칭/요구하면 retrieval. 불확실하면 retrieval.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["rationale", "references_specifics", "route"],
+  "properties": {
+    "rationale": {"type": "string", "description": "route 를 정하기 *전에* 쓰는 1-2문장 근거(한국어 가능): 이 답을 방어하려면 코퍼스 근거가 필요한가, 질의가 특정 규제물을 지칭/요구하는가. guided decoding 이 이 필드를 먼저 디코딩하므로 이후 references_specifics·route 가 여기에 조건화된다(선행 CoT)."},
+    "references_specifics": {"type": "boolean", "description": "질의가 특정 조문·문서·정량 기준값·개정판·신청자(노형) 설계 주장을 지칭하거나 답에 그것을 *요구*하면 true. true 이면 route 는 retrieval 이어야 한다(불확실하면 true)."},
+    "route": {"type": "string", "enum": ["retrieval", "general"], "description": "retrieval = 코퍼스 검색 파이프라인(N1→N4). general = 모델 추론 직답(N4-G). 불확실하면 retrieval."}
+  }
+}
