@@ -85,6 +85,26 @@ tools:
     retry: 0
     required: false
 
+  # confidence.scope — react_minimal_v1 모델 주도 scope 자기진단(결정론 coverage 계산).
+  # CorpusMap(코퍼스 매칭) + 용어집(용어 coverage)을 합쳐 in-scope/unknown-term 신호를
+  # 노출한다. 게이트 아님 — 모델이 신호를 보고 submit_response 로 scope 를 *표현*한다.
+  # 보강용 required:false(루프 도구).
+  confidence.scope:
+    version: v1
+    adapter: scope_coverage
+    timeout_ms: 1000
+    retry: 0
+    required: false
+
+  # submit_response — react_minimal_v1 ReAct 루프 종료 신호 캡처(no-op).
+  # 인자=outcome(answer|out_of_scope|clarification|insufficient_evidence)+reason.
+  submit_response:
+    version: v1
+    adapter: local
+    timeout_ms: 1000
+    retry: 0
+    required: false
+
   # v3.1 P1 Section auto-merge / P2 다홉 — 한 Section 형제 문단 메타 표적 fetch.
   # required:false — 컨텍스트 *보강*용이라 실패해도 답변을 막지 않는다(leaf 로 진행).
   document.fetch_section:

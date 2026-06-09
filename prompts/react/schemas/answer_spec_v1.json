@@ -1,15 +1,64 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "react_answer_spec_v1",
-  "description": "react_minimal_v1 pre-retrieval answer specification. Produced from the raw user question (no classifier/translation upstream) and consumed by (a) the ReAct retrieval system prompt — required_slots tell the model what evidence to find and when to report missing_info — and (b) the generation prompt — answer_plan + governing_normative_class steer composition and authority weighting. Slot name/description are English (English corpus + English ReAct reasoning); the question may be Korean. Informs the model; not a deterministic gate.",
+  "description": "react_minimal_v1 pre-retrieval answer specification. Produced from the raw user question (no classifier/translation upstream). Compensates for the missing classifier: it plans the search scope, the evidence to find, and the answer composition for a small downstream model. Consumers: (a) ReAct retrieval loop — search_scope.{search_type,target_collections,scope_mode} map to retrieval.search target/filters; entities feed confidence.scope/retrieval.scope corpus-map routing; key_search_terms seed retrieval.search query_text; required_slots tell the model what to find and when to report missing_info. (b) generation prompt — governing_normative_class + answer_plan steer authority weighting and composition. Slot/term/entity values are English (English corpus); question may be Korean. Informs the model; not a deterministic gate.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["governing_normative_class", "required_slots", "answer_plan"],
+  "required": ["governing_normative_class", "search_scope", "required_slots", "answer_plan"],
   "properties": {
     "governing_normative_class": {
-      "description": "The single authority rung that must anchor a defensible answer. binding=10 CFR/GDC/NSSC; advisory=RG/SRP/DSRS; review_record=SER/RAI; applicant_claim=FSAR/DCA; definitional=normative definition; mixed=two rungs co-anchor; unknown=too vague to place.",
+      "description": "The single authority rung that must anchor a defensible answer. binding=10 CFR/GDC/FR; advisory=RG/SRP/DSRS; review_record=SER/RAI; applicant_claim=FSAR/DCA/nuscale_*; definitional=normative definition; mixed=two rungs co-anchor (e.g. applicant design judged against a binding rule); unknown=too vague to place.",
       "type": "string",
       "enum": ["binding", "advisory", "review_record", "applicant_claim", "definitional", "mixed", "unknown"]
+    },
+    "search_scope": {
+      "description": "How to narrow the ~690k-doc corpus. The model copies these into its first tool calls. Prefer (soft boost) over restrict (hard filter) to avoid the recall cliff.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["search_type", "target_collections", "scope_mode", "key_search_terms", "entities"],
+      "properties": {
+        "search_type": {
+          "description": "Verified coarse axis (counts confirmed in the live index). manual=regulatory docs; nuscale=vendor/NuScale design + DSRS; any=genuinely both.",
+          "type": "string",
+          "enum": ["manual", "nuscale", "any"]
+        },
+        "target_collections": {
+          "description": "Smallest collection set holding the answer. Regulatory collections are exact keyword values; the nuscale_* applicant collections are finer-grained and may vary, so for vendor evidence rely on search_type=nuscale and treat nuscale_* as a hint.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["10CFR", "FR", "RG", "SRP", "NUREG", "DSRS", "nuscale_*"]
+          }
+        },
+        "scope_mode": {
+          "description": "restrict = hard filter (safe ONLY when the question names an explicit regulation_id or reactor_type); prefer = soft boost over all collections (default; never hard-filter on a guess).",
+          "type": "string",
+          "enum": ["prefer", "restrict"]
+        },
+        "key_search_terms": {
+          "description": "Canonical English search seeds for the first retrieval.search query_text (e.g. 'emergency core cooling system ECCS', 'reactor coolant pressure boundary').",
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "entities": {
+          "description": "Structured identifiers for deterministic corpus-map routing. Kind-names MUST be exactly regulation_id and reactor_type (the routing keys on these).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["regulation_id", "reactor_type"],
+          "properties": {
+            "regulation_id": {
+              "description": "Cited rules, e.g. '10 CFR 50.46', 'GDC 35', 'RG 1.157', 'NUREG-0800 6.3'. Empty array if none named.",
+              "type": "array",
+              "items": {"type": "string"}
+            },
+            "reactor_type": {
+              "description": "Named designs, e.g. 'NuScale', 'i-SMR'. Empty array if none named.",
+              "type": "array",
+              "items": {"type": "string"}
+            }
+          }
+        }
+      }
     },
     "required_slots": {
       "description": "Evidence pieces the answer must rest on. Model instantiates per query from the candidate prior.",
@@ -21,11 +70,11 @@
         "required": ["name", "description", "required"],
         "properties": {
           "name": {
-            "description": "Short snake_case English identifier (drives English-corpus retrieval).",
+            "description": "Short snake_case English identifier.",
             "type": "string"
           },
           "description": {
-            "description": "English, one line: what to find and, where useful, in which source family.",
+            "description": "English, one line: what to find and likely source family.",
             "type": "string"
           },
           "required": {
@@ -36,7 +85,7 @@
       }
     },
     "answer_plan": {
-      "description": "One or two sentences naming the composition strategy for this question: what to conclude, what to compare/separate, which authority distinctions to preserve. Composition guidance, not the answer. Language-neutral.",
+      "description": "One or two sentences naming the composition strategy: what to conclude, what to compare/separate, which authority distinctions to preserve. Composition guidance, not the answer. Language-neutral.",
       "type": "string"
     }
   }

@@ -163,6 +163,30 @@ finder_prompts:
     prompt:        {path: finder/finder_v1.md, version: v1, sha256: "cf2bc04362e3ab85195daff4e830053381eac5ef38df7b7d97d52ee160c7628f"}
     model_options: {temperature: 0.0, max_tokens: 600}
 
+# react_minimal_v1 N1 Retrieval(ReAct 루프) 시스템 프롬프트 (react_minimal_workflow.v1).
+#   분류기·query_translate·answer_spec 없이 모델 추론이 도구 사용을 주도하는 최소 ReAct
+#   variant 의 *정적* 시스템 지시(도메인 오리엔테이션 + Thought→Action→Observation 규약
+#   + scope/거부 자기판정 + 언어 규칙). 동적 질의는 런타임 user 메시지. `ReactRetrievalPromptSource`
+#   가 boot 시 sha 검증(finder 와 동일 fail-fast). policy_hash = 본문 sha → InteractionEvent
+#   query_understanding.react_retrieval.policy_hash 핀. output_schema 없음 — 구조는 도구
+#   호출(submit_response)이 강제.
+react_retrieval_prompts:
+  react_retrieval_v1:
+    profile_version: v1
+    prompt:        {path: react/react_retrieval_v1.md, version: v1, sha256: "d91dd8f4fc5609d887ac93e03e3d62e583a49b1d8bc7dafe6166429654257630"}
+    model_options: {temperature: 0.0, max_tokens: 600}
+
+# react_minimal_v1 N2 Generation(근거 답변) 프롬프트 (react_minimal_workflow.v1).
+#   O×D PromptResolver 를 쓰지 않는다(분류기 없음 → scenario_object/depth 없음). 단일
+#   생성 프롬프트가 답변 철학·규범무게 사다리·인용 계약·언어 미러링을 inline 으로 담는다
+#   (system_v6 distill). `ReactGenerationPromptSource` 가 boot 시 sha 검증. policy_hash =
+#   본문 sha → InteractionEvent prompt_composition_hash 핀.
+react_generation_prompts:
+  react_generation_v1:
+    profile_version: v1
+    prompt:        {path: react/react_generation_v1.md, version: v1, sha256: "752a248efccd9ba85739165c4109333c199658f17bd835b2c222d6f7aabed665"}
+    model_options: {temperature: 0.1, max_tokens: 2000}
+
 prompt_profiles:
 
   # === O1 Vendor ===
