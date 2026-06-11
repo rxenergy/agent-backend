@@ -418,6 +418,7 @@ class SpecDrivenRunner:
                             evidence_gap=evidence_gap)
             llm_result = await self._generate(
                 request, rendered_text, started, tool_calls, llm=llm,
+                model_options=self._generation_source.model_options,
                 query_understanding=qu_pin,
             )
             if isinstance(llm_result, AgentResponse):
@@ -517,6 +518,7 @@ class SpecDrivenRunner:
         await emit_step("generation", "started", llm_id=llm_id, route="general")
         llm_result = await self._generate(
             request, rendered_text, started, tool_calls, llm=llm,
+            model_options=self._general_source.model_options,
             query_understanding=qu_pin,
         )
         if isinstance(llm_result, AgentResponse):
@@ -616,14 +618,24 @@ class SpecDrivenRunner:
     # Generation — react_minimal/v4 패턴(LLM-agnostic, 스트리밍/non-streaming).
     # ------------------------------------------------------------------
     async def _generate(self, request, prompt_text, started, tool_calls, *,
-                        llm: LLMPort, query_understanding: dict[str, Any] | None = None):
+                        llm: LLMPort, model_options: dict[str, Any] | None = None,
+                        query_understanding: dict[str, Any] | None = None):
+        # 생성 파라메터(temperature/max_tokens)는 호출자가 노드별 registry source
+        # (N4=spec_driven_generation_v1, N4-G=spec_driven_general_v1)의 model_options
+        # 로 넘긴다. 미전달 시 어댑터 하드코딩 기본(temperature=0.0, max_tokens=1024)
+        # 으로 떨어져 선언값이 사문화되던 문제 수정.
+        opts = dict(model_options or {})
         with _TRACER.start_as_current_span("llm.generation") as s:
             em = current_emitter()
             try:
                 if em.active:
-                    llm_result = await self._generate_stream(llm, prompt_text, span=s)
+                    llm_result = await self._generate_stream(
+                        llm, prompt_text, span=s, model_options=opts
+                    )
                 else:
-                    llm_result = await llm.generate(prompt_text)
+                    llm_result = await llm.generate(
+                        prompt_text, model_options=opts
+                    )
             except LLMUnavailableError:
                 s.set_attribute("llm.status", "unavailable")
                 return await self._refuse(
@@ -640,7 +652,8 @@ class SpecDrivenRunner:
             )
             return llm_result
 
-    async def _generate_stream(self, llm: LLMPort, prompt: str, *, span) -> LLMResult:
+    async def _generate_stream(self, llm: LLMPort, prompt: str, *, span,
+                               model_options: dict[str, Any] | None = None) -> LLMResult:
         text_buf: list[str] = []
         token_usage: dict[str, int] = {}
         model_id: str | None = None
@@ -648,7 +661,7 @@ class SpecDrivenRunner:
         # 헤더도 안 뜸 — onprem Gemma 는 무음). reasoning 은 본문 토큰 이전 순서를
         # 상속한다(설계 §8 #1, #24295).
         lazy = LazyReasoning("답변 작성")
-        async for delta in llm.generate_stream(prompt):
+        async for delta in llm.generate_stream(prompt, model_options=model_options):
             if delta.content:
                 text_buf.append(delta.content)
                 await emit_token(delta.content)
