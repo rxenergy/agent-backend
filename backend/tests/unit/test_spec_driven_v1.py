@@ -23,6 +23,7 @@ from app.application.agents.spec_driven_v1 import (
 from app.application.context.pack import ContextBuilder
 from app.application.intake.spec_driven_query import (
     _attach_targets,
+    _dedup_queries,
     _ensure_references,
     _parse,
 )
@@ -341,6 +342,38 @@ def test_ensure_references_preserves_filters() -> None:
     assert out.filters == {"collection": ["nuscale_FSAR"]}  # filter 보존
 
 
+def test_dedup_queries_collapses_identical_query_text_across_slots() -> None:
+    # safety net (3): 소형 모델이 같은 query_text 를 N개 슬롯에 복제해도 동일 검색은
+    # 1회로 접힌다(scope 동일 시). 대소문자/공백만 다른 것도 같은 것으로 본다.
+    qs = (
+        FormulatedQuery(slot_name="structure", query_text="NuScale FSAR section 5.4.1",
+                        filters={"collection": ["nuscale_FSAR"]}),
+        FormulatedQuery(slot_name="content", query_text="nuscale fsar  section 5.4.1",
+                        filters={"collection": ["nuscale_FSAR"]}),
+        FormulatedQuery(slot_name="method", query_text="NuScale FSAR section 5.4.1",
+                        filters={"collection": ["nuscale_FSAR"]}),
+    )
+    out = _dedup_queries(qs)
+    assert len(out) == 1
+    assert out[0].slot_name == "structure"  # 첫 쿼리만 남는다
+
+
+def test_dedup_queries_keeps_distinct_text_and_distinct_scope() -> None:
+    # 다른 query_text 는 보존; query_text 가 같아도 scope(boost vs filter, collection)가
+    # 다르면 별개 검색이라 보존한다.
+    qs = (
+        FormulatedQuery(slot_name="a", query_text="GDC 35 emergency core cooling",
+                        target={"collection": ["10CFR"]}),
+        FormulatedQuery(slot_name="b", query_text="NuScale ECCS design FSAR",
+                        filters={"collection": ["nuscale_FSAR"]}),
+        # 같은 텍스트지만 filter vs boost → 별개.
+        FormulatedQuery(slot_name="c", query_text="GDC 35 emergency core cooling",
+                        filters={"collection": ["10CFR"]}),
+    )
+    out = _dedup_queries(qs)
+    assert len(out) == 3
+
+
 @pytest.mark.asyncio
 async def test_gap_answer_on_zero_chunks_not_refusal() -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -541,16 +574,17 @@ def test_slot_floor_no_required_is_pure_topk() -> None:
 
 
 @pytest.mark.asyncio
-async def test_context_budget_is_ten_and_fetch_fills_to_budget() -> None:
-    # cap=10(기본) + per-query fetch=budget 으로 단일 쿼리로도 10개를 채울 수 있게 구성.
+async def test_context_budget_default_and_fetch_fills_to_budget() -> None:
+    # cap=24(기본, 컨텍스트 확장) + per-query fetch=budget 으로 단일 쿼리로도 budget 까지
+    # 채울 수 있게 구성.
     with tempfile.TemporaryDirectory() as tmp:
         runner = _build(Path(tmp), _script())
-        assert runner._max_context_chunks == 10
+        assert runner._max_context_chunks == 24
         await runner.run(_req())
         pin = _event(tmp)["query_understanding"]["spec_driven"]["retrieval"]
-        assert pin["budget"] == 10           # context 상한 = 10
-        assert pin["fetch_k"] == 10          # per-query fetch = budget(top_k 3 < 10)
-        assert pin["num_chunks"] <= 10       # cap 준수
+        assert pin["budget"] == 24           # context 상한 = 24(확장)
+        assert pin["fetch_k"] == 24          # per-query fetch = budget(top_k 3 < 24)
+        assert pin["num_chunks"] <= 24       # cap 준수
 
 
 # ── thinking 은 모델 출력 중심 ───────────────────────────────────────────────

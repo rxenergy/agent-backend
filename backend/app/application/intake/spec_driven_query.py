@@ -127,9 +127,10 @@ class QueryFormulator:
             if not queries:
                 method = "fallback"
                 queries = _fallback_queries(query_text, spec)
-            # 안전망 (1)·(2): refs verbatim 보장 + collection boost 유도.
+            # 안전망 (1)·(2)·(3): refs verbatim 보장 + collection boost 유도 + 중복 제거.
             queries = _ensure_references(queries, spec.explicit_references)
             queries = _attach_targets(queries)
+            queries = _dedup_queries(queries)
             span.set_attribute("query_formulation.method", method)
             span.set_attribute("query_formulation.num_queries", len(queries))
             oi.set_io(span, output_value={
@@ -238,6 +239,32 @@ def _ensure_references(
             target=q.target, filters=q.filters, references=present_refs,
         ))
     return tuple(rebuilt)
+
+
+def _dedup_queries(
+    queries: tuple[FormulatedQuery, ...]
+) -> tuple[FormulatedQuery, ...]:
+    """안전망 (3): 여러 슬롯이 *동일한* query_text+scope 로 검색하는 중복을 제거한다.
+    소형 모델이 슬롯 다양화에 실패해 같은 query_text 를 N개 슬롯에 그대로 복제하는 경우
+    (예: section_5_4_1_{structure,content,methodology} 가 전부 "NuScale FSAR section
+    5.4.1") 동일 검색을 N회 반복해 컨텍스트 예산을 같은 chunk 로 낭비하고 다양성을
+    떨어뜨린다. query_text(대소문자/공백 정규화) + collection scope 가 같으면 첫 쿼리만
+    남기고 접는다. 접힌 슬롯명은 살아남는 쿼리의 references 가 아니라 slot_name 으로
+    이미 floor 후보가 되며, 동일 검색이라 회수 chunk·score 가 같으므로 coverage 손실은
+    없다(중복 검색만 제거). 프롬프트의 '슬롯별 다양화' 지시가 1차 방어, 이 함수가 백스톱.
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[FormulatedQuery] = []
+    for q in queries:
+        coll = q.target.get("collection") or q.filters.get("collection") or []
+        scope_key = ("filter" if q.filters.get("collection") else "boost") + \
+            "|" + ",".join(sorted(coll))
+        key = (" ".join(q.query_text.lower().split()), scope_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
+    return tuple(out)
 
 
 def _attach_targets(

@@ -90,8 +90,8 @@ class SpecDrivenRunner:
         general_source: Any = None,
         citation_contract_path: str | None = None,
         retriever_top_k: int = 3,
-        max_queries: int = 6,
-        max_context_chunks: int = 10,
+        max_queries: int = 10,
+        max_context_chunks: int = 24,
         min_token_count: int = 0,
     ) -> None:
         self.spec = spec
@@ -824,7 +824,7 @@ def _build_spec_driven(spec: VariantSpec, deps: AgentDeps) -> "SpecDrivenRunner"
         general_source=deps.spec_driven_general_source,
         citation_contract_path=t.get("citation_contract_path"),
         retriever_top_k=t.get("retriever_top_k", 3),
-        max_queries=t.get("spec_driven_max_queries", 6),
-        max_context_chunks=t.get("spec_driven_max_context_chunks", 10),
+        max_queries=t.get("spec_driven_max_queries", 10),
+        max_context_chunks=t.get("spec_driven_max_context_chunks", 24),
         min_token_count=t.get("retriever_min_token_count", 0),
     )

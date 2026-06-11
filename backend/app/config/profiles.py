@@ -648,9 +648,9 @@ async def build_container(settings: Settings) -> AppContainer:
             # react_minimal_v1 — ReAct 루프 턴 backstop(submit_response 미발동 시 종료).
             "react_max_turns": settings.react_max_turns,
             # spec_driven_v1 — N2 per-slot 멀티쿼리 상한 + 병합 후 top-K cap(no silent cap).
-            "spec_driven_max_queries": getattr(settings, "spec_driven_max_queries", 6),
+            "spec_driven_max_queries": getattr(settings, "spec_driven_max_queries", 10),
             "spec_driven_max_context_chunks": getattr(
-                settings, "spec_driven_max_context_chunks", 10),
+                settings, "spec_driven_max_context_chunks", 24),
             # v3.1 (hierarchical_corrective). Ignored by other variants.
             "llm_call_budget": getattr(settings, "llm_call_budget", 8),
             "citation_contract_path": str(

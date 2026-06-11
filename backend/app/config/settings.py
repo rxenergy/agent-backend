@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     # react_minimal_v1 — ReAct Retrieval 루프 턴 backstop(submit_response 미발동 시 종료).
     react_max_turns: int = 8
 
+    # spec_driven_v1 — N2 per-slot 멀티쿼리 상한 + N3 병합 후 컨텍스트 chunk 예산
+    # (no silent cap — capped 여부는 재현 핀에 기록). 컨텍스트 윈도가 확장된 모델에서는
+    # 더 많은 근거를 한 번에 주입하도록 예산을 키운다(슬롯 세분·다양 쿼리와 함께 동작).
+    spec_driven_max_queries: int = 10
+    spec_driven_max_context_chunks: int = 24
+
     # Classifier (Node 1)
     classifier_backend: Literal["rule", "llm", "hybrid"] = "rule"
     classification_threshold: float = 0.35
