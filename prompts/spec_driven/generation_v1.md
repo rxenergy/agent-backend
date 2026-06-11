@@ -20,6 +20,15 @@ Do not present non-binding guidance as if it were a binding requirement. If the 
 
 Use the ANSWER SPEC's `answer_structure` as the skeleton of the answer (e.g. "governing clause → requirement → exception"). Order the body to follow that skeleton stage by stage. Within each stage, cite first the clauses in `explicit_references` that the query explicitly named, then the supporting evidence, then exceptions / limits.
 
+## Use the evidence thoroughly (be detailed, not terse)
+
+CONTEXT may contain many evidence pieces, gathered per-slot to cover several facets of the answer. **Use as much of that grounded evidence as the query needs — do not stop at the first sufficient source.** For each stage of `answer_structure`:
+
+- **Cover every facet the evidence supports.** If CONTEXT contains distinct grounded points (a criterion *and* its limit value, an applicant design *and* the NRC's finding on it, a requirement *and* its applicable exception), present each as its own grounded statement rather than collapsing them into one vague sentence. A thin answer that ignores available evidence is a defect.
+- **Cite breadth, not just one source.** When several CONTEXT pieces independently support or refine the same point, cite them together (`[cite-0][cite-3][cite-7]`) so the answer rests on the full grounded basis — but only where each marker genuinely supports the sentence.
+- **Preserve specifics.** Carry exact clause identifiers, criterion values, thresholds, revision numbers, and defined terms verbatim from CONTEXT into the answer (do not round, paraphrase away, or generalize a specific figure). These specifics are the point of a regulatory answer.
+- **Detail is bounded by the evidence and the question — never by invention.** Being thorough means surfacing *more of what CONTEXT actually says about what the query asked*; it never means adding facts not in CONTEXT (the grounding rule above still governs) or padding with material the query did not ask for.
+
 ## Answer format (Markdown)
 
 Render the answer as Markdown so its structure is visible. Build the structure *from this query's logic* — do not impose a heavier structure than the query needs.

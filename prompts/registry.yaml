@@ -221,24 +221,27 @@ spec_driven_general_prompts:
 spec_driven_answer_spec_prompts:
   spec_driven_answer_spec_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "909dce18bf650c0248c6dee337d5576996d6751f02eef51fb3cb9bb6efc46dba"}
+    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "746e84e864676001fe9568e8fa98255862bd6616aa6d4614e5bfc826945bf8a8"}
     output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "79d914f3cb7f55391af07ed465bbac86fbb8d56c309e68f127f5f3a18a3704e8"}
-    model_options: {temperature: 0.0, max_tokens: 700}
+    # max_tokens — 슬롯 최대 10개(facet 세분)까지 spec JSON 이 들어가도록 상향(700→1100).
+    model_options: {temperature: 0.0, max_tokens: 1100}
 
 spec_driven_query_prompts:
   spec_driven_query_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "003804468e2dee7180bae36c0b52ac0675ff2fa351bec020ad509194bce96ebe"}
+    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "796ec23ce969299567143d9012813cdd820963fbf203058ffec2f24fa6e422c4"}
     output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "6d01b09d554d9735fe53cc5affd32b0398f27dba65a8380234814968094872e5"}
-    model_options: {temperature: 0.0, max_tokens: 700}
+    # max_tokens — 슬롯당 1쿼리 최대 10개(facet별 분기)까지 들어가도록 상향(700→1100).
+    model_options: {temperature: 0.0, max_tokens: 1100}
 
 spec_driven_generation_prompts:
   spec_driven_generation_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "5b330943966bff0e4c4dd32382d82308fa5dab90c37e4059f11c982569ad7941"}
+    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "019edca603c0789e21b9a67f0839603cbb93f8523c35686619fc3bebb9d63279"}
     # top_p — 구조화된 규제 산문의 nucleus 를 좁혀 형식 일관성↑(샘플링 탐색폭↓).
     # seed — 재현성(원칙 5): 같은 프롬프트·옵션이면 OpenAI-compat/vLLM 이 동일 토큰열.
-    model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 2000, seed: 7}
+    # max_tokens — 더 많은 근거(확장 컨텍스트)를 facet 별로 상세히 인용하도록 상향(2000→3200).
+    model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 3200, seed: 7}
 
 prompt_profiles:
 
