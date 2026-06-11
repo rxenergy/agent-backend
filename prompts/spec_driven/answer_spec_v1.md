@@ -74,29 +74,29 @@ Use this understanding to recognize *which facets/concepts the query touches*, a
 - **Effective version** — which revision is in force (a superseded edition = wrong answer).
 - **Definition** — the regulatory meaning of a term.
 
-### Basic glossary (for recognizing & naming concepts — if a topic is absent, write that topic's exact term / reg ID directly)
+### Basic glossary (recognize & name concepts — the bracketed Korean bridges a Korean query to its English term; if a topic is absent, write that topic's exact term / reg ID directly)
 
-- **Accidents / transients:** `LOCA` loss-of-coolant accident · `DBA` design basis accident · `AOO` anticipated operational occurrence · `ATWS` anticipated transient without scram · `SBO` station blackout · `LOOP` loss of offsite power · `PTS` pressurized thermal shock · severe accident
-- **Systems / structures:** `ECCS` emergency core cooling system · `RHR`/`DHRS` residual / decay heat removal · `RCS` reactor coolant system · `RCPB` reactor coolant pressure boundary · containment · `RPV` reactor pressure vessel · spent fuel pool · `I&C` instrumentation & control
-- **Safety concepts:** `SSC` structures, systems & components · safety-related / important to safety · safety function · single failure criterion · common-cause failure · redundancy / diversity · defense in depth · design basis / licensing basis · source term · `TEDE` total effective dose equivalent · decay heat · reactivity · fracture toughness / irradiation embrittlement
-- **Requirements / review:** acceptance criteria (values live in the clause) · `GDC` general design criteria (50 App A) · technical specifications · `EQ` environmental qualification · `ISI`/`IST` in-service inspection / testing · `PRA` probabilistic risk assessment · QA quality assurance
-- **Licensing / documents:** `(F)SAR` (final) safety analysis report · `DCA`/`COL`/`ESP` design certification / combined license / early site permit · `SER`/`FSER` safety evaluation report · `RAI` request for additional information · `SRP` (NUREG-0800) / `DSRS` review standards · `RG` regulatory guide · `ISG` interim staff guidance
+- **Accidents / transients 사고·과도:** `LOCA` loss-of-coolant accident (냉각재상실사고) · `LBLOCA`/`SBLOCA` large/small-break LOCA (대·소파단) · `DBA` design basis accident (설계기준사고) · `AOO` anticipated operational occurrence (예상운전과도) · `ATWS` anticipated transient without scram (미정지예상과도) · `SBO` station blackout (소외전원상실) · `LOOP` loss of offsite power (외부전원상실) · `PTS` pressurized thermal shock (가압열충격) · severe accident (중대사고)
+- **Systems / structures 계통·구조:** `ECCS` emergency core cooling system (비상노심냉각계통) · `RHR`/`DHRS` residual / decay heat removal (잔열·붕괴열 제거) · `RCS` reactor coolant system (원자로냉각재계통) · `RCPB` reactor coolant pressure boundary (냉각재압력경계) · containment (격납건물) · `RPV` reactor pressure vessel (원자로압력용기) · fuel cladding (핵연료 피복재) · `CRDM` control rod drive mechanism (제어봉구동장치) · spent fuel pool (사용후핵연료저장조) · `I&C` instrumentation & control (계측제어)
+- **Safety concepts 안전개념:** `SSC` structures, systems & components (구조·계통·기기) · safety-related / important to safety (안전관련 / 안전상 중요) · safety function (안전기능) · single failure criterion (단일고장기준) · common-cause failure (공통원인고장) · redundancy / diversity (다중성·다양성) · defense in depth (심층방어) · design / licensing basis (설계·인허가 기준) · source term (소스텀) · `TEDE` total effective dose equivalent (총유효선량) · decay heat (붕괴열) · reactivity (반응도) · fracture toughness / irradiation embrittlement (파괴인성·조사취화)
+- **Requirements / review 요건·심사:** acceptance criteria (합격기준; the values live in the clause) · `GDC` general design criteria (일반설계기준, 50 App A) · technical specifications (기술지침서) · `EQ` environmental qualification (환경검증) · `ISI`/`IST` in-service inspection / testing (가동중검사·시험) · `PRA`/`PSA` probabilistic risk / safety assessment (확률론적위험도·안전성평가) · QA quality assurance (품질보증)
+- **Licensing / documents 인허가·문서:** `(F)SAR` (final) safety analysis report (안전성분석보고서) · `DCA`/`COL`/`ESP` design certification / combined license / early site permit (설계인증 / 복합운영허가 / 부지사전승인) · `SER`/`FSER` safety evaluation report (안전성평가보고서) · `RAI` request for additional information (추가정보요청) · `SRP` (NUREG-0800) / `DSRS` review standards (심사지침) · `RG` regulatory guide (규제지침) · `ISG` interim staff guidance (잠정실무지침)
 
 ### Regulatory address map (topic → governing regulation / document = *where to find it*. No values — the corpus answers that)
 
 Pick the topic's authority *address* here for slot keywords / explicit_references. If a topic is absent, write that topic's exact reg ID directly. (Parentheses are concept labels for the clause, not values.)
 
-**Reactor / safety systems:** ECCS / core cooling → `10 CFR 50.46` · `GDC 35` · `10 CFR 50 Appendix K` · `RG 1.157` / `RG 1.203` · `SRP 6.3` / residual heat removal (RHR) → `GDC 34` · `SRP 5.4` / reactivity control & shutdown → `GDC 26` · `GDC 27` · `GDC 28` · `10 CFR 50.62` (ATWS) / electric power → `GDC 17` · `10 CFR 50.63` (SBO)
+**Reactor / safety systems 원자로·안전계통:** ECCS / core cooling (노심냉각) → `10 CFR 50.46` · `GDC 35` · `10 CFR 50 Appendix K` · `RG 1.157` / `RG 1.203` · `SRP 6.3` / residual heat removal (잔열제거, RHR) → `GDC 34` · `SRP 5.4` / reactivity control & shutdown (반응도제어·정지) → `GDC 26` · `GDC 27` · `GDC 28` · `10 CFR 50.62` (ATWS) / electric power (전력계통) → `GDC 17` · `10 CFR 50.63` (SBO)
 
-**Containment / fission-product barriers:** containment integrity → `GDC 16` · `GDC 50`–`GDC 57` · `10 CFR 50 Appendix J` (leakage testing) / containment heat removal & atmosphere cleanup → `GDC 38`–`GDC 43` / combustible gas → `10 CFR 50.44`
+**Containment / fission-product barriers 격납·차단:** containment integrity (격납건전성) → `GDC 16` · `GDC 50`–`GDC 57` · `10 CFR 50 Appendix J` (leakage testing) / containment heat removal & atmosphere cleanup (격납 열제거·대기정화) → `GDC 38`–`GDC 43` / combustible gas (가연성기체) → `10 CFR 50.44`
 
-**RPV / materials / mechanical:** RPV fracture toughness & embrittlement → `10 CFR 50 Appendix G` · `Appendix H` (surveillance) · `10 CFR 50.61` / `50.61a` (PTS) · `RG 1.99` / codes & standards → `10 CFR 50.55a` (ASME BPVC Sec III/XI) / seismic & natural phenomena → `GDC 2` · `10 CFR 50 Appendix S` · `RG 1.60` / `RG 1.61`
+**RPV / materials / mechanical RPV·재료·기계:** RPV fracture toughness & embrittlement (파괴인성·취화) → `10 CFR 50 Appendix G` · `Appendix H` (surveillance) · `10 CFR 50.61` / `50.61a` (PTS) · `RG 1.99` / codes & standards (코드·규격) → `10 CFR 50.55a` (ASME BPVC Sec III/XI) / seismic & natural phenomena (지진·자연현상) → `GDC 2` · `10 CFR 50 Appendix S` · `RG 1.60` / `RG 1.61`
 
-**Instrumentation & control (I&C) / protection systems:** protection & safety systems → `GDC 20`–`GDC 25` · `10 CFR 50.55a(h)` (IEEE 603) · `RG 1.152` (digital) / control room → `GDC 19`
+**Instrumentation & control (I&C) / protection systems 계측제어·보호계통:** protection & safety systems (보호·안전계통) → `GDC 20`–`GDC 25` · `10 CFR 50.55a(h)` (IEEE 603) · `RG 1.152` (digital) / control room (제어실) → `GDC 19`
 
-**Radiation / dose / siting:** accident dose & source term → `10 CFR 50.67` · `RG 1.183` (AST) · `10 CFR Part 100` (siting) / radiation protection → `10 CFR Part 20`
+**Radiation / dose / siting 방사선·선량·부지:** accident dose & source term (사고선량·소스텀) → `10 CFR 50.67` · `RG 1.183` (AST) · `10 CFR Part 100` (siting) / radiation protection (방사선방호) → `10 CFR Part 20`
 
-**Quality / administrative / licensing:** quality assurance → `10 CFR 50 Appendix B` / defect reporting → `10 CFR Part 21` / operating license & design certification → `10 CFR Part 50` / `10 CFR Part 52` (DCA/COL/ESP) / technical specifications → `10 CFR 50.36` / environmental qualification (EQ) → `10 CFR 50.49` / fire protection → `10 CFR 50.48` · `Appendix R`
+**Quality / administrative / licensing 품질·행정·인허가:** quality assurance (품질보증) → `10 CFR 50 Appendix B` / defect reporting (결함보고) → `10 CFR Part 21` / operating license & design certification (운영허가·설계인증) → `10 CFR Part 50` / `10 CFR Part 52` (DCA/COL/ESP) / technical specifications (기술지침서) → `10 CFR 50.36` / environmental qualification (환경검증, EQ) → `10 CFR 50.49` / fire protection (화재방호) → `10 CFR 50.48` · `Appendix R`
 
 **Document types (weight):** binding = `10 CFR` · `GDC` / guidance = `RG` · `SRP` (NUREG-0800) · `DSRS` · `ISG` / review record = `SER`/`FSER` · `RAI` / applicant = `FSAR` · `DCA` · `Topical Report` / notices = `Generic Letter` · `Information Notice` · `Bulletin`
 
