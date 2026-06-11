@@ -235,8 +235,10 @@ spec_driven_query_prompts:
 spec_driven_generation_prompts:
   spec_driven_generation_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "5aea77a11dd94565b0c2a61a4bd15da17d292d256ed7c2551d8974b9bd1a9d44"}
-    model_options: {temperature: 0.1, max_tokens: 2000}
+    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "5b330943966bff0e4c4dd32382d82308fa5dab90c37e4059f11c982569ad7941"}
+    # top_p — 구조화된 규제 산문의 nucleus 를 좁혀 형식 일관성↑(샘플링 탐색폭↓).
+    # seed — 재현성(원칙 5): 같은 프롬프트·옵션이면 OpenAI-compat/vLLM 이 동일 토큰열.
+    model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 2000, seed: 7}
 
 prompt_profiles:
 

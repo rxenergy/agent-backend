@@ -71,6 +71,7 @@ class HttpLLM(LLMPort):
         opts = dict(model_options or {})
         max_tokens = int(opts.pop("max_tokens", 1024))
         temperature = float(opts.pop("temperature", 0.0))
+        extra = _sampling_extras(opts)
 
         try:
             async for attempt in AsyncRetrying(
@@ -84,7 +85,7 @@ class HttpLLM(LLMPort):
                 with attempt:
                     if self._provider == "openai_compat":
                         return await self._call_openai_compat(
-                            prompt, max_tokens, temperature, grammar
+                            prompt, max_tokens, temperature, grammar, extra
                         )
                     return await self._call_anthropic(prompt, max_tokens, temperature)
         except (httpx.HTTPError, RetryError, _Retry5xx) as exc:
@@ -111,6 +112,7 @@ class HttpLLM(LLMPort):
         opts = dict(model_options or {})
         max_tokens = int(opts.pop("max_tokens", 1024))
         temperature = float(opts.pop("temperature", 0.0))
+        extra = _sampling_extras(opts)
 
         try:
             async for attempt in AsyncRetrying(
@@ -124,7 +126,7 @@ class HttpLLM(LLMPort):
                 with attempt:
                     if self._provider == "openai_compat":
                         async for delta in self._stream_openai_compat(
-                            prompt, max_tokens, temperature, grammar
+                            prompt, max_tokens, temperature, grammar, extra
                         ):
                             yield delta
                     else:
@@ -309,6 +311,7 @@ class HttpLLM(LLMPort):
     async def _call_openai_compat(
         self, prompt: str, max_tokens: int, temperature: float,
         grammar: GrammarSpec | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> LLMResult:
         url = f"{self._endpoint}/chat/completions"
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -319,6 +322,7 @@ class HttpLLM(LLMPort):
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": temperature,
+            **(extra or {}),
         }
         _apply_grammar_to_openai_payload(payload, grammar)
         async with httpx.AsyncClient(timeout=self._timeout_s) as client:
@@ -340,6 +344,7 @@ class HttpLLM(LLMPort):
     async def _stream_openai_compat(
         self, prompt: str, max_tokens: int, temperature: float,
         grammar: GrammarSpec | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> AsyncIterator[LLMTokenDelta]:
         url = f"{self._endpoint}/chat/completions"
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -355,6 +360,7 @@ class HttpLLM(LLMPort):
             # chunk so the runner can populate token_usage even when
             # streaming.
             "stream_options": {"include_usage": True},
+            **(extra or {}),
         }
         _apply_grammar_to_openai_payload(payload, grammar)
 
@@ -761,6 +767,25 @@ def _map_anthropic_stop_reason(reason: str | None) -> str:
     if reason == "tool_use":
         return "tool_calls"
     return reason
+
+
+# OpenAI-compat /chat/completions 가 받는 추가 샘플링·포맷 파라메터 화이트리스트.
+# registry model_options 에 선언된 키 중 이 집합만 와이어로 전달한다(temperature·
+# max_tokens 는 호출부에서 이미 pop 해 별도 처리). 화이트리스트로 한정해 오타·미지원
+# 키가 4xx 를 유발하지 않게 하고, 재현성(seed)·구조 제어(response_format·stop·
+# top_p 등)를 registry 선언만으로 켤 수 있게 한다. vLLM·OpenAI 공통 top-level 필드.
+_OPENAI_SAMPLING_KEYS = frozenset({
+    "top_p", "top_k", "frequency_penalty", "presence_penalty",
+    "seed", "stop", "response_format", "min_p", "repetition_penalty",
+    "logprobs", "top_logprobs", "n",
+})
+
+
+def _sampling_extras(opts: dict[str, Any]) -> dict[str, Any]:
+    """남은 model_options(temperature·max_tokens pop 후)에서 화이트리스트 키만 추려
+    OpenAI-compat payload 에 머지할 dict 로 돌려준다. 미지원/오타 키는 조용히 버린다
+    (와이어 4xx 방지). grammar(guided_*) 는 별도 경로라 여기 포함하지 않는다."""
+    return {k: v for k, v in opts.items() if k in _OPENAI_SAMPLING_KEYS and v is not None}
 
 
 def _apply_grammar_to_openai_payload(
