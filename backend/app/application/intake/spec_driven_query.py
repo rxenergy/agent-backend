@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from app.application.agents.events import LazyReasoning, current_emitter
 from app.application.intake.reasoning_capture import extract_reasoning, stream_capture
@@ -22,8 +23,14 @@ _TRACER = get_tracer("intake")
 #
 # 프롬프트·스키마는 registry(spec_driven_query_prompts)에서 SpecDrivenQuerySource 주입.
 
-# 허용 collection boost 값 — corpus_map collections(nrc-all-v1 keyword 필드).
-_COLLECTIONS = frozenset({"10CFR", "RG", "SRP", "DSRS", "FR"})
+# 허용 collection 값 — corpus_map collections + nuscale_* 문서군(nrc-all-v1 keyword 필드).
+# boost(target) 와 filter(filters) 양쪽 모드가 이 집합으로 검증된다.
+_COLLECTIONS = frozenset({
+    "10CFR", "DSRS", "FR", "RG", "SRP",
+    "nuscale_Affidavit", "nuscale_Audit", "nuscale_DCA", "nuscale_etc", "nuscale_FSAR",
+    "nuscale_Inspection", "nuscale_Letter", "nuscale_Meeting", "nuscale_RAI",
+    "nuscale_SER", "nuscale_TechReport", "nuscale_Topical_Report",
+})
 
 # reference 토큰 → collection 유도(결정론, 대소문자 무시). GDC/Appendix 는 10 CFR 50 의
 # 일부이므로 10CFR, NUREG-0800 은 SRP 의 문서번호.
@@ -168,10 +175,18 @@ def _parse(text: str) -> tuple[FormulatedQuery, ...]:
             continue
         slot = str(q.get("slot_name") or "").strip() or "query"
         coll = q.get("collection")
+        mode = str(q.get("collection_mode") or "boost").strip().lower()
         target: dict[str, list[str]] = {}
+        filters: dict[str, Any] = {}
         if isinstance(coll, str) and coll.strip() in _COLLECTIONS:
-            target = {"collection": [coll.strip()]}
-        out.append(FormulatedQuery(slot_name=slot, query_text=qt, target=target))
+            scope = {"collection": [coll.strip()]}
+            # 모델이 filter 모드를 고른 경우만 hard-scope, 그 외(boost/누락)는 가산 boost.
+            if mode == "filter":
+                filters = scope
+            else:
+                target = scope
+        out.append(FormulatedQuery(slot_name=slot, query_text=qt,
+                                   target=target, filters=filters))
     return tuple(out)
 
 
@@ -211,6 +226,7 @@ def _ensure_references(
                 slot_name=first.slot_name,
                 query_text=f"{first.query_text} {ref}".strip(),
                 target=first.target,
+                filters=first.filters,
                 references=first.references,
             )
     # 각 쿼리에 실제 포함된 refs 기록(감사용).
@@ -219,7 +235,7 @@ def _ensure_references(
         present_refs = tuple(r for r in refs if r and r.lower() in q.query_text.lower())
         rebuilt.append(FormulatedQuery(
             slot_name=q.slot_name, query_text=q.query_text,
-            target=q.target, references=present_refs,
+            target=q.target, filters=q.filters, references=present_refs,
         ))
     return tuple(rebuilt)
 
@@ -228,17 +244,19 @@ def _attach_targets(
     queries: tuple[FormulatedQuery, ...]
 ) -> tuple[FormulatedQuery, ...]:
     """안전망 (2): query_text 의 reference 에서 collection boost 를 결정론적으로 유도해
-    모델이 비운 target 을 보정(boost-only, recall-safe). 모델이 이미 collection 을 줬으면
-    유지."""
+    모델이 비운 target 을 보정(boost-only, recall-safe). 유도는 *절대 filter 로 escalate
+    하지 않는다* — boost(target)만 쓴다. 모델이 collection 을 boost 든 filter 든 이미
+    줬으면(둘 중 하나에 'collection' 키가 있으면) 그대로 두고 유도하지 않는다."""
     out: list[FormulatedQuery] = []
     for q in queries:
         target = dict(q.target)
-        if "collection" not in target:
+        has_collection = "collection" in target or "collection" in q.filters
+        if not has_collection:
             coll = _derive_collection(q.query_text)
             if coll:
                 target = {"collection": [coll]}
         out.append(FormulatedQuery(
             slot_name=q.slot_name, query_text=q.query_text,
-            target=target, references=q.references,
+            target=target, filters=q.filters, references=q.references,
         ))
     return tuple(out)

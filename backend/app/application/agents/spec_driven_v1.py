@@ -308,7 +308,11 @@ class SpecDrivenRunner:
                     out = await self._tools.invoke(
                         _SEARCH_TOOL,
                         {"query_text": q.query_text, "top_k": per_query_k,
-                         "target": q.target, "filters": _NOISE_FILTER},
+                         "target": q.target,
+                         # 노이즈 제외(항상)에 쿼리별 collection hard-filter(모델이 filter
+                         # 모드를 고른 경우만 q.filters 가 채워짐)를 합친다. noise 키는
+                         # 스키마상 모델이 만들 수 없어 _NOISE_FILTER 가 shadow 되지 않는다.
+                         "filters": {**_NOISE_FILTER, **q.filters}},
                         ctx,
                     )
                     record(out)
@@ -359,7 +363,12 @@ class SpecDrivenRunner:
                         "truncated": truncated,
                         "queries": [
                             {"slot": q.slot_name, "query_text": q.query_text,
-                             "target": q.target} for q in queries
+                             "target": q.target, "filters": q.filters,
+                             # mode 는 collection 이 어느 채널에 실렸는지에서 파생한다
+                             # (별도 저장 없이 단일 진실원천 — 재현 핀이 자기서술적).
+                             "mode": "filter" if q.filters.get("collection")
+                             else ("boost" if q.target.get("collection") else "none")}
+                            for q in queries
                         ],
                     },
                     "retrieval": {

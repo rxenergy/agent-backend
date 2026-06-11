@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "spec_driven_query_formulation_v1",
-  "description": "spec_driven_v1 N2 Query Formulation output. queries = one search query per slot. query_text = BM25 lexical anchors (literal keywords + explicit_reference tokens verbatim). collection = boost-scope (additive only, optional).",
+  "description": "spec_driven_v1 N2 Query Formulation output. queries = one search query per slot. query_text = BM25 lexical anchors (literal keywords + explicit_reference tokens verbatim). collection = corpus collection (one of 17, or null); collection_mode = 'boost' (additive, recall-safe; default) or 'filter' (hard-restricts the search population to that collection — only when confident the answer lives only there).",
   "type": "object",
   "additionalProperties": false,
   "required": ["reasoning", "queries"],
@@ -19,7 +19,13 @@
           "query_text": {"type": "string"},
           "collection": {
             "type": ["string", "null"],
-            "enum": ["10CFR", "RG", "SRP", "DSRS", "FR", null]
+            "enum": ["10CFR", "DSRS", "FR", "RG", "SRP", "nuscale_Affidavit", "nuscale_Audit", "nuscale_DCA", "nuscale_etc", "nuscale_FSAR", "nuscale_Inspection", "nuscale_Letter", "nuscale_Meeting", "nuscale_RAI", "nuscale_SER", "nuscale_TechReport", "nuscale_Topical_Report", null]
+          },
+          "collection_mode": {
+            "type": "string",
+            "enum": ["boost", "filter"],
+            "default": "boost",
+            "description": "How to apply collection: 'boost' = additive in-scope boost, excludes nothing (recall-safe, default); 'filter' = hard-restrict the search population to that collection (narrows recall — only when confident the answer lives only there)."
           }
         }
       }

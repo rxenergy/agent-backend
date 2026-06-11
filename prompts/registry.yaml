@@ -228,8 +228,8 @@ spec_driven_answer_spec_prompts:
 spec_driven_query_prompts:
   spec_driven_query_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "2cbb132ebf58e60ebb570de63a6819de370d6e57ff19b90dbffc0ae5948e1a6c"}
-    output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "fff044084a154f092abccb881404c9f13968c9327d5ff0b66bcf9414ab8a80db"}
+    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "003804468e2dee7180bae36c0b52ac0675ff2fa351bec020ad509194bce96ebe"}
+    output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "6d01b09d554d9735fe53cc5affd32b0398f27dba65a8380234814968094872e5"}
     model_options: {temperature: 0.0, max_tokens: 700}
 
 spec_driven_generation_prompts:

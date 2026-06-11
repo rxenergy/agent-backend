@@ -26,19 +26,29 @@ The form that satisfies all three is a **compact English regulatory noun phrase 
 
 7. **query_text is a regulatory noun phrase**, resembling the corpus text — not a question and not a comma list. Prefer `10 CFR 50.46 ECCS acceptance criteria peak cladding temperature` over `what are the ECCS criteria?` or `ECCS, criteria, temperature`.
 
-8. **collection boost is optional and low-stakes.** It is a small additive boost (not a filter), and the system also derives it from your references — so do not over-invest. Set it only when a reference/slot clearly implies one of `10CFR` (statute) · `RG` (Regulatory Guide) · `SRP` (NUREG-0800) · `DSRS` (NuScale review standard) · `FR` (Federal Register). Otherwise leave it null — whole-corpus search is safe. NuScale applicant-design collections are not boostable, so leave NuScale design slots null.
+8. **Collection scope — choose a value *and* a mode (`boost` vs `filter`).** Each query may carry a `collection` (one of the 17 below, or null) and a `collection_mode` (`boost`, the default, or `filter`). The 17 collections by role:
+   - **Binding regulation (primary authority):** `10CFR` (US federal regulation — the legal requirement itself) · `FR` (Federal Register — rulemaking notices/amendments). Read these for "what does the regulation require".
+   - **Guidance / review standards:** `RG` (Regulatory Guide — one acceptable method to meet a requirement) · `SRP` (NUREG-0800 Standard Review Plan — NRC review procedures & acceptance criteria) · `DSRS` (NuScale Design-Specific Review Standard). Read these for "what method / review criteria apply".
+   - **NuScale applicant documents (the applicant's own claims):** `nuscale_FSAR` (Final Safety Analysis Report) · `nuscale_DCA` (Design Certification Application) · `nuscale_Topical_Report` · `nuscale_TechReport` · `nuscale_Affidavit` · `nuscale_etc`. Read these for "what did NuScale *state / design / claim*".
+   - **NRC review records about NuScale (NRC's judgments & process):** `nuscale_SER` (Safety Evaluation Report — NRC's finding) · `nuscale_RAI` (Request for Additional Information — NRC query + applicant response) · `nuscale_Audit` · `nuscale_Inspection` · `nuscale_Letter` · `nuscale_Meeting`. Read these for "how did the NRC *judge / review*".
+
+   **Mode `boost` (default, recall-safe):** a small additive in-scope boost that never excludes anything. Use it when a reference or slot *implies* a collection but the answer could still appear corpus-wide (e.g. a slot anchored on `RG 1.157` → boost `RG`). When unsure, prefer `boost`. The system also derives a boost from the explicit references you carried verbatim, so you need not set it for those.
+
+   **Mode `filter` (narrows recall — use sparingly):** hard-restricts the search population to that one collection. Use it **only when the question itself names a specific document or document family and the answer can live nowhere else** — e.g. "what did NuScale's **FSAR** say about X" → `filter` `nuscale_FSAR`; "the **NRC's SER finding** on Y" → `filter` `nuscale_SER`; "raised in the **RAI** exchange" → `filter` `nuscale_RAI`. A wrong filter silently drops the correct passage, so a partial or thematic match is not enough — filter only when the document family is explicit. The deterministic backstop never escalates to `filter`; only you can choose it.
+
+   **`null`:** no collection signal — leave both fields unset. Whole-corpus search is always safe.
 
 9. **Write reasoning first — say what you kept and what you dropped.** The **first output field is `reasoning`**: before building the queries, state in 1–2 sentences (your language is fine) which concept each slot maps to, which reference/collection anchors it, and **which generic terms you pruned**. Then assemble `queries` to match — forward thinking, not post-hoc justification, and not a reflexive copy of the examples below.
 
 ## Output
 
-Emit a single JSON only (no prose, no code fences). `reasoning` is the first field; each query has `slot_name`, `query_text`, and optional `collection`.
+Emit a single JSON only (no prose, no code fences). `reasoning` is the first field; each query has `slot_name`, `query_text`, and optional `collection` (one of the 17, or null) and `collection_mode` (`boost` | `filter`, default `boost`).
 
 Example A — RPV/pressurized-thermal-shock domain: explicit-reference (binding clause) slot + numeric-property slot, with pruning and a kept term of art:
 {"reasoning":"governing_clause 슬롯은 명시 참조 10 CFR 50.61 을 verbatim 앵커로 싣고 일반어 'requirements' 제거하되 'screening criteria'는 term-of-art 라 보존. screening_limit 슬롯은 정량 토큰만 남긴다. 둘 다 10CFR boost.","queries":[{"slot_name":"governing_clause","query_text":"10 CFR 50.61 pressurized thermal shock PTS screening criteria","collection":"10CFR"},{"slot_name":"screening_limit","query_text":"reactor pressure vessel beltline reference temperature RT_PTS nil-ductility","collection":"10CFR"}]}
 
-Example B — NuScale passive design slot (vocabulary preserved, no canonicalization, no collection):
-{"reasoning":"design_feature 슬롯은 NuScale 수동 잔열제거 어휘를 보존(능동 LWR pump/injection 으로 정규화 금지). collection 은 nuscale 설계가 boost 불가라 null.","queries":[{"slot_name":"design_feature","query_text":"NuScale decay heat removal DHRS passive natural circulation"}]}
+Example B — NuScale FSAR-specific slot: the question asks what the applicant's FSAR states, so hard-filter to that document family (vocabulary preserved, no canonicalization):
+{"reasoning":"design_feature 슬롯은 NuScale FSAR 가 무엇을 기술하는지 묻는다 — 답이 그 문서군에만 있으므로 collection_mode=filter 로 nuscale_FSAR 한정. 능동 LWR pump/injection 으로 정규화 금지.","queries":[{"slot_name":"design_feature","query_text":"NuScale decay heat removal DHRS passive natural circulation","collection":"nuscale_FSAR","collection_mode":"filter"}]}
 
 Example C — I&C guidance slot with abbreviation disambiguation:
 {"reasoning":"monitoring 슬롯은 RG 1.97 verbatim + 약어 PAM 을 post-accident monitoring 으로 의미 고정, 변별 토큰 'instrumentation' 유지. RG boost.","queries":[{"slot_name":"monitoring","query_text":"RG 1.97 PAM post-accident monitoring instrumentation variables","collection":"RG"}]}

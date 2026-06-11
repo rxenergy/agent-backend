@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 # spec_driven_v1 — 검색 *앞단* 두 모델 노드(Define Spec → Query Formulation)의 도메인 모델.
 # 설계: docs/plans/spec_driven_agent.design.v1.md.
@@ -74,10 +75,13 @@ class FormulatedQuery:
     """N2 Query Formulation Node 산출 — 슬롯 1개에 대한 구체 검색쿼리(per-slot, 설계 §3.2).
 
     `query_text` 는 BM25 lexical 앵커(슬롯 keywords 리터럴 + 관련 explicit_reference
-    토큰 verbatim). `target` 는 boost-scope(collection 가산만, hard filter 아님 —
-    recall-safe, 사용자 결정 #2). `references` 는 이 쿼리에 합류된 명시적 참조(감사용)."""
+    토큰 verbatim). `target` 는 boost-scope(collection 가산만 — recall-safe). `filters` 는
+    hard-scope(모델이 `collection_mode=filter` 를 골랐을 때 — 모집단을 좁힘). 한 쿼리는
+    실무상 둘 중 하나만 collection 을 싣는다(모델이 mode 를 택하므로). `references` 는 이
+    쿼리에 합류된 명시적 참조(감사용). dict-of-list 라 `dataclasses.asdict()` 재귀 호환."""
 
     slot_name: str
     query_text: str
-    target: dict[str, list[str]] = field(default_factory=dict)  # {"collection": [...]}
+    target: dict[str, list[str]] = field(default_factory=dict)  # boost {"collection": [...]}
+    filters: dict[str, Any] = field(default_factory=dict)  # hard-scope {"collection": [...]}
     references: tuple[str, ...] = ()

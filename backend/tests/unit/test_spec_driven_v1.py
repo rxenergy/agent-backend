@@ -21,6 +21,11 @@ from app.application.agents.spec_driven_v1 import (
     _select_with_slot_floor,
 )
 from app.application.context.pack import ContextBuilder
+from app.application.intake.spec_driven_query import (
+    _attach_targets,
+    _ensure_references,
+    _parse,
+)
 from app.application.events.recorder import EventRecorder
 from app.application.prompting.spec_driven_source import (
     SpecDrivenAnswerSpecSource,
@@ -33,7 +38,7 @@ from app.application.tool_runtime.executor import ToolExecutor
 from app.application.tool_runtime.registry import ToolRegistry
 from app.domain.agents import VariantSpec
 from app.domain.interaction import AgentRequest
-from app.domain.spec_driven import AnswerSpec, SpecSlot
+from app.domain.spec_driven import AnswerSpec, FormulatedQuery, SpecSlot
 from app.domain.tools import ToolResult
 from app.ports.llm import LLMResult, LLMTokenDelta, LLMUnavailableError
 
@@ -139,6 +144,19 @@ class _SpyRetriever(_EmptyRetriever):
         return await super().invoke(tool_input, context)
 
 
+class _RecordingRetriever(_EmptyRetriever):
+    """invoke 에 전달된 RetrieverSearchInput 들을 기록한다 — agent 가 per-query
+    collection filter 를 _NOISE_FILTER 와 merge 해 retriever 로 넘기는지 검증용
+    (local retriever 는 filter 동작은 무시하므로 *입력*을 본다)."""
+
+    def __init__(self) -> None:
+        self.inputs: list[Any] = []
+
+    async def invoke(self, tool_input, context) -> ToolResult:
+        self.inputs.append(tool_input)
+        return await super().invoke(tool_input, context)
+
+
 def _tool_registry_yaml(root: Path) -> Path:
     body = {"tools": {
         "retrieval.search": {"version": "v1", "adapter": "reranked",
@@ -235,6 +253,92 @@ async def test_explicit_reference_lands_in_query_verbatim() -> None:
         assert "10 CFR 50.46" in joined
         # collection boost 가 결정론적으로 유도된다(10 CFR → 10CFR).
         assert any(q["target"].get("collection") == ["10CFR"] for q in queries)
+
+
+# === collection boost vs filter 모드 선택(#2 확장) ================================
+
+# N2 가 filter 모드 + nuscale_FSAR 를 고른 쿼리(명시적 참조 없음 — safety net 비개입).
+_FILTER_QUERIES_JSON = json.dumps({
+    "queries": [
+        {"slot_name": "design_feature",
+         "query_text": "NuScale decay heat removal passive natural circulation",
+         "collection": "nuscale_FSAR", "collection_mode": "filter"},
+    ]
+})
+_SPEC_NO_REF_JSON = json.dumps({
+    "intent": "design_description",
+    "explicit_references": [],
+    "governing_normative_class": "applicant_claim",
+    "required_slots": [
+        {"name": "design_feature", "keywords": ["NuScale", "decay heat removal"],
+         "required": True},
+    ],
+    "answer_structure": "설계 기술",
+})
+
+
+@pytest.mark.asyncio
+async def test_filter_mode_reaches_retriever_merged_with_noise_filter() -> None:
+    # 모델이 collection_mode=filter 를 고르면 hard-scope 가 _NOISE_FILTER 와 merge 돼
+    # retriever 입력으로 흐르고, 재현 핀에 filters/mode 가 기록된다.
+    with tempfile.TemporaryDirectory() as tmp:
+        rec = _RecordingRetriever()
+        llm = _ScriptLLM(gen_texts=[
+            _TRIAGE_RETRIEVAL, _SPEC_NO_REF_JSON, _FILTER_QUERIES_JSON, _ANSWER])
+        runner = _build(Path(tmp), llm, retriever=rec)
+        resp = await runner.run(_req())
+        assert resp.refusal_reason is None
+        # retriever 가 받은 입력: noise floor + collection hard-filter.
+        assert rec.inputs, "retriever should have been invoked"
+        ri = rec.inputs[0]
+        assert ri.filters == {"noise": False, "collection": ["nuscale_FSAR"]}
+        assert ri.target == {}  # filter 모드라 boost 채널은 비어 있다.
+        # 재현 핀(원칙 5).
+        q = _event(tmp)["query_understanding"]["spec_driven"]["formulation"]["queries"][0]
+        assert q["filters"] == {"collection": ["nuscale_FSAR"]}
+        assert q["target"] == {}
+        assert q["mode"] == "filter"
+
+
+def test_parse_routes_filter_to_filters_boost_to_target() -> None:
+    # collection_mode=filter → filters; 누락/boost → target. 확장 enum(nuscale_*) 수용.
+    qs = _parse(json.dumps({"queries": [
+        {"slot_name": "a", "query_text": "x",
+         "collection": "nuscale_SER", "collection_mode": "filter"},
+        {"slot_name": "b", "query_text": "y", "collection": "nuscale_RAI"},  # mode 무 → boost
+        {"slot_name": "c", "query_text": "z",
+         "collection": "BOGUS", "collection_mode": "filter"},  # 미지 collection → drop
+    ]}))
+    by_slot = {q.slot_name: q for q in qs}
+    assert by_slot["a"].filters == {"collection": ["nuscale_SER"]}
+    assert by_slot["a"].target == {}
+    assert by_slot["b"].target == {"collection": ["nuscale_RAI"]}
+    assert by_slot["b"].filters == {}
+    assert by_slot["c"].filters == {} and by_slot["c"].target == {}
+
+
+def test_attach_targets_never_escalates_model_filter_to_boost() -> None:
+    # 모델이 filter 를 고른 쿼리는 query_text 에 ref 가 있어도 boost 를 유도하지 않고
+    # filter 를 보존한다(안전망은 boost 전용).
+    q = FormulatedQuery(slot_name="s", query_text="10 CFR 50.46 ECCS",
+                        filters={"collection": ["nuscale_FSAR"]})
+    (out,) = _attach_targets((q,))
+    assert out.target == {}  # boost 유도 안 됨(filter 가 이미 있음)
+    assert out.filters == {"collection": ["nuscale_FSAR"]}
+    # collection 없는 쿼리는 boost 만 유도(filter 아님).
+    q2 = FormulatedQuery(slot_name="s2", query_text="RG 1.97 monitoring")
+    (out2,) = _attach_targets((q2,))
+    assert out2.target == {"collection": ["RG"]}
+    assert out2.filters == {}
+
+
+def test_ensure_references_preserves_filters() -> None:
+    # safety net (1) 이 ref 를 합류시키며 rebuild 할 때 모델 filter 를 유실하지 않는다.
+    q = FormulatedQuery(slot_name="s", query_text="ECCS acceptance criteria",
+                        filters={"collection": ["nuscale_FSAR"]})
+    (out,) = _ensure_references((q,), ("10 CFR 50.46",))
+    assert "10 CFR 50.46" in out.query_text  # ref 합류
+    assert out.filters == {"collection": ["nuscale_FSAR"]}  # filter 보존
 
 
 @pytest.mark.asyncio
