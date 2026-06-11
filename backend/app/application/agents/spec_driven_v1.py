@@ -92,6 +92,7 @@ class SpecDrivenRunner:
         retriever_top_k: int = 3,
         max_queries: int = 6,
         max_context_chunks: int = 10,
+        min_token_count: int = 0,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
@@ -110,6 +111,10 @@ class SpecDrivenRunner:
         self._top_k = retriever_top_k
         self._max_queries = max_queries
         self._max_context_chunks = max_context_chunks
+        # 노이즈 floor(Layer 2) — 본문 토큰 < N chunk(목차·헤더·fragment) 제외.
+        # 0=비활성(기본). spec_driven 은 retrieval.scope 도구를 우회하므로 v3.1/react 와
+        # 달리 settings/corpus_map 의 floor 가 닿지 않는다 → runner 가 직접 search 에 싣는다.
+        self._min_token_count = min_token_count
         self._citation_contract: str | None = None
         if citation_contract_path:
             from pathlib import Path
@@ -309,6 +314,8 @@ class SpecDrivenRunner:
                         _SEARCH_TOOL,
                         {"query_text": q.query_text, "top_k": per_query_k,
                          "target": q.target,
+                         # 노이즈 floor(Layer 2) — 본문 토큰 < N chunk 제외. 0=비활성.
+                         "min_token_count": self._min_token_count,
                          # 노이즈 제외(항상)에 쿼리별 collection hard-filter(모델이 filter
                          # 모드를 고른 경우만 q.filters 가 채워짐)를 합친다. noise 키는
                          # 스키마상 모델이 만들 수 없어 _NOISE_FILTER 가 shadow 되지 않는다.
@@ -378,6 +385,7 @@ class SpecDrivenRunner:
                         "fetch_k": per_query_k,
                         "capped": chunks_capped,
                         "per_query_counts": per_query_counts,
+                        "min_token_count": self._min_token_count,
                         "filters": dict(_NOISE_FILTER),
                         "floored_slots": coverage["floored_slots"],
                         "covered_required_slots": coverage["covered_required"],
@@ -818,4 +826,5 @@ def _build_spec_driven(spec: VariantSpec, deps: AgentDeps) -> "SpecDrivenRunner"
         retriever_top_k=t.get("retriever_top_k", 3),
         max_queries=t.get("spec_driven_max_queries", 6),
         max_context_chunks=t.get("spec_driven_max_context_chunks", 10),
+        min_token_count=t.get("retriever_min_token_count", 0),
     )
