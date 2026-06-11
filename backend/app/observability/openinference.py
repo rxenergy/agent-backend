@@ -44,15 +44,11 @@ RETRIEVAL_DOCUMENTS = "retrieval.documents"  # prefix
 TOOL_NAME = "tool.name"
 TOOL_PARAMETERS = "tool.parameters"
 
-# Cap attribute size to keep spans well under collector limits (~32KB total).
-_MAX_VALUE_BYTES = 8192
-
-
-def _truncate(s: str, limit: int = _MAX_VALUE_BYTES) -> str:
-    b = s.encode("utf-8", errors="replace")
-    if len(b) <= limit:
-        return s
-    return b[:limit].decode("utf-8", errors="ignore") + "...[truncated]"
+# 프롬프트·검색 결과를 Phoenix 에서 *그대로* 확인할 수 있게 truncation 을 제거한다.
+# 이전엔 8KB cap 으로 잘렸으나, span 값을 잘라 디버깅이 어려웠다. OTel 콜렉터의
+# 속성 크기 한도(설정값)에 맡기고, 애플리케이션 단에서는 전체 텍스트를 싣는다.
+def _truncate(s: str, limit: int | None = None) -> str:
+    return s
 
 
 def _as_json(value: Any) -> str:
