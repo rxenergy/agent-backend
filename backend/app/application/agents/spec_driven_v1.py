@@ -378,89 +378,114 @@ class SpecDrivenRunner:
             # qu_pin(재현 핀)이 미배선/예외 경로에서도 follow_up 섹션을 균일하게 싣도록
             # try 밖에서 선초기화 — 어떤 skip 경로든 빈 리스트로 남는다.
             fq_list: list[dict[str, Any]] = []
-            try:
-                follow_up_res = await self._tools.invoke(
-                    "retrieval.follow_up",
-                    {
-                        "query_text": request.query_text,
-                        "chunks": [c.model_dump(mode="json") for c in chunks],
-                    },
-                    ctx,
-                )
-                record(follow_up_res)
+            # 2차 검색 대상 쿼리 수(target_source_ids 보유분) — phase span 속성용.
+            searchable_count = 0
+            # N3.5 phase span — N3 의 agent.retrieval 과 대칭. 이게 없으면 Phoenix 에서
+            # 참조 추출(retrieval.follow_up)·2차 search(retrieval.search) tool span 이
+            # phase 부모 없이 agent.run 바로 밑에 흩어져, follow-up 단계를 묶어 분석할 수
+            # 없다. CHAIN kind 로 추출→재검색 복합 단계를 표현하고, IO(질의·생성된 재검색
+            # 쿼리 요약)와 카운터(생성·검색대상·채택 청크)를 span 에 실어 단계별 귀인을
+            # 가능케 한다. self._tools.invoke 의 tool span 들은 이 with 컨텍스트 안에서
+            # 생성돼 자동으로 이 span 의 자식으로 nesting 된다(병렬 gather 포함 — task
+            # 생성 시점 컨텍스트가 캡처됨).
+            with _TRACER.start_as_current_span("agent.follow_up_search") as fs:
+                oi.set_kind(fs, oi.KIND_CHAIN)
+                oi.set_io(fs, input_value=request.query_text)
+                fs.set_attribute("follow_up.first_pass_chunks", len(chunks))
+                fs.set_attribute("follow_up.fetch_k", self._follow_up_fetch_k)
+                fs.set_attribute("follow_up.keep_k", self._follow_up_keep_k)
+                try:
+                    follow_up_res = await self._tools.invoke(
+                        "retrieval.follow_up",
+                        {
+                            "query_text": request.query_text,
+                            "chunks": [c.model_dump(mode="json") for c in chunks],
+                        },
+                        ctx,
+                    )
+                    record(follow_up_res)
 
-                if follow_up_res.status == "success" and follow_up_res.output:
-                    fq_list = follow_up_res.output.get("follow_up_queries", []) or []
-                    if fq_list:
-                        # reasoning 텍스트는 버퍼만 — 아래 2차 search 가 끝난 뒤 방출.
-                        fq_summary = "\n".join(
-                            f"- {fq['query_text']} → {fq.get('target_source_ids', [])}"
-                            for fq in fq_list
-                        )
+                    if follow_up_res.status == "success" and follow_up_res.output:
+                        fq_list = follow_up_res.output.get("follow_up_queries", []) or []
+                        if fq_list:
+                            # reasoning 텍스트는 버퍼만 — 아래 2차 search 가 끝난 뒤 방출.
+                            fq_summary = "\n".join(
+                                f"- {fq['query_text']} → {fq.get('target_source_ids', [])}"
+                                for fq in fq_list
+                            )
 
-                        # target_source_ids 가 있는 쿼리만 2차 검색 대상(없으면 필터 불가).
-                        searchable = [
-                            fq for fq in fq_list if fq.get("target_source_ids")
-                        ]
-                        # 2차 검색을 *병렬*로 실행한다(1차 추출 병렬화와 동일 취지). 각
-                        # retrieval.search invoke 는 재진입 안전(span/httpx/encoder stateless)
-                        # 이고, OpenSearch 어댑터가 torch 인코딩을 to_thread 로 풀어 동시
-                        # 검색이 실제로 겹친다. record / chunks_by_id / follow_up_added 변이는
-                        # race 방지를 위해 gather 완료 후 fq 원순서대로 *순차* 처리한다
-                        # (dedup 우선순위·결정성 보존 → 직렬판과 동일 결과).
-                        sub_results = await asyncio.gather(
-                            *(
-                                self._tools.invoke(
-                                    _SEARCH_TOOL,
-                                    {
-                                        "query_text": fq["query_text"],
-                                        "top_k": self._follow_up_fetch_k,
-                                        # 참조 문서 *내부* 로 모집단을 좁힌 hard-scope.
-                                        # 노이즈 floor·noise:false 도 1차와 동일하게 실어
-                                        # 목차·헤더·fragment 가 2차 결과를 오염시키지 않게
-                                        # 한다(필요·중요 내용만 — 사용자 요구).
-                                        "min_token_count": self._min_token_count,
-                                        "filters": {
-                                            **_NOISE_FILTER,
-                                            "source_id": fq["target_source_ids"],
+                            # target_source_ids 가 있는 쿼리만 2차 검색 대상(없으면 필터 불가).
+                            searchable = [
+                                fq for fq in fq_list if fq.get("target_source_ids")
+                            ]
+                            searchable_count = len(searchable)
+                            # 2차 검색을 *병렬*로 실행한다(1차 추출 병렬화와 동일 취지). 각
+                            # retrieval.search invoke 는 재진입 안전(span/httpx/encoder stateless)
+                            # 이고, OpenSearch 어댑터가 torch 인코딩을 to_thread 로 풀어 동시
+                            # 검색이 실제로 겹친다. record / chunks_by_id / follow_up_added 변이는
+                            # race 방지를 위해 gather 완료 후 fq 원순서대로 *순차* 처리한다
+                            # (dedup 우선순위·결정성 보존 → 직렬판과 동일 결과).
+                            sub_results = await asyncio.gather(
+                                *(
+                                    self._tools.invoke(
+                                        _SEARCH_TOOL,
+                                        {
+                                            "query_text": fq["query_text"],
+                                            "top_k": self._follow_up_fetch_k,
+                                            # 참조 문서 *내부* 로 모집단을 좁힌 hard-scope.
+                                            # 노이즈 floor·noise:false 도 1차와 동일하게 실어
+                                            # 목차·헤더·fragment 가 2차 결과를 오염시키지 않게
+                                            # 한다(필요·중요 내용만 — 사용자 요구).
+                                            "min_token_count": self._min_token_count,
+                                            "filters": {
+                                                **_NOISE_FILTER,
+                                                "source_id": fq["target_source_ids"],
+                                            },
                                         },
-                                    },
-                                    ctx,
+                                        ctx,
+                                    )
+                                    for fq in searchable
+                                ),
+                                return_exceptions=True,
+                            )
+                            for sub_res in sub_results:
+                                if isinstance(sub_res, BaseException):
+                                    # 개별 검색 실패는 graceful skip(형제 검색 비취소).
+                                    continue
+                                record(sub_res)
+                                found = _parse_chunks(
+                                    sub_res.output if sub_res.status == "success" else None
                                 )
-                                for fq in searchable
-                            ),
-                            return_exceptions=True,
-                        )
-                        for sub_res in sub_results:
-                            if isinstance(sub_res, BaseException):
-                                # 개별 검색 실패는 graceful skip(형제 검색 비취소).
-                                continue
-                            record(sub_res)
-                            found = _parse_chunks(
-                                sub_res.output if sub_res.status == "success" else None
-                            )
-                            # 관련성 게이트(사용자 요구 — "필요·중요 내용만"). 2차 검색
-                            # 점수는 follow-up 쿼리·대상 문서마다 척도가 달라 *전역* 절대
-                            # 임계값이 부적절하다. 대신 쿼리 *내부* 상대순위 상위
-                            # _follow_up_keep_k 개만 채택한다(검색이 score desc 로 반환).
-                            # 나머지(저관련 tail)는 컨텍스트에서 배제 → 참조 문서에서
-                            # 의도와 무관한 단락이 답변을 희석하지 않는다.
-                            for c in found[: self._follow_up_keep_k]:
-                                if c.chunk_id not in chunks_by_id:
-                                    chunks_by_id[c.chunk_id] = c
-                                    follow_up_added += 1
+                                # 관련성 게이트(사용자 요구 — "필요·중요 내용만"). 2차 검색
+                                # 점수는 follow-up 쿼리·대상 문서마다 척도가 달라 *전역* 절대
+                                # 임계값이 부적절하다. 대신 쿼리 *내부* 상대순위 상위
+                                # _follow_up_keep_k 개만 채택한다(검색이 score desc 로 반환).
+                                # 나머지(저관련 tail)는 컨텍스트에서 배제 → 참조 문서에서
+                                # 의도와 무관한 단락이 답변을 희석하지 않는다.
+                                for c in found[: self._follow_up_keep_k]:
+                                    if c.chunk_id not in chunks_by_id:
+                                        chunks_by_id[c.chunk_id] = c
+                                        follow_up_added += 1
 
-                        if follow_up_added > 0:
-                            # 1차+2차 통합 재정렬(score desc). 최종 chunk 선택은 try
-                            # 밖에서 _assemble_final_chunks 가 일괄 수행한다(예외/미배선
-                            # 경로에서도 동일 조립이 돌도록 — 토큰 캡은 항상 적용).
-                            merged = sorted(
-                                chunks_by_id.values(),
-                                key=lambda c: c.score,
-                                reverse=True,
-                            )
-            except Exception:  # noqa: BLE001 — ToolUnknown 등 graceful skip
-                pass
+                            if follow_up_added > 0:
+                                # 1차+2차 통합 재정렬(score desc). 최종 chunk 선택은 try
+                                # 밖에서 _assemble_final_chunks 가 일괄 수행한다(예외/미배선
+                                # 경로에서도 동일 조립이 돌도록 — 토큰 캡은 항상 적용).
+                                merged = sorted(
+                                    chunks_by_id.values(),
+                                    key=lambda c: c.score,
+                                    reverse=True,
+                                )
+                except Exception:  # noqa: BLE001 — ToolUnknown 등 graceful skip
+                    pass
+                # phase 결과를 span 에 실어 Phoenix 에서 단계별 귀인 — 추출된 재검색 쿼리
+                # 수 / 2차 검색 실행 수 / 컨텍스트에 새로 채택된 청크 수. output 은 생성된
+                # 재검색 쿼리 요약(없으면 미설정).
+                fs.set_attribute("follow_up.num_queries", len(fq_list))
+                fs.set_attribute("follow_up.searchable_queries", searchable_count)
+                fs.set_attribute("follow_up.added_chunks", follow_up_added)
+                if fq_summary:
+                    oi.set_io(fs, output_value=fq_summary)
             await emit_step("follow_up_search", "ok", added_chunks=follow_up_added)
 
             # === 최종 조립 — 1차 전량 보존 + 2차 score 순 채움(토큰 예산 캡) =======
