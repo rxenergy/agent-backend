@@ -17,6 +17,7 @@ infra/env/*.secret.env
 .DS_Store
 # Local on-prem model weights — never commit these
 models/
+data/ref/
 
 # Python
 __pycache__/

@@ -41,6 +41,8 @@ services:
       # 호스트의 ./models 를 read-only 로 마운트. vLLM 컨테이너와 동일 경로지만,
       # agent-api 에는 임베더(e5, fermi)용으로 별도 노출한다.
       - ../../models:/app/models:ro
+      # follow-up 참조 추출용 메타데이터 + 캐시.
+      - ../../data/ref:/app/data/ref
     depends_on:
       otel-collector:
         condition: service_started
@@ -94,7 +96,8 @@ services:
       - --host=0.0.0.0
       - --port=8000
       - --served-model-name=${VLLM_SERVED_MODEL_NAME:-gemma-4-26b-a4b-it}
-      - --max-model-len=${VLLM_MAX_MODEL_LEN:-8192}
+      - --max-model-len=${VLLM_MAX_MODEL_LEN:-16384}
+      - --kv-cache-dtype=${VLLM_KV_CACHE_DTYPE:-fp8}
       - --max-num-batched-tokens=${VLLM_MAX_NUM_BATCHED_TOKENS:-4096}
       - --gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.70}
       - --load-format=safetensors

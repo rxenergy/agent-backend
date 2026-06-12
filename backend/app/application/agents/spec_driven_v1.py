@@ -31,7 +31,7 @@ from app.application.intake.spec_driven_triage import SpecDrivenTriage
 from app.domain.agents import VariantSpec
 from app.domain.errors import RefusalReason, VerificationStatus
 from app.domain.interaction import AgentRequest, AgentResponse, Citation, ToolCallRecord
-from app.domain.retrieval import RetrievedChunk
+from app.domain.retrieval import RetrievedChunk, RetrieverSearchOutput
 from app.domain.spec_driven import AnswerSpec, FormulatedQuery
 from app.observability import openinference as oi
 from app.observability.metrics import get_metrics
@@ -92,6 +92,7 @@ class SpecDrivenRunner:
         retriever_top_k: int = 3,
         max_queries: int = 6,
         max_context_chunks: int = 8,
+        context_token_budget: int = 0,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
@@ -110,6 +111,9 @@ class SpecDrivenRunner:
         self._top_k = retriever_top_k
         self._max_queries = max_queries
         self._max_context_chunks = max_context_chunks
+        # N4 생성 컨텍스트 토큰 예산(0=무제한). 1차 검색 전량 보존 + 2차 검색 score
+        # 순 채움을 이 예산까지 — vLLM 윈도우 안전판(_assemble_final_chunks).
+        self._context_token_budget = context_token_budget
         self._citation_contract: str | None = None
         if citation_contract_path:
             from pathlib import Path
@@ -319,18 +323,130 @@ class SpecDrivenRunner:
                 oi.set_kind(rs, oi.KIND_RETRIEVER)
             merged = sorted(chunks_by_id.values(), key=lambda c: c.score, reverse=True)
             # per-slot floor(설계 §3.2) — required 슬롯마다 최고 score chunk 1개를 먼저
-            # 확보한 뒤 남은 예산을 score 순으로 채운다. 전역 top-K cap 이 required 근거를
-            # 통째로 떨어뜨리던 문제 방지(no silent cap — coverage 를 핀에 기록).
+            # 확보한 뒤 남은 예산을 score 순으로 채운다. 1차 검색 결과는 **전량 보존**
+            # 한다(사용자 결정): budget=len(merged) → drop 없이 floor 정렬만 적용. 최종
+            # 토큰 캡은 2차 병합 후 _assemble_final_chunks 가 일괄 적용한다(no silent cap).
             required_names = tuple(s.name for s in spec.required_slots if s.required)
             chunks, coverage = _select_with_slot_floor(
-                merged, slots_by_chunk, required_names, self._max_context_chunks
+                merged, slots_by_chunk, required_names, len(merged)
             )
-            chunks_capped = len(merged) > len(chunks)
+            # 1차 검색 청크 id — 최종 조립에서 always-included(전량 반영)의 입력.
+            first_pass_ids = {c.chunk_id for c in chunks}
             evidence_gap = not chunks
             await emit_step("retrieval", "ok", num_chunks=len(chunks),
-                            merged=len(merged), capped=chunks_capped,
+                            merged=len(merged),
                             uncovered_required=len(coverage["uncovered_required"]),
                             evidence_gap=evidence_gap)
+
+            # N3.5 — follow-up 2차 검색 (외부 참조 문서 내 재검색).
+            # 1차 검색 청크에서 외부 참조를 추출하고, 사용자 의도를 반영한 재검색 쿼리로
+            # 참조 문서 내부를 다시 검색한다. 미배선(ToolUnknown)/실패 시 graceful skip.
+            #
+            # reasoning 방출 순서가 중요하다: 재검색 도구 + 2차 search 루프를 *먼저* 다
+            # 돌려 요약(fq_summary)만 버퍼해 두고, `**참조 문서 재검색**` reasoning 은
+            # 루프가 끝난 *뒤* 단 한 번 방출한다. 그래야 2차 search 의 tool 프레임이
+            # reasoning_content 와 본문(N4 generation) 사이에 끼지 않아 OpenWebUI Thought
+            # 블록이 조기 종결되지 않는다(#24295). 헤더 라벨은 N0 triage(질의 분류)와
+            # 동형의 직접 emit_reasoning — 결정론 요약이라 LazyReasoning 불필요.
+            await emit_step("follow_up_search", "started")
+            follow_up_added = 0
+            fq_summary: str | None = None
+            # qu_pin(재현 핀)이 미배선/예외 경로에서도 follow_up 섹션을 균일하게 싣도록
+            # try 밖에서 선초기화 — 어떤 skip 경로든 빈 리스트로 남는다.
+            fq_list: list[dict[str, Any]] = []
+            try:
+                follow_up_res = await self._tools.invoke(
+                    "retrieval.follow_up",
+                    {
+                        "query_text": request.query_text,
+                        "chunks": [c.model_dump(mode="json") for c in chunks],
+                    },
+                    ctx,
+                )
+                record(follow_up_res)
+
+                if follow_up_res.status == "success" and follow_up_res.output:
+                    fq_list = follow_up_res.output.get("follow_up_queries", []) or []
+                    if fq_list:
+                        # reasoning 텍스트는 버퍼만 — 아래 2차 search 가 끝난 뒤 방출.
+                        fq_summary = "\n".join(
+                            f"- {fq['query_text']} → {fq.get('target_source_ids', [])}"
+                            for fq in fq_list
+                        )
+
+                        # target_source_ids 가 있는 쿼리만 2차 검색 대상(없으면 필터 불가).
+                        searchable = [
+                            fq for fq in fq_list if fq.get("target_source_ids")
+                        ]
+                        # 2차 검색을 *병렬*로 실행한다(1차 추출 병렬화와 동일 취지). 각
+                        # retrieval.search invoke 는 재진입 안전(span/httpx/encoder stateless)
+                        # 이고, OpenSearch 어댑터가 torch 인코딩을 to_thread 로 풀어 동시
+                        # 검색이 실제로 겹친다. record / chunks_by_id / follow_up_added 변이는
+                        # race 방지를 위해 gather 완료 후 fq 원순서대로 *순차* 처리한다
+                        # (dedup 우선순위·결정성 보존 → 직렬판과 동일 결과).
+                        sub_results = await asyncio.gather(
+                            *(
+                                self._tools.invoke(
+                                    _SEARCH_TOOL,
+                                    {
+                                        "query_text": fq["query_text"],
+                                        "top_k": 5,
+                                        "filters": {"source_id": fq["target_source_ids"]},
+                                    },
+                                    ctx,
+                                )
+                                for fq in searchable
+                            ),
+                            return_exceptions=True,
+                        )
+                        for sub_res in sub_results:
+                            if isinstance(sub_res, BaseException):
+                                # 개별 검색 실패는 graceful skip(형제 검색 비취소).
+                                continue
+                            record(sub_res)
+                            found = _parse_chunks(
+                                sub_res.output if sub_res.status == "success" else None
+                            )
+                            for c in found:
+                                if c.chunk_id not in chunks_by_id:
+                                    chunks_by_id[c.chunk_id] = c
+                                    follow_up_added += 1
+
+                        if follow_up_added > 0:
+                            # 1차+2차 통합 재정렬(score desc). 최종 chunk 선택은 try
+                            # 밖에서 _assemble_final_chunks 가 일괄 수행한다(예외/미배선
+                            # 경로에서도 동일 조립이 돌도록 — 토큰 캡은 항상 적용).
+                            merged = sorted(
+                                chunks_by_id.values(),
+                                key=lambda c: c.score,
+                                reverse=True,
+                            )
+            except Exception:  # noqa: BLE001 — ToolUnknown 등 graceful skip
+                pass
+            await emit_step("follow_up_search", "ok", added_chunks=follow_up_added)
+
+            # === 최종 조립 — 1차 전량 보존 + 2차 score 순 채움(토큰 예산 캡) =======
+            # follow_up 성공/실패/미배선 무관하게 항상 실행한다. budget=0 이면 캡 없이
+            # (1차+2차 전량), >0 이면 추정 토큰 합이 예산을 넘는 만큼 2차 tail(낮은
+            # score)부터 drop. 1차 청크는 1차만으로 예산을 초과할 때만 최후로 drop.
+            chunks, budget_log, total_tokens_est, first_pass_dropped = (
+                _assemble_final_chunks(
+                    first_pass_ids, merged, self._context_token_budget
+                )
+            )
+            evidence_gap = not chunks
+            if budget_log:
+                await emit_step("context_budget", "ok",
+                                budget=self._context_token_budget,
+                                total_tokens_est=total_tokens_est,
+                                dropped=len(budget_log),
+                                first_pass_dropped=first_pass_dropped)
+
+            # 루프(tool 프레임)가 모두 끝난 *뒤* reasoning 을 단 한 번 방출 → 다음에 오는
+            # 것은 context_build(step, 사이드채널) · generation 본문 토큰뿐이라 Thought
+            # 블록과 본문이 연속된다(정상 렌더되는 `**질의 분류**` 패턴과 동일).
+            if fq_summary:
+                await emit_reasoning(f"\n**참조 문서 재검색**\n{fq_summary}\n")
 
             # 재현 핀(원칙 5) — triage→spec→query→retrieval 경로를 query_understanding 백에.
             qu_pin: dict[str, Any] = {
@@ -359,12 +475,37 @@ class SpecDrivenRunner:
                     "retrieval": {
                         "num_chunks": len(chunks),
                         "merged": len(merged),
-                        "capped": chunks_capped,
+                        # 1차 검색 청크 수 — 최종 컨텍스트에 전량 반영됨(예산 안전판이
+                        # 발동해 first_pass_dropped=True 가 아닌 한). num_chunks 와 대조.
+                        "first_pass_kept": len(first_pass_ids),
                         "per_query_counts": per_query_counts,
                         "filters": dict(_NOISE_FILTER),
                         "floored_slots": coverage["floored_slots"],
                         "covered_required_slots": coverage["covered_required"],
                         "uncovered_required_slots": coverage["uncovered_required"],
+                    },
+                    "follow_up": {
+                        # num_queries==0 ⇒ 2차 검색 스킵(미배선/실패) 또는 후속쿼리 없음.
+                        # 키 자체는 항상 존재(스키마 균일) — 값으로 구별한다.
+                        "num_queries": len(fq_list),
+                        "added_chunks": follow_up_added,
+                        "queries": [
+                            {
+                                "query_text": fq.get("query_text"),
+                                "target_source_ids": fq.get("target_source_ids", []),
+                                "intent": fq.get("intent"),
+                            }
+                            for fq in fq_list
+                        ],
+                    },
+                    # 토큰 예산 거버너 결과(원칙 5/6 — silent cap 금지). budget=0 이면
+                    # drop 없음. first_pass_dropped=True 는 1차 근거가 윈도우 안전판에
+                    # 밀린 비정상 신호(감사 가시).
+                    "context_budget": {
+                        "budget": self._context_token_budget,
+                        "total_tokens_est": total_tokens_est,
+                        "dropped_chunk_ids": budget_log,
+                        "first_pass_dropped": first_pass_dropped,
                     },
                     "evidence_gap": evidence_gap,
                 }
@@ -574,8 +715,8 @@ class SpecDrivenRunner:
         parts = [self._generation_source.prompt_body.strip()]
         if self._citation_contract:
             parts.append("# CITATION CONTRACT\n" + self._citation_contract.strip())
-        parts.append("# CONTEXT\n" + context_block)
         parts.append("# ANSWER SPEC\n" + _render_spec_block(spec))
+        parts.append("# CONTEXT\n" + context_block)
         if evidence_gap:
             # 0-chunk hard-forbid: 사전 지식 답변 금지(CLAUDE.md #6, advisor #1).
             parts.append(
@@ -749,6 +890,61 @@ def _select_with_slot_floor(
     return chunks, coverage
 
 
+# snippets 모드 한정 char→token 휴리스틱(한/영 혼합). vLLM 윈도우 안전 쪽으로
+# 기울도록 과대추정 편향(작은 divisor). token_count(전체 청크)는 snippet 만 싣는
+# 생성 프롬프트 기여분을 과대계상하므로 쓰지 않고 snippet 길이로 추정한다.
+_CHARS_PER_TOKEN = 3
+_CHUNK_HEADER_OVERHEAD = 12  # 인용 헤더 라인([cite-N] doc#chunk (p=..)) 토큰 근사.
+
+
+def _estimate_chunk_tokens(chunk: RetrievedChunk) -> int:
+    body = chunk.snippet or chunk.text or ""
+    return max(1, len(body) // _CHARS_PER_TOKEN) + _CHUNK_HEADER_OVERHEAD
+
+
+def _assemble_final_chunks(
+    first_pass_ids: set[str],
+    merged: list[RetrievedChunk],
+    token_budget: int,
+) -> tuple[list[RetrievedChunk], list[str], int, bool]:
+    """최종 N4 컨텍스트 조립(설계: 1차 전량 + 2차 score 순, 토큰 예산 캡).
+
+    `merged` 는 1차+2차 통합 score desc. `first_pass_ids` 는 1차 검색 청크.
+
+    Phase A — 1차 청크 전량 포함(merged 의 score desc 순서 유지).
+    Phase B — 2차 청크(id ∉ first_pass_ids)를 score desc 로 append.
+    Phase C — token_budget>0 이면 Σ추정토큰이 예산 이하가 되도록 **2차 tail(낮은
+      score)부터** drop. 2차를 다 버려도 초과하면 1차 tail 을 drop 하고
+      first_pass_dropped=True(윈도우 안전판 — 비정상 신호).
+
+    반환: (chunks[score desc], budget_log, total_tokens_est, first_pass_dropped).
+    budget_log 는 drop 된 chunk_id 리스트(silent cap 금지 — 원칙 6).
+    """
+    first = [c for c in merged if c.chunk_id in first_pass_ids]
+    second = [c for c in merged if c.chunk_id not in first_pass_ids]
+    chunks = first + second
+    budget_log: list[str] = []
+    first_pass_dropped = False
+
+    total = sum(_estimate_chunk_tokens(c) for c in chunks)
+    if token_budget > 0 and total > token_budget:
+        # 2차 tail 부터 drop(가장 낮은 score = 리스트 끝).
+        while total > token_budget and second:
+            dropped = second.pop()
+            chunks.remove(dropped)
+            total -= _estimate_chunk_tokens(dropped)
+            budget_log.append(dropped.chunk_id)
+        # 2차를 다 버려도 초과 → 1차 tail drop(최후 안전판).
+        while total > token_budget and len(first) > 1:
+            dropped = first.pop()
+            chunks.remove(dropped)
+            total -= _estimate_chunk_tokens(dropped)
+            budget_log.append(dropped.chunk_id)
+            first_pass_dropped = True
+
+    return chunks, budget_log, total, first_pass_dropped
+
+
 def _to_citations(candidates) -> tuple[Citation, ...]:
     return tuple(
         Citation(
@@ -787,4 +983,5 @@ def _build_spec_driven(spec: VariantSpec, deps: AgentDeps) -> "SpecDrivenRunner"
         retriever_top_k=t.get("retriever_top_k", 3),
         max_queries=t.get("spec_driven_max_queries", 6),
         max_context_chunks=t.get("spec_driven_max_context_chunks", 8),
+        context_token_budget=t.get("spec_driven_context_token_budget", 0),
     )

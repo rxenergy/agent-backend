@@ -141,6 +141,20 @@ class LLMPort(Protocol):
         grammar: GrammarSpec | None = None,
     ) -> AsyncIterator[LLMTokenDelta]: ...
 
+    # 신규 — non-streaming, 도구 없는 멀티메시지 생성 1회. `generate` 는 단일 user
+    # 문자열만 받아 system role 을 못 싣고, `generate_with_tools` 는 `tools` 가 필수다.
+    # 그 사이를 메우는 경로 — system+user(+이력) 메시지에 structured output(grammar)만
+    # 거는 호출자(예: 참조 추출 structured JSON)가 쓴다. tools 가 필요 없으므로
+    # `generate_with_tools` 와 구분된다. 어댑터는 messages→wire 변환 + grammar 적용만
+    # 책임진다(원칙 #4: domain/ports 는 외부 SDK 미import).
+    async def generate_messages(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model_options: dict[str, Any] | None = None,
+        grammar: GrammarSpec | None = None,
+    ) -> LLMResult: ...
+
     # 신규 — non-streaming 도구 호출 1턴. 기존 prompt-only 호출자(분류기·생성)는
     # 불변(원칙 #3). 멀티턴 agentic 루프는 어댑터가 아니라 Finder(application)가
     # 소유한다 — 어댑터는 "messages+tools → (text, tool_calls, stop_reason)" 1회만

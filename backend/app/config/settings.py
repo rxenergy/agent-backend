@@ -106,6 +106,15 @@ class Settings(BaseSettings):
     # 축소(false refusal)할 위험이 있어, 운영자가 프로파일별로 확인 후 켠다.
     # 0 이면 거버너(drop/demote/재배치) 전체 비활성 → 기존 동작과 byte-identical.
     context_token_budget: int = 0
+    # spec_driven_v1 튜너블 — 명시 필드여야 env override 가 동작한다. model_config 의
+    # extra="ignore" 때문에 getattr(settings, ...) 로만 읽으면 미선언 env 가 조용히
+    # 무시된다(SPEC_DRIVEN_* 가 먹지 않던 버그). profiles.py 는 이 필드를 직접 읽는다.
+    spec_driven_max_queries: int = 6            # N2 per-slot 멀티쿼리 상한.
+    spec_driven_max_context_chunks: int = 8     # N3 1차 floor 정렬 budget(더 이상 최종 cap 아님).
+    # N4 생성 컨텍스트 Σ(추정 토큰) 캡. 0=무제한(기존 동작). onprem 은 9000 으로
+    # vLLM 16384 윈도우 안전 — 1차 검색 전량 보존 + 2차 검색을 score 순으로 이 예산
+    # 한도까지 채운다(spec_driven_v1._assemble_final_chunks).
+    spec_driven_context_token_budget: int = 0
     opensearch_endpoint: str = "http://opensearch:9200"
     opensearch_index: str = "nrc-all-v1"
     # 적재 데이터가 따르는 인덱스 스키마 버전의 *선언적* 단일 출처.

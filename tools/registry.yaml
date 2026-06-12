@@ -25,6 +25,19 @@ tools:
     retry: 0
     required: false
 
+  # retrieval.follow_up — 1차 검색 청크에서 외부 참조 추출 + 재검색 쿼리 생성(vLLM).
+  # required:false — 실패/미배선 시 1차 검색 결과만으로 답변 생성(graceful degrade).
+  # timeout: 추출은 청크별 vLLM 호출을 *병렬*(asyncio.to_thread+gather)로 돌리고
+  # vLLM max-num-seqs=4 가 동시성 캡 → ceil(N/4)×~9s. 100s 여유 예산.
+  # retry:0 — 타임아웃은 결정론적/systemic 이라 재시도가 예산 내 복구 못 하고 지연만
+  # 2배(required:false 라 어차피 graceful skip). 비핵심 노드를 ≤100s 로 묶는다.
+  retrieval.follow_up:
+    version: v1
+    adapter: vllm_ref
+    timeout_ms: 100000
+    retry: 0
+    required: false
+
   document.resolve_citation:
     version: v1
     adapter: env:RETRIEVER_BACKEND   # opensearch | local — wired in profiles.py

@@ -136,6 +136,44 @@ class HttpLLM(LLMPort):
         except (httpx.HTTPError, RetryError, _Retry5xx) as exc:
             raise LLMUnavailableError(str(exc)) from exc
 
+    async def generate_messages(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model_options: dict[str, Any] | None = None,
+        grammar: GrammarSpec | None = None,
+    ) -> LLMResult:
+        """Non-streaming, 도구 없는 멀티메시지 생성 1회(structured output 지원).
+        system+user(+이력) 메시지에 guided decoding(grammar)만 거는 호출자(참조
+        추출 등)를 위한 경로다. 메시지 직렬화는 `generate_with_tools` 와 동일한
+        `_openai_message` 를, grammar 적용은 `generate`/`generate_stream` 와 동일한
+        `_apply_grammar_to_openai_payload` 를 재사용한다(원칙 #4)."""
+        opts = dict(model_options or {})
+        max_tokens = int(opts.pop("max_tokens", 1024))
+        temperature = float(opts.pop("temperature", 0.0))
+
+        try:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(self._max_attempts),
+                wait=wait_exponential(multiplier=0.5, min=0.5, max=4.0),
+                retry=retry_if_exception_type(
+                    (httpx.TransportError, httpx.RemoteProtocolError, _Retry5xx)
+                ),
+                reraise=True,
+            ):
+                with attempt:
+                    if self._provider == "openai_compat":
+                        return await self._call_openai_compat_messages(
+                            messages, max_tokens, temperature, grammar
+                        )
+                    return await self._call_anthropic_messages(
+                        messages, max_tokens, temperature
+                    )
+        except (httpx.HTTPError, RetryError, _Retry5xx) as exc:
+            raise LLMUnavailableError(str(exc)) from exc
+
+        raise LLMUnavailableError("HttpLLM: messages retry loop exited without result")
+
     async def generate_with_tools(
         self,
         messages: list[ChatMessage],
@@ -310,13 +348,22 @@ class HttpLLM(LLMPort):
         self, prompt: str, max_tokens: int, temperature: float,
         grammar: GrammarSpec | None = None,
     ) -> LLMResult:
+        return await self._call_openai_compat_messages(
+            [ChatMessage(role="user", content=prompt)],
+            max_tokens, temperature, grammar,
+        )
+
+    async def _call_openai_compat_messages(
+        self, messages: list[ChatMessage], max_tokens: int, temperature: float,
+        grammar: GrammarSpec | None = None,
+    ) -> LLMResult:
         url = f"{self._endpoint}/chat/completions"
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         payload: dict[str, Any] = {
             "model": self._model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [_openai_message(m) for m in messages],
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
@@ -333,6 +380,52 @@ class HttpLLM(LLMPort):
             token_usage={
                 "prompt_tokens": int(usage.get("prompt_tokens", 0)),
                 "completion_tokens": int(usage.get("completion_tokens", 0)),
+            },
+            model_id=str(data.get("model") or self._model),
+        )
+
+    async def _call_anthropic_messages(
+        self, messages: list[ChatMessage], max_tokens: int, temperature: float,
+    ) -> LLMResult:
+        """도구 없는 멀티메시지 경로의 Anthropic 변형. system 은 top-level 필드로
+        승격한다(`_call_anthropic_tools` 와 동형). grammar(guided decoding)는
+        Anthropic 미지원이라 무시된다 — 시그니처상 받지 않는다."""
+        url = f"{self._endpoint}/messages"
+        headers = {
+            "Content-Type": "application/json",
+            "anthropic-version": self._anthropic_version,
+        }
+        if self._api_key:
+            headers["x-api-key"] = self._api_key
+        system_text = "\n\n".join(
+            m.content for m in messages if m.role == "system" and m.content
+        )
+        wire_messages = [
+            _anthropic_message(m) for m in messages if m.role != "system"
+        ]
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "messages": wire_messages,
+        }
+        if system_text:
+            payload["system"] = system_text
+        if not _rejects_sampling_params(self._model):
+            payload["temperature"] = temperature
+        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+        _raise_for_status(resp)
+        data = resp.json()
+        text_parts: list[str] = []
+        for block in data.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text_parts.append(block.get("text", ""))
+        usage = data.get("usage") or {}
+        return LLMResult(
+            text="".join(text_parts),
+            token_usage={
+                "prompt_tokens": int(usage.get("input_tokens", 0)),
+                "completion_tokens": int(usage.get("output_tokens", 0)),
             },
             model_id=str(data.get("model") or self._model),
         )

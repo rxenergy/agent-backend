@@ -47,7 +47,7 @@ from app.domain.interaction import (
     ToolCallRecord,
 )
 from app.domain.memory import MemoryRef, MemoryReviewStatus, StalenessStatus
-from app.domain.retrieval import HopEdge
+from app.domain.retrieval import HopEdge, RetrieverSearchOutput
 from app.observability import openinference as oi
 from app.observability.metrics import get_metrics
 from app.observability.otel import get_tracer
@@ -499,6 +499,58 @@ class AgenticFinderRunner:
             # 확정 시 body 교체(Document Mapper).
             hop_edges: list[HopEdge] = self._multi_hop_stub(chunks)
             await emit_step("multi_hop_sequence", "ok", hops=len(hop_edges))
+
+            # N4.5 — follow-up 2차 검색 (외부 참조 문서 내 재검색).
+            # 1차 검색 청크에서 외부 참조를 추출하고, 사용자 의도를 반영한 재검색 쿼리로
+            # 참조 문서 내부를 다시 검색한다. 미배선(ToolUnknown)/실패 시 graceful skip.
+            await emit_step("follow_up_search", "started")
+            original_chunk_count = len(chunks)
+            try:
+                follow_up_res = await self._tools.invoke(
+                    "retrieval.follow_up",
+                    {
+                        "query_text": query_en,
+                        "chunks": [
+                            c.model_dump(mode="json") if hasattr(c, "model_dump") else c
+                            for c in chunks
+                        ],
+                    },
+                    ctx,
+                )
+                record(follow_up_res)
+
+                if follow_up_res.status == "success" and follow_up_res.output:
+                    existing_ids = {
+                        (c.chunk_id if hasattr(c, "chunk_id") else c.get("chunk_id"))
+                        for c in chunks
+                    }
+                    for fq in follow_up_res.output.get("follow_up_queries", []):
+                        target_sids = fq.get("target_source_ids", [])
+                        if not target_sids:
+                            continue
+                        sub_res = await self._tools.invoke(
+                            "retriever.search",
+                            {
+                                "query_text": fq["query_text"],
+                                "top_k": 5,
+                                "filters": {"source_id": target_sids},
+                                "strategy": "hybrid",
+                            },
+                            ctx,
+                        )
+                        record(sub_res)
+                        if sub_res.status == "success" and sub_res.output:
+                            out = RetrieverSearchOutput.model_validate(sub_res.output)
+                            for c in out.chunks:
+                                if c.chunk_id not in existing_ids:
+                                    existing_ids.add(c.chunk_id)
+                                    chunks.append(c)
+            except Exception:  # noqa: BLE001 — ToolUnknown 등 → graceful skip.
+                pass
+            await emit_step(
+                "follow_up_search", "ok",
+                added_chunks=len(chunks) - original_chunk_count,
+            )
 
             # === Phase 3 Generation =======================================
             # N5 pre-step — session_load + approved_search + 주입 결정(재사용).

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -111,7 +112,14 @@ class OpenSearchRetrieverTool:
         if isinstance(tool_input, dict):
             tool_input = RetrieverSearchInput.model_validate(tool_input)
 
-        hq = build_hybrid_query(
+        # build_hybrid_query 는 동기 함수이며 내부에서 E5(dense)·Fermi(sparse) torch
+        # forward 를 동기로 실행한다. 이벤트 루프 스레드에서 직접 호출하면 인코딩 동안
+        # 루프가 블록되고, gather 된 동시 검색이 인코드 시점에 직렬화된다. to_thread 로
+        # 단 한 번 오프로드 — torch 가 C 연산 중 GIL 을 풀어 동시 검색의 인코딩이 풀스레드
+        # 에서 실제로 겹친다. build_hybrid_query 는 순수 함수이고 인코더는 inference_mode
+        # read-only 라 동시 호출에 안전. 시그니처 불변 → 모든 호출자(1차 검색 포함) 무영향.
+        hq = await asyncio.to_thread(
+            build_hybrid_query,
             tool_input,
             dense_encoder=self._dense,
             sparse_encoder=self._sparse,
