@@ -41,6 +41,8 @@ services:
       # 호스트의 ./models 를 read-only 로 마운트. vLLM 컨테이너와 동일 경로지만,
       # agent-api 에는 임베더(e5, fermi)용으로 별도 노출한다.
       - ../../models:/app/models:ro
+      # follow-up 참조 추출용 메타데이터 + 캐시.
+      - ../../data/ref:/app/data/ref
     depends_on:
       otel-collector:
         condition: service_started

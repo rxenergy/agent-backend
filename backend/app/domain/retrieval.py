@@ -105,6 +105,35 @@ class RerankOutput(BaseModel):
     scores: dict[str, float] = Field(default_factory=dict)  # chunk_id → rerank 점수
 
 
+class FollowUpQueryItem(BaseModel):
+    """개별 재검색 쿼리 — 참조된 외부 문서 내에서 원래 의도를 재검색하기 위한 쿼리."""
+
+    model_config = ConfigDict(frozen=True)
+
+    query_text: str
+    target_source_ids: list[str]
+    intent: str = ""
+
+
+class FollowUpInput(BaseModel):
+    """retrieval.follow_up 도구 입력."""
+
+    model_config = ConfigDict(frozen=True)
+
+    query_text: str
+    chunks: list[RetrievedChunk]
+    min_score: float = 0.6
+
+
+class FollowUpResult(BaseModel):
+    """retrieval.follow_up 도구 출력."""
+
+    model_config = ConfigDict(frozen=True)
+
+    follow_up_queries: list[FollowUpQueryItem] = Field(default_factory=list)
+    ref_filter: dict[str, Any] = Field(default_factory=dict)
+
+
 class DocumentFetchSectionInput(BaseModel):
     """v3.1 P1 `document.fetch_section` 입력 — 한 Section 의 형제 문단 일괄 fetch.
 
