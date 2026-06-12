@@ -138,6 +138,45 @@ class HttpLLM(LLMPort):
         except (httpx.HTTPError, RetryError, _Retry5xx) as exc:
             raise LLMUnavailableError(str(exc)) from exc
 
+    async def generate_messages(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model_options: dict[str, Any] | None = None,
+        grammar: GrammarSpec | None = None,
+    ) -> LLMResult:
+        """Non-streaming, 도구 없는 멀티메시지 생성 1회(structured output 지원).
+        system+user(+이력) 메시지에 guided decoding(grammar)만 거는 호출자(참조
+        추출 등)를 위한 경로다. 메시지 직렬화는 `generate_with_tools` 와 동일한
+        `_openai_message` 를, grammar 적용은 `generate`/`generate_stream` 와 동일한
+        `_apply_grammar_to_openai_payload` 를 재사용한다(원칙 #4)."""
+        opts = dict(model_options or {})
+        max_tokens = int(opts.pop("max_tokens", 1024))
+        temperature = float(opts.pop("temperature", 0.0))
+        extra = _sampling_extras(opts)
+
+        try:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(self._max_attempts),
+                wait=wait_exponential(multiplier=0.5, min=0.5, max=4.0),
+                retry=retry_if_exception_type(
+                    (httpx.TransportError, httpx.RemoteProtocolError, _Retry5xx)
+                ),
+                reraise=True,
+            ):
+                with attempt:
+                    if self._provider == "openai_compat":
+                        return await self._call_openai_compat_messages(
+                            messages, max_tokens, temperature, grammar, extra
+                        )
+                    return await self._call_anthropic_messages(
+                        messages, max_tokens, temperature
+                    )
+        except (httpx.HTTPError, RetryError, _Retry5xx) as exc:
+            raise LLMUnavailableError(str(exc)) from exc
+
+        raise LLMUnavailableError("HttpLLM: messages retry loop exited without result")
+
     async def generate_with_tools(
         self,
         messages: list[ChatMessage],
@@ -310,6 +349,16 @@ class HttpLLM(LLMPort):
 
     async def _call_openai_compat(
         self, prompt: str, max_tokens: int, temperature: float,
+        grammar: GrammarSpec | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> LLMResult:
+        return await self._call_openai_compat_messages(
+            [ChatMessage(role="user", content=prompt)],
+            max_tokens, temperature, grammar, extra,
+        )
+
+    async def _call_openai_compat_messages(
+        self, messages: list[ChatMessage], max_tokens: int, temperature: float,
         grammar: GrammarSpec | None = None,
         extra: dict[str, Any] | None = None,
     ) -> LLMResult:

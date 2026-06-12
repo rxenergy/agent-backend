@@ -93,6 +93,7 @@ class SpecDrivenRunner:
         max_queries: int = 10,
         max_context_chunks: int = 24,
         min_token_count: int = 0,
+        context_token_budget: int = 0,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
@@ -115,6 +116,9 @@ class SpecDrivenRunner:
         # 0=비활성(기본). spec_driven 은 retrieval.scope 도구를 우회하므로 v3.1/react 와
         # 달리 settings/corpus_map 의 floor 가 닿지 않는다 → runner 가 직접 search 에 싣는다.
         self._min_token_count = min_token_count
+        # N4 생성 컨텍스트 토큰 예산(0=무제한). 1차 검색 전량 보존 + 2차 검색 score
+        # 순 채움을 이 예산까지 — vLLM 윈도우 안전판(_assemble_final_chunks).
+        self._context_token_budget = context_token_budget
         self._citation_contract: str | None = None
         if citation_contract_path:
             from pathlib import Path
@@ -384,6 +388,9 @@ class SpecDrivenRunner:
                         "budget": self._max_context_chunks,
                         "fetch_k": per_query_k,
                         "capped": chunks_capped,
+                        # 1차 검색 청크 수 — 최종 컨텍스트에 전량 반영됨(예산 안전판이
+                        # 발동해 first_pass_dropped=True 가 아닌 한). num_chunks 와 대조.
+                        "first_pass_kept": len(first_pass_ids),
                         "per_query_counts": per_query_counts,
                         "min_token_count": self._min_token_count,
                         "filters": dict(_NOISE_FILTER),
@@ -827,4 +834,5 @@ def _build_spec_driven(spec: VariantSpec, deps: AgentDeps) -> "SpecDrivenRunner"
         max_queries=t.get("spec_driven_max_queries", 10),
         max_context_chunks=t.get("spec_driven_max_context_chunks", 24),
         min_token_count=t.get("retriever_min_token_count", 0),
+        context_token_budget=t.get("spec_driven_context_token_budget", 0),
     )

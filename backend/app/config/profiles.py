@@ -647,10 +647,12 @@ async def build_container(settings: Settings) -> AppContainer:
             "active_cells_mode": settings.active_cells_mode,
             # react_minimal_v1 — ReAct 루프 턴 backstop(submit_response 미발동 시 종료).
             "react_max_turns": settings.react_max_turns,
-            # spec_driven_v1 — N2 per-slot 멀티쿼리 상한 + 병합 후 top-K cap(no silent cap).
-            "spec_driven_max_queries": getattr(settings, "spec_driven_max_queries", 10),
-            "spec_driven_max_context_chunks": getattr(
-                settings, "spec_driven_max_context_chunks", 24),
+            # spec_driven_v1 — N2 per-slot 멀티쿼리 상한 + N3 1차 floor 정렬 budget.
+            # 명시 필드(settings.py)라 SPEC_DRIVEN_* env 가 동작한다(getattr 폴백 제거).
+            "spec_driven_max_queries": settings.spec_driven_max_queries,
+            "spec_driven_max_context_chunks": settings.spec_driven_max_context_chunks,
+            # N4 생성 컨텍스트 토큰 예산(0=무제한). 1차 전량 보존 + 2차 score 순 채움 캡.
+            "spec_driven_context_token_budget": settings.spec_driven_context_token_budget,
             # v3.1 (hierarchical_corrective). Ignored by other variants.
             "llm_call_budget": getattr(settings, "llm_call_budget", 8),
             "citation_contract_path": str(
