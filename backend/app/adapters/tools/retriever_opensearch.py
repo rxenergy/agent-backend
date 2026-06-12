@@ -217,6 +217,12 @@ class OpenSearchRetrieverTool:
             page=src.get("page_start"),
             section=section,
             snippet=text[:512],
+            # full body 도 싣는다 — N3.5 follow_up 참조 추출은 본문 전체를 봐야
+            # char 512 뒤에 나오는 인용(RG/NUREG/CFR…)을 잡는다(snippet 만으로는
+            # 멀티홉이 사실상 0건). 생성 컨텍스트는 snippets 모드라 snippet 만 읽고
+            # (context/pack.py render_for_prompt), to_snapshot 이 snippets 모드에서
+            # text 를 blank 처리하므로 아티팩트·토큰 추정에도 영향 없다.
+            text=text or None,
             doc_type=collection,
             revision=None,  # NRC 스키마에 대응 필드 없음
             response_date=response_date,

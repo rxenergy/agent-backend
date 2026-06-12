@@ -38,7 +38,7 @@ from app.application.prompting.spec_driven_source import (
     SpecDrivenTriageSource,
 )
 from app.application.tool_runtime.executor import ToolExecutor
-from app.application.tool_runtime.registry import ToolRegistry
+from app.application.tool_runtime.registry import ToolRegistry, ToolSpec
 from app.domain.agents import VariantSpec
 from app.domain.interaction import AgentRequest
 from app.domain.spec_driven import AnswerSpec, FormulatedQuery, SpecSlot
@@ -309,6 +309,97 @@ async def test_filter_mode_reaches_retriever_merged_with_noise_filter() -> None:
         assert q["filters"] == {"collection": ["nuscale_FSAR"]}
         assert q["target"] == {}
         assert q["mode"] == "filter"
+
+
+# === N3.5 멀티홉(follow-up) 2차 검색 — 관련성 게이트·noise 필터 검증 ============
+
+class _FakeFollowUpTool:
+    """retrieval.follow_up — 고정 follow-up 쿼리 1건(대상 source_id 지정) 반환."""
+
+    name = "retrieval.follow_up"
+    version = "v1"
+
+    async def invoke(self, tool_input, context) -> ToolResult:
+        return ToolResult(
+            tool_name="retrieval.follow_up", tool_version="v1", status="success",
+            output={"follow_up_queries": [
+                {"query_text": "peak cladding temperature limit",
+                 "target_source_ids": ["ML_TARGET"], "intent": "정량 한계"},
+            ]},
+            latency_ms=0, input_hash="x", output_hash="y", trace_id="",
+        )
+
+
+class _SecondPassRetriever:
+    """1차는 1건, source_id 필터가 걸린 2차는 keep_k 보다 많은(5건) chunk 를 score
+    desc 로 반환한다 — 관련성 게이트(상위 keep_k 만 채택)와 2차 noise 필터 검증용."""
+
+    name = "retriever.search"
+    version = "v1"
+
+    def __init__(self) -> None:
+        self.inputs: list[Any] = []
+
+    async def invoke(self, tool_input, context) -> ToolResult:
+        self.inputs.append(tool_input)
+        is_second = bool((tool_input.filters or {}).get("source_id"))
+        if not is_second:
+            chunks = [{"chunk_id": "first1", "document_id": "D1", "score": 0.9,
+                       "snippet": "ECCS first-pass"}]
+        else:
+            # 5건 — keep_k(기본 3) 초과. score desc.
+            chunks = [
+                {"chunk_id": f"sec{i}", "document_id": "D2",
+                 "score": 0.8 - i * 0.1, "snippet": f"sec body {i}"}
+                for i in range(5)
+            ]
+        return ToolResult(tool_name="retriever.search", tool_version="v1",
+                          status="success", output={"chunks": chunks},
+                          latency_ms=0, input_hash="x", trace_id="")
+
+
+def _deps_with_follow_up(tmp: Path, *, llm, retriever) -> AgentDeps:
+    deps = _deps(tmp, llm=llm, retriever=retriever)
+    # follow_up 도구를 executor 에 등록(registry 에도 정책 추가).
+    reg = ToolRegistry.from_yaml(_tool_registry_yaml(tmp))
+    reg._specs["retrieval.follow_up"] = ToolSpec(  # noqa: SLF001
+        name="retrieval.follow_up", version="v1", adapter="fake",
+        timeout_ms=1000, retry=0, required=False,
+    )
+    tools = {
+        "retrieval.search": RetrievalSearchTool(
+            retriever=retriever, reranker=IdentityReranker()),
+        "retrieval.follow_up": _FakeFollowUpTool(),
+    }
+    deps.tool_executor = ToolExecutor(registry=reg, tools=tools,
+                                      event_sink=deps.event_sink)
+    return deps
+
+
+@pytest.mark.asyncio
+async def test_follow_up_second_pass_relevance_gate_and_noise_filter() -> None:
+    # 2차 검색은 (1) source_id hard-scope + noise:false 필터를 싣고, (2) 쿼리당
+    # 상위 keep_k(기본 3)개만 컨텍스트에 채택한다(저관련 tail 배제 — "필요·중요 내용만").
+    with tempfile.TemporaryDirectory() as tmp:
+        rec = _SecondPassRetriever()
+        llm = _ScriptLLM(gen_texts=[
+            _TRIAGE_RETRIEVAL, _SPEC_JSON, _QUERIES_JSON, _ANSWER])
+        deps = _deps_with_follow_up(Path(tmp), llm=llm, retriever=rec)
+        runner = VariantRegistry.build(SPEC_DRIVEN_VARIANT_ID, _SPEC, deps)
+        await runner.run(_req())
+
+        # 2차 검색 입력(source_id 필터가 걸린 것)을 찾는다.
+        second = [i for i in rec.inputs if (i.filters or {}).get("source_id")]
+        assert second, "second-pass search should have fired"
+        si = second[0]
+        assert si.filters.get("source_id") == ["ML_TARGET"]
+        assert si.filters.get("noise") is False          # noise 필터 동승
+        assert si.min_token_count == 0                    # min_token_count 동승(기본 0)
+
+        # 재현 핀 — 5건 중 상위 keep_k(=3)만 added.
+        pin = _event(tmp)["query_understanding"]["spec_driven"]["follow_up"]
+        assert pin["num_queries"] == 1
+        assert pin["added_chunks"] == 3
 
 
 def test_parse_routes_filter_to_filters_boost_to_target() -> None:

@@ -94,6 +94,8 @@ class SpecDrivenRunner:
         max_context_chunks: int = 24,
         min_token_count: int = 0,
         context_token_budget: int = 0,
+        follow_up_fetch_k: int = 8,
+        follow_up_keep_k: int = 3,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
@@ -119,6 +121,11 @@ class SpecDrivenRunner:
         # N4 생성 컨텍스트 토큰 예산(0=무제한). 1차 검색 전량 보존 + 2차 검색 score
         # 순 채움을 이 예산까지 — vLLM 윈도우 안전판(_assemble_final_chunks).
         self._context_token_budget = context_token_budget
+        # N3.5 2차(follow-up) 검색 깊이 / 채택 수. fetch_k 는 참조 문서 내부에서
+        # 가져올 후보 풀, keep_k 는 그 중 *쿼리당* 컨텍스트에 실을 상위 관련 청크 수
+        # (관련성 게이트 — "필요·중요 내용만"). keep_k ≤ fetch_k.
+        self._follow_up_fetch_k = follow_up_fetch_k
+        self._follow_up_keep_k = follow_up_keep_k
         self._citation_contract: str | None = None
         if citation_contract_path:
             from pathlib import Path
@@ -407,8 +414,16 @@ class SpecDrivenRunner:
                                     _SEARCH_TOOL,
                                     {
                                         "query_text": fq["query_text"],
-                                        "top_k": 5,
-                                        "filters": {"source_id": fq["target_source_ids"]},
+                                        "top_k": self._follow_up_fetch_k,
+                                        # 참조 문서 *내부* 로 모집단을 좁힌 hard-scope.
+                                        # 노이즈 floor·noise:false 도 1차와 동일하게 실어
+                                        # 목차·헤더·fragment 가 2차 결과를 오염시키지 않게
+                                        # 한다(필요·중요 내용만 — 사용자 요구).
+                                        "min_token_count": self._min_token_count,
+                                        "filters": {
+                                            **_NOISE_FILTER,
+                                            "source_id": fq["target_source_ids"],
+                                        },
                                     },
                                     ctx,
                                 )
@@ -424,7 +439,13 @@ class SpecDrivenRunner:
                             found = _parse_chunks(
                                 sub_res.output if sub_res.status == "success" else None
                             )
-                            for c in found:
+                            # 관련성 게이트(사용자 요구 — "필요·중요 내용만"). 2차 검색
+                            # 점수는 follow-up 쿼리·대상 문서마다 척도가 달라 *전역* 절대
+                            # 임계값이 부적절하다. 대신 쿼리 *내부* 상대순위 상위
+                            # _follow_up_keep_k 개만 채택한다(검색이 score desc 로 반환).
+                            # 나머지(저관련 tail)는 컨텍스트에서 배제 → 참조 문서에서
+                            # 의도와 무관한 단락이 답변을 희석하지 않는다.
+                            for c in found[: self._follow_up_keep_k]:
                                 if c.chunk_id not in chunks_by_id:
                                     chunks_by_id[c.chunk_id] = c
                                     follow_up_added += 1
@@ -1024,4 +1045,6 @@ def _build_spec_driven(spec: VariantSpec, deps: AgentDeps) -> "SpecDrivenRunner"
         max_context_chunks=t.get("spec_driven_max_context_chunks", 24),
         min_token_count=t.get("retriever_min_token_count", 0),
         context_token_budget=t.get("spec_driven_context_token_budget", 0),
+        follow_up_fetch_k=t.get("spec_driven_follow_up_fetch_k", 8),
+        follow_up_keep_k=t.get("spec_driven_follow_up_keep_k", 3),
     )
