@@ -25,7 +25,7 @@ help:
 	@echo ""
 	@echo "On-premise (air-gapped + local vLLM):"
 	@echo "  build-onprem  Build agent-api/open-webui images for onprem profile"
-	@echo "  up-onprem     Bring up onprem stack (requires vllm-node:latest + ./models/gemma4)"
+	@echo "  up-onprem     Bring up onprem stack (requires vLLM image + ./models/gemma4-awq)"
 	@echo "  down-onprem   Tear down onprem stack (keeps volumes)"
 	@echo "  logs-onprem   Tail agent-api logs (onprem)"
 	@echo "  ps-onprem     Show onprem stack status"
@@ -150,8 +150,8 @@ psql:
 
 # ── On-premise targets ────────────────────────────────────────────────────
 # 사전 준비:
-#   1) docker/vllm/README.md 절차로 호스트 docker 데몬에 `vllm-node:latest` 적재
-#   2) ./models/gemma4 에 Gemma 4 26B A4B-it 가중치 사전 다운로드
+#   1) compressed-tensors(gemma4) 지원 vLLM 이미지를 호스트 docker 데몬에 적재
+#   2) ./models/gemma4-awq 에 gemma-4-26B-A4B-it-AWQ-4bit 양자화 가중치 사전 적재
 #   3) (선택) hf_cache 볼륨에 임베더(e5/fermi) 사전 동기화 (HF_HUB_OFFLINE=1)
 build-onprem:
 	$(COMPOSE_ONPREM) build agent-api open-webui
