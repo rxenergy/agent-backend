@@ -7,7 +7,7 @@ COMPOSE_ONPREM := docker compose --env-file infra/env/onprem.env --profile onpre
   -f infra/compose/compose.yml -f infra/compose/compose.onprem.yml
 
 .PHONY: help build up-local down logs ps test test-integration smoke smoke-stream seed seed-encode opensearch-init os-snapshot os-restore os-snapshots verify-w1 fmt clean migrate psql prompts-validate \
-  build-onprem up-onprem down-onprem logs-onprem ps-onprem clean-onprem _guard-local-only \
+  build-onprem up-onprem down-onprem logs-onprem ps-onprem clean-onprem export-onprem _guard-local-only \
   aws-ecr-login aws-build aws-push aws-deploy aws-setup aws-destroy aws-ssh aws-logs aws-status aws-secrets-put
 
 help:
@@ -30,6 +30,7 @@ help:
 	@echo "  logs-onprem   Tail agent-api logs (onprem)"
 	@echo "  ps-onprem     Show onprem stack status"
 	@echo "  clean-onprem  Tear down onprem stack and remove volumes"
+	@echo "  export-onprem Collect run data (events/traces/memory) → analysis dataset"
 
 build:
 	$(COMPOSE) build agent-api open-webui
@@ -169,6 +170,15 @@ ps-onprem:
 
 clean-onprem:
 	$(COMPOSE_ONPREM) down -v
+
+# Agent 실행 데이터(질의 입출력·검색 기록·트레이스·메모리)를 호스트로 한 번에
+# 내려받아 interaction_id 기준 분석용 단일 데이터셋으로 평탄화한다. 폐쇄망 전제 —
+# 떠 있는 onprem 컨테이너의 내부 포트/볼륨에서만 읽고 외부 전송 없음. read-only 라
+# _guard-local-only 와 무관(시드/--recreate 경로를 거치지 않음).
+#   make export-onprem                 # 전체 → export/<UTC stamp>/
+#   make export-onprem NEWER_THAN=7d   # 최근 7일 MinIO 객체만
+export-onprem:
+	NEWER_THAN="$(NEWER_THAN)" scripts/export_collect.sh
 
 # ── AWS MVP frontend deployment ───────────────────────────────────────────
 # 사내 MVP 용 단일 EC2 + Caddy + Tailscale 토폴로지. 백엔드는 온프레미스 유지.
