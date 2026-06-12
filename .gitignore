@@ -42,3 +42,5 @@ infra/aws/.state/
 # (onprem 본체는 호스트의 /srv/os-snapshots 에만 둔다.)
 infra/opensearch/snapshots/*
 !infra/opensearch/snapshots/.gitkeep
+
+export/*
