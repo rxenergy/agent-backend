@@ -62,6 +62,27 @@ class FakeEchoLLM(LLMPort):
             model_id=result.model_id,
         )
 
+    async def generate_messages(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model_options: dict[str, Any] | None = None,
+        grammar: GrammarSpec | None = None,
+    ) -> LLMResult:
+        """멀티메시지 echo. `last_grammar`/`last_messages` 로 호출자가 schema-constrained
+        decoding 과 메시지 직렬화를 단언할 수 있게 노출한다."""
+        self.last_grammar = grammar
+        self.last_messages = list(messages)
+        last_user = next(
+            (m.content for m in reversed(messages) if m.role == "user"), ""
+        )
+        text = f"[fake-echo] {last_user[-512:]}"
+        return LLMResult(
+            text=text,
+            token_usage={"prompt_tokens": len(last_user), "completion_tokens": len(text)},
+            model_id=self._model_id,
+        )
+
     async def generate_with_tools(
         self,
         messages: list[ChatMessage],
@@ -141,6 +162,20 @@ class FakeReasoningLLM(LLMPort):
             model_id=self._model_id,
         )
 
+    async def generate_messages(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model_options: dict[str, Any] | None = None,
+        grammar: GrammarSpec | None = None,
+    ) -> LLMResult:
+        self.last_grammar = grammar
+        return LLMResult(
+            text=self._content,
+            token_usage={"prompt_tokens": 0, "completion_tokens": len(self._content)},
+            model_id=self._model_id,
+        )
+
     async def generate_with_tools(
         self,
         messages: list[ChatMessage],
@@ -217,6 +252,22 @@ class FakeToolLLM(LLMPort):
             finish_reason="stop",
             token_usage=dict(result.token_usage),
             model_id=result.model_id,
+        )
+
+    async def generate_messages(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model_options: dict[str, Any] | None = None,
+        grammar: GrammarSpec | None = None,
+    ) -> LLMResult:
+        last_user = next(
+            (m.content for m in reversed(messages) if m.role == "user"), ""
+        )
+        return LLMResult(
+            text="[fake-tool] " + last_user[-256:],
+            token_usage={"prompt_tokens": len(last_user), "completion_tokens": 0},
+            model_id=self._model_id,
         )
 
     async def generate_with_tools(

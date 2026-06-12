@@ -17,6 +17,8 @@ from app.application.agents.registry import AgentDeps, VariantRegistry
 from app.application.agents.spec_driven_v1 import (
     SPEC_DRIVEN_VARIANT_ID,
     SpecDrivenRunner,
+    _assemble_final_chunks,
+    _estimate_chunk_tokens,
     _render_spec_block,
     _select_with_slot_floor,
 )
@@ -241,6 +243,14 @@ async def test_end_to_end_grounded() -> None:
         assert pin["spec"]["explicit_references"] == ["10 CFR 50.46"]
         assert pin["spec"]["method"] == "llm"
         assert pin["formulation"]["num_queries"] == 2
+        # 1차 검색 전량 보존 — follow_up 미배선이라 최종 == 1차(no cap drop).
+        ret = pin["retrieval"]
+        assert ret["first_pass_kept"] == ret["num_chunks"]
+        # 토큰 예산 핀(budget=0 무제한 → drop 없음)이 항상 기록된다(원칙 5).
+        cb = pin["context_budget"]
+        assert cb["budget"] == 0
+        assert cb["dropped_chunk_ids"] == []
+        assert cb["first_pass_dropped"] is False
 
 
 @pytest.mark.asyncio
@@ -575,16 +585,65 @@ def test_slot_floor_no_required_is_pure_topk() -> None:
 
 @pytest.mark.asyncio
 async def test_context_budget_default_and_fetch_fills_to_budget() -> None:
-    # cap=24(기본, 컨텍스트 확장) + per-query fetch=budget 으로 단일 쿼리로도 budget 까지
-    # 채울 수 있게 구성.
+    # N3 floor 정렬 budget=24(기본, 컨텍스트 확장) + per-query fetch=budget 으로 단일
+    # 쿼리로도 budget 까지 채울 수 있게 구성. 최종 cap 은 token budget(=0=무제한)이라
+    # num_chunks 는 1차 floor budget(24) 안에서만 검증한다(no silent final cap).
     with tempfile.TemporaryDirectory() as tmp:
         runner = _build(Path(tmp), _script())
         assert runner._max_context_chunks == 24
         await runner.run(_req())
         pin = _event(tmp)["query_understanding"]["spec_driven"]["retrieval"]
-        assert pin["budget"] == 24           # context 상한 = 24(확장)
+        assert pin["budget"] == 24           # N3 floor 정렬 budget = 24(확장)
         assert pin["fetch_k"] == 24          # per-query fetch = budget(top_k 3 < 24)
-        assert pin["num_chunks"] <= 24       # cap 준수
+        # num_chunks 의 최종 cap 은 context_token_budget 이 지배한다(=0=무제한). N3 floor
+        # budget(24)은 더 이상 최종 상한이 아니므로 1차 전량 보존을 확인한다.
+        assert pin["num_chunks"] == pin["first_pass_kept"]
+
+
+# ── 최종 조립(1차 전량 + 2차 score 순, 토큰 예산) — 순수 함수 단위 검증 ──────────
+def _chs(cid: str, score: float, snippet: str = "") -> RetrievedChunk:
+    return RetrievedChunk(chunk_id=cid, document_id="d", score=score, snippet=snippet)
+
+
+def test_assemble_no_budget_keeps_all_first_and_second() -> None:
+    # budget=0 → 캡 없음. 1차(A,C) 전량 + 2차(B,D) 전량, 최종은 score desc.
+    merged = [_chs("A", 0.9), _chs("B", 0.8), _chs("C", 0.5), _chs("D", 0.4)]
+    first_pass = {"A", "C"}
+    chunks, log, total, fp_dropped = _assemble_final_chunks(first_pass, merged, 0)
+    ids = [c.chunk_id for c in chunks]
+    # Phase A(1차: A,C) → Phase B(2차: B,D). 1차 우선 배치.
+    assert ids == ["A", "C", "B", "D"]
+    assert log == [] and fp_dropped is False
+
+
+def test_assemble_budget_drops_second_pass_tail_first() -> None:
+    # 각 chunk ~ snippet 30자 → ~10+12=22 토큰. budget 으로 2차 일부만 컷.
+    snip = "x" * 30
+    merged = [_chs("A", 0.9, snip), _chs("B", 0.8, snip),
+              _chs("C", 0.5, snip), _chs("D", 0.4, snip)]
+    first_pass = {"A", "C"}  # 1차
+    per = _estimate_chunk_tokens(merged[0])
+    # 3개분 예산 → 2차 tail(D=최저 score)부터 drop, 1차는 보존.
+    budget = per * 3
+    chunks, log, total, fp_dropped = _assemble_final_chunks(first_pass, merged, budget)
+    ids = [c.chunk_id for c in chunks]
+    assert "A" in ids and "C" in ids        # 1차 전량 보존
+    assert "D" in log                        # 2차 최저 score drop
+    assert fp_dropped is False
+    assert total <= budget
+
+
+def test_assemble_first_pass_dropped_only_as_last_resort() -> None:
+    # 예산이 1차만으로도 초과 → 2차 전멸 후 1차 tail drop(최후 안전판) + 플래그.
+    snip = "y" * 30
+    merged = [_chs("A", 0.9, snip), _chs("B", 0.8, snip), _chs("C", 0.5, snip)]
+    first_pass = {"A", "B", "C"}  # 전부 1차, 2차 없음
+    per = _estimate_chunk_tokens(merged[0])
+    budget = per * 2  # 2개분만 허용
+    chunks, log, total, fp_dropped = _assemble_final_chunks(first_pass, merged, budget)
+    assert fp_dropped is True
+    assert "C" in log                        # 최저 score 1차부터 drop
+    assert len(chunks) == 2 and total <= budget
 
 
 # ── thinking 은 모델 출력 중심 ───────────────────────────────────────────────

@@ -44,9 +44,12 @@ class Settings(BaseSettings):
     # react_minimal_v1 — ReAct Retrieval 루프 턴 backstop(submit_response 미발동 시 종료).
     react_max_turns: int = 8
 
-    # spec_driven_v1 — N2 per-slot 멀티쿼리 상한 + N3 병합 후 컨텍스트 chunk 예산
-    # (no silent cap — capped 여부는 재현 핀에 기록). 컨텍스트 윈도가 확장된 모델에서는
-    # 더 많은 근거를 한 번에 주입하도록 예산을 키운다(슬롯 세분·다양 쿼리와 함께 동작).
+    # spec_driven_v1 — N2 per-slot 멀티쿼리 상한 + N3 1차 floor 정렬 budget.
+    # max_context_chunks 는 더 이상 최종 cap 이 아니다(최종 크기는 아래 token budget 이
+    # 지배) — N3 floor 정렬 단계의 예산일 뿐. 명시 필드여야 SPEC_DRIVEN_* env override 가
+    # 동작한다(model_config extra="ignore" 라 getattr 로만 읽으면 미선언 env 가 무시됨).
+    # profiles.py 는 이 필드를 직접 읽는다. 컨텍스트 윈도 확장 모델에선 슬롯 세분·다양
+    # 쿼리로 근거를 넓게 모은다.
     spec_driven_max_queries: int = 10
     spec_driven_max_context_chunks: int = 24
 
@@ -112,6 +115,11 @@ class Settings(BaseSettings):
     # 축소(false refusal)할 위험이 있어, 운영자가 프로파일별로 확인 후 켠다.
     # 0 이면 거버너(drop/demote/재배치) 전체 비활성 → 기존 동작과 byte-identical.
     context_token_budget: int = 0
+    # spec_driven_v1 튜너블 — N4 생성 컨텍스트 Σ(추정 토큰) 캡.
+    # 0=무제한(기존 동작). onprem 은 9000 으로
+    # vLLM 16384 윈도우 안전 — 1차 검색 전량 보존 + 2차 검색을 score 순으로 이 예산
+    # 한도까지 채운다(spec_driven_v1._assemble_final_chunks).
+    spec_driven_context_token_budget: int = 0
     opensearch_endpoint: str = "http://opensearch:9200"
     opensearch_index: str = "nrc-all-v1"
     # 적재 데이터가 따르는 인덱스 스키마 버전의 *선언적* 단일 출처.

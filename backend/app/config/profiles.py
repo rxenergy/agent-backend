@@ -463,6 +463,50 @@ async def build_container(settings: Settings) -> AppContainer:
             fetch_section_tool = LocalDocumentFetchSectionTool()
             reranker_tool = LocalRerankerTool()  # local 프로필 → 결정론 lexical fake.
 
+        # retrieval.follow_up — 1차 검색 청크에서 외부 참조 추출 + 재검색 쿼리 생성.
+        # LLM 호출은 메인 경로와 동일한 HttpLLM(utility_llm = 없으면 default_llm pool
+        # 엔트리)을 그대로 주입해 재사용한다 — 단, openai_compat(내부망 vLLM) 엔트리일
+        # 때만. 참조 추출은 vLLM guided_json(JSON-schema structured output)에 의존하므로
+        # anthropic/fake 엔트리와는 호환되지 않아 비활성(graceful skip)한다. 연결 정보
+        # (endpoint/model/api_key/timeout·재시도·에러매핑)는 HttpLLM 이 단독 소유하고,
+        # RefSettings 는 추출 knob(max_output_tokens·schema 경로)만 from_env 기본값으로
+        # 쓴다 — 더 이상 DOCUMENTS_REF_VLLM_* 연결 env 를 이중 구성하지 않는다.
+        follow_up_tool = None
+        _ref_entry = next(
+            (e for e in settings.llm_pool if e.id == utility_llm_id), None
+        )
+        if _ref_entry is not None and _ref_entry.provider == "openai_compat":
+            try:
+                from app.adapters.ref_extractor_llm import LlmRefExtractor
+                from app.adapters.tools.retrieval_follow_up import RetrievalFollowUpTool
+                from app.adapters.ref_postprocess.settings import RefSettings as _RefSettings
+
+                # 동시성 캡(_MAX_CONCURRENCY)으로 ceil(N/conc) 라운드라, 라운드×per-call
+                # timeout 이 registry 예산(100s) 안에 들도록 둔다. per-call timeout·재시도는
+                # HttpLLM(pool 엔트리 timeout_s·max_attempts)이 소유한다.
+                _ref_extractor = LlmRefExtractor(
+                    llm=utility_llm,
+                    settings=_RefSettings.from_env(),
+                    catalog_csv_path=Path(os.environ.get(
+                        "DOCUMENTS_METADATA_CSV", "/app/data/ref/metadata_unified.csv"
+                    )),
+                    cache_path=Path(os.environ.get(
+                        "DOCUMENTS_METADATA_CACHE", "/app/data/ref/_ref_catalog.json"
+                    )),
+                )
+                _fu_conc = os.environ.get("DOCUMENTS_REF_MAX_CONCURRENCY")
+                follow_up_tool = RetrievalFollowUpTool(
+                    ref_extractor=_ref_extractor,
+                    max_concurrency=int(_fu_conc) if _fu_conc else None,
+                )
+            except Exception as _exc:
+                structlog.get_logger("retrieval.follow_up.boot").warning(
+                    "follow_up_tool_disabled",
+                    error=str(_exc),
+                    llm_id=utility_llm_id,
+                    hint="utility_llm is openai_compat but tool init failed; graceful degrade",
+                )
+
         # agentic_finder Finder 도구(설계 finder §3). retrieval.search = 내부 retriever
         # 재사용 + Reranker 정렬(실 cross-encoder 는 배포 시 주입, dev/test 는 identity
         # 폴백 — seam 보존). scope=CorpusMap 결정론, submit_verdict=no-op.
@@ -516,6 +560,8 @@ async def build_container(settings: Settings) -> AppContainer:
             "verification.citation_check": LocalCitationCheckTool(),
             "verification.faithfulness_check": LocalFaithfulnessCheckTool(),
         }
+        if follow_up_tool is not None:
+            tools["retrieval.follow_up"] = follow_up_tool
         tool_executor = ToolExecutor(registry=registry, tools=tools, event_sink=event_sink)
 
         # 분류 프롬프트 source(registry 호스팅) — boot 시 fragment sha 검증(fail-fast).
@@ -647,10 +693,12 @@ async def build_container(settings: Settings) -> AppContainer:
             "active_cells_mode": settings.active_cells_mode,
             # react_minimal_v1 — ReAct 루프 턴 backstop(submit_response 미발동 시 종료).
             "react_max_turns": settings.react_max_turns,
-            # spec_driven_v1 — N2 per-slot 멀티쿼리 상한 + 병합 후 top-K cap(no silent cap).
-            "spec_driven_max_queries": getattr(settings, "spec_driven_max_queries", 10),
-            "spec_driven_max_context_chunks": getattr(
-                settings, "spec_driven_max_context_chunks", 24),
+            # spec_driven_v1 — N2 per-slot 멀티쿼리 상한 + N3 1차 floor 정렬 budget.
+            # 명시 필드(settings.py)라 SPEC_DRIVEN_* env 가 동작한다(getattr 폴백 제거).
+            "spec_driven_max_queries": settings.spec_driven_max_queries,
+            "spec_driven_max_context_chunks": settings.spec_driven_max_context_chunks,
+            # N4 생성 컨텍스트 토큰 예산(0=무제한). 1차 전량 보존 + 2차 score 순 채움 캡.
+            "spec_driven_context_token_budget": settings.spec_driven_context_token_budget,
             # v3.1 (hierarchical_corrective). Ignored by other variants.
             "llm_call_budget": getattr(settings, "llm_call_budget", 8),
             "citation_contract_path": str(
