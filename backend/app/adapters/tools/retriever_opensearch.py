@@ -75,6 +75,7 @@ class OpenSearchRetrieverTool:
         timeout_s: float = 5.0,
         verify_certs: bool = False,
         strategy_pipelines: dict[str, str] | None = None,
+        snippet_chars: int = 2048,
     ) -> None:
         if not endpoint:
             raise ValueError("OpenSearchRetrieverTool requires endpoint")
@@ -90,6 +91,9 @@ class OpenSearchRetrieverTool:
         self._auth = (username, password) if username else None
         self._timeout_s = timeout_s
         self._verify = verify_certs
+        # snippet 캡(char). chunk.text=None 이라 follow_up 추출·생성 컨텍스트가 모두
+        # 이 snippet 만 본다 → 인용이 캡 뒤로 잘리지 않게 충분히 길게(기본 2048).
+        self._snippet_chars = snippet_chars
         # v3.1 Node 5 strategy → search_pipeline. "hybrid" 는 생성자 기본
         # pipeline(설정값) 사용. 나머지는 repo 의 weight-변종 pipeline 으로 매핑.
         self._strategy_pipelines: dict[str, str] = strategy_pipelines or {
@@ -166,7 +170,10 @@ class OpenSearchRetrieverTool:
             ) from exc
 
         hits = (data.get("hits") or {}).get("hits") or []
-        chunks = [self._hit_to_chunk(hit) for hit in hits[: max(1, tool_input.top_k)]]
+        chunks = [
+            self._hit_to_chunk(hit, snippet_chars=self._snippet_chars)
+            for hit in hits[: max(1, tool_input.top_k)]
+        ]
         output = RetrieverSearchOutput(chunks=chunks)
 
         return ToolResult(
@@ -180,7 +187,7 @@ class OpenSearchRetrieverTool:
         )
 
     @staticmethod
-    def _hit_to_chunk(hit: dict[str, Any]) -> RetrievedChunk:
+    def _hit_to_chunk(hit: dict[str, Any], *, snippet_chars: int = 2048) -> RetrievedChunk:
         src = hit.get("_source", {}) or {}
         meta = src.get("doc_metadata") or {}
         text = src.get("text", "") or ""
@@ -216,13 +223,11 @@ class OpenSearchRetrieverTool:
             score=float(hit.get("_score", 0.0)),
             page=src.get("page_start"),
             section=section,
-            snippet=text[:512],
-            # full body 도 싣는다 — N3.5 follow_up 참조 추출은 본문 전체를 봐야
-            # char 512 뒤에 나오는 인용(RG/NUREG/CFR…)을 잡는다(snippet 만으로는
-            # 멀티홉이 사실상 0건). 생성 컨텍스트는 snippets 모드라 snippet 만 읽고
-            # (context/pack.py render_for_prompt), to_snapshot 이 snippets 모드에서
-            # text 를 blank 처리하므로 아티팩트·토큰 추정에도 영향 없다.
-            text=text or None,
+            # snippet 캡(_snippet_chars) 은 설정값. N3.5 follow_up 참조 추출이
+            # 이 snippet 만 보므로(text=None), 인용이 캡 뒤로 잘리지 않게 충분히
+            # 길게 둔다(OPENSEARCH_SNIPPET_CHARS, 기본 2048). 본문 전체는 싣지
+            # 않는다 — 생성 컨텍스트(snippets 모드)·추출 둘 다 snippet 만 읽는다.
+            snippet=text[:snippet_chars],
             doc_type=collection,
             revision=None,  # NRC 스키마에 대응 필드 없음
             response_date=response_date,

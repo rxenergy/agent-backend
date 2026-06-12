@@ -135,6 +135,10 @@ class Settings(BaseSettings):
     opensearch_dense_field: str = "dense_e5"
     opensearch_sparse_field: str = "sparse_fermi"
     opensearch_text_field: str = "text"
+    # chunk.snippet 캡(char). chunk.text 는 싣지 않으므로(text=None) N3.5 follow_up
+    # 참조 추출과 N4 생성 컨텍스트가 모두 이 snippet 만 본다. 인용(RG/NUREG/CFR…)이
+    # 이 길이 뒤로 잘리면 멀티홉 추출이 0건이 되므로 본문을 충분히 담도록 길게 둔다.
+    opensearch_snippet_chars: int = 2048
     opensearch_username: str = ""
     opensearch_password: str = ""
     opensearch_verify_certs: bool = False

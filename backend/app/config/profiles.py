@@ -442,6 +442,7 @@ async def build_container(settings: Settings) -> AppContainer:
                     username=settings.opensearch_username or None,
                     password=settings.opensearch_password or None,
                     verify_certs=settings.opensearch_verify_certs,
+                    snippet_chars=settings.opensearch_snippet_chars,
                 )
                 document_tool = OpenSearchDocumentResolverTool(
                     endpoint=settings.opensearch_endpoint,
