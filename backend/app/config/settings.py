@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     # profiles.py 는 이 필드를 직접 읽는다. 컨텍스트 윈도 확장 모델에선 슬롯 세분·다양
     # 쿼리로 근거를 넓게 모은다.
     spec_driven_max_queries: int = 10
-    spec_driven_max_context_chunks: int = 24
+    spec_driven_max_context_chunks: int = 10
 
     # Classifier (Node 1)
     classifier_backend: Literal["rule", "llm", "hybrid"] = "rule"
