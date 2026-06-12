@@ -97,8 +97,8 @@ services:
       - --port=8000
       - --served-model-name=${VLLM_SERVED_MODEL_NAME:-gemma-4-26b-a4b-it}
       - --max-model-len=${VLLM_MAX_MODEL_LEN:-16384}
-      - --kv-cache-dtype=${VLLM_KV_CACHE_DTYPE:-fp8}
       - --max-num-batched-tokens=${VLLM_MAX_NUM_BATCHED_TOKENS:-4096}
+      - --kv-cache-dtype=${VLLM_KV_CACHE_DTYPE:-fp8}
       - --gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.70}
       - --load-format=safetensors
     healthcheck:
