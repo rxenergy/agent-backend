@@ -55,6 +55,11 @@ def _sha16(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+class _FollowUpDisabled(Exception):
+    """멀티홉(follow-up) 검색 비활성 시 N3.5 본문을 건너뛰는 control-flow 신호.
+    graceful-skip(ToolUnknown 등)과 달리 *의도된* 비활성이라 별도 except 로 구별한다."""
+
+
 class SpecDrivenRunner:
     """spec_driven_v1 — 검색 *앞단* 두 모델 노드를 둔 **선형** 검색 Agent
     (docs/plans/spec_driven_agent.design.v1.md).
@@ -96,6 +101,7 @@ class SpecDrivenRunner:
         context_token_budget: int = 0,
         follow_up_fetch_k: int = 8,
         follow_up_keep_k: int = 3,
+        follow_up_enabled: bool = True,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
@@ -128,6 +134,10 @@ class SpecDrivenRunner:
         # (관련성 게이트 — "필요·중요 내용만"). keep_k ≤ fetch_k.
         self._follow_up_fetch_k = follow_up_fetch_k
         self._follow_up_keep_k = follow_up_keep_k
+        # N3.5 멀티홉(follow-up) 검색 on/off. False 면 참조 추출·2차 검색을 통째로
+        # 건너뛰고 1차 검색 청크만으로 N4 생성한다. reasoning/step/재현 핀 스캐폴딩은
+        # 유지(빈 follow_up 섹션)되어 응답 경로·이벤트 스키마는 동형으로 남는다.
+        self._follow_up_enabled = follow_up_enabled
         self._citation_contract: str | None = None
         if citation_contract_path:
             from pathlib import Path
@@ -396,7 +406,12 @@ class SpecDrivenRunner:
                 fs.set_attribute("follow_up.first_pass_chunks", len(chunks))
                 fs.set_attribute("follow_up.fetch_k", self._follow_up_fetch_k)
                 fs.set_attribute("follow_up.keep_k", self._follow_up_keep_k)
+                fs.set_attribute("follow_up.enabled", self._follow_up_enabled)
                 try:
+                    if not self._follow_up_enabled:
+                        # 멀티홉 비활성 — 참조 추출/2차 검색 전체를 건너뛴다. fq_list 는 빈
+                        # 채로 남고, 최종 조립은 try 밖에서 1차 청크만으로 진행한다.
+                        raise _FollowUpDisabled
                     follow_up_res = await self._tools.invoke(
                         "retrieval.follow_up",
                         {
@@ -478,6 +493,8 @@ class SpecDrivenRunner:
                                     key=lambda c: c.score,
                                     reverse=True,
                                 )
+                except _FollowUpDisabled:
+                    pass  # 멀티홉 비활성 — 정상 control-flow(에러 아님).
                 except Exception:  # noqa: BLE001 — ToolUnknown 등 graceful skip
                     pass
                 # phase 결과를 span 에 실어 Phoenix 에서 단계별 귀인 — 추출된 재검색 쿼리
@@ -911,10 +928,15 @@ def _render_spec_block(spec: AnswerSpec) -> str:
         f"answer_structure: {spec.answer_structure or '-'}",
         f"governing_normative_class: {spec.governing_normative_class or '-'}",
         f"explicit_references: {', '.join(spec.explicit_references) or '-'}",
-        "required_slots:",
+        "required_slots (facet = the *kind* of evidence — develop each per its facet):",
     ]
     for s in spec.required_slots:
-        lines.append(f"- {s.name}: {s.description}".rstrip())
+        # facet 라벨을 N4 에 노출 — 생성기가 슬롯별로 어떤 표현축(Axis 1~3)을 적용할지
+        # 안다(definition→정의 layer, quantitative_limit→값+기술근거, review_finding→
+        # 판단/조건 분리). 결정=코드(결정론 렌더), 표현=모델(답변 심도 §3.2/P3).
+        tag = f" [{s.facet}]" if s.facet else ""
+        flag = "" if s.required else " (supporting)"
+        lines.append(f"- {s.name}{tag}{flag}: {s.description}".rstrip())
     return "\n".join(lines)
 
 
@@ -1078,4 +1100,5 @@ def _build_spec_driven(spec: VariantSpec, deps: AgentDeps) -> "SpecDrivenRunner"
         context_token_budget=t.get("spec_driven_context_token_budget", 0),
         follow_up_fetch_k=t.get("spec_driven_follow_up_fetch_k", 8),
         follow_up_keep_k=t.get("spec_driven_follow_up_keep_k", 3),
+        follow_up_enabled=t.get("spec_driven_follow_up_enabled", False),
     )

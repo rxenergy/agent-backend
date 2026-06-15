@@ -42,7 +42,20 @@ The form that satisfies all three is a **compact English regulatory noun phrase 
 
    **`null`:** no collection signal — leave both fields unset. Whole-corpus search is always safe.
 
-9. **Write reasoning first — say what you kept, dropped, and how the slots differ.** The **first output field is `reasoning`**: before building the queries, state in 1–2 sentences (your language is fine) which concept each slot maps to, which reference/collection anchors it (and the `boost`/`filter` mode you chose for it), **which generic terms you pruned**, and **how each slot's query searches a different facet** (so no two are identical). Then assemble `queries` to match — forward thinking, not post-hoc justification, and not a reflexive copy of the examples below.
+9. **Shape the query to the slot's `facet` (if present).** A slot may carry a `facet` (the *kind* of evidence) and `expected_authority` (the document family that holds it). When present, bias the query and collection accordingly — this sharpens retrieval toward the right passage type. (The facet is a kind label, never a value; do not invent a value from it.)
+
+   | facet | query bias | collection (when `expected_authority` agrees) |
+   |---|---|---|
+   | `definition` | the term + `definition` / `means` (preserve term-of-art) — aim at the definitions clause | `boost`/`filter` `10CFR` |
+   | `criterion` | the clause + the *individual* criterion's concept name — one criterion per query, never fused | `filter` the binding collection |
+   | `quantitative_limit` | the clause + the limit concept name + (named clause) its well-known value anchor + the term-of-art `limit` / `maximum` / `Table` (these target the numeric/table passage) | `filter` the clause's collection |
+   | `method` | the method/analysis concept | `filter` `RG` / `SRP` / `DSRS` |
+   | `design_claim` | the applicant's design vocabulary **verbatim** (`passive`, `natural circulation`, `RVV`, `RRV`, `DHRS` — do NOT canonicalize to active-LWR terms, rule 6) | `filter` `nuscale_FSAR` / `nuscale_DCA` |
+   | `review_finding` | the judged concept + review vocabulary | `filter` `nuscale_SER` / `nuscale_RAI` |
+   | `exception` | the exception/alternative concept name **alone**, separated from the requirement | follow the requirement's collection |
+   | `cross_reference` | the pointed-to clause/appendix/table ID **verbatim** | follow that reference's collection |
+
+10. **Write reasoning first — say what you kept, dropped, and how the slots differ.** The **first output field is `reasoning`**: before building the queries, state in 1–2 sentences (your language is fine) which concept each slot maps to, which reference/collection anchors it (and the `boost`/`filter` mode you chose for it), **which generic terms you pruned**, and **how each slot's query searches a different facet** (so no two are identical). Then assemble `queries` to match — forward thinking, not post-hoc justification, and not a reflexive copy of the examples below.
 
 ## Output
 

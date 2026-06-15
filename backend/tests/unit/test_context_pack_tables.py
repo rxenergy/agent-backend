@@ -39,6 +39,39 @@ def test_expand_tables_matches_tag_in_array() -> None:
     assert _expand_tables(body, tables) == "before T1 mid **C2**\n\nT2 end"
 
 
+def test_expand_tables_same_tag_accumulates_in_order() -> None:
+    # 같은 tag 의 엔트리가 여러 개면 배열 순서대로 누적 결합(덮어쓰지 않음).
+    tables = [
+        {"tag": "tb_0001", "markdown": "FIRST"},
+        {"tag": "tb_0001", "caption": "둘째", "markdown": "SECOND"},
+    ]
+    assert _expand_tables("x [TABLE: tb_0001] y", tables) == "x FIRST\n\n**둘째**\n\nSECOND y"
+
+
+def test_expand_tables_same_tag_skips_empty_entries() -> None:
+    # 누적 시 markdown 없는 엔트리는 건너뛰고 유효한 것만 결합.
+    tables = [
+        {"tag": "tb_0001", "caption": "C"},  # markdown 없음 → skip
+        {"tag": "tb_0001", "markdown": "ONLY"},
+    ]
+    assert _expand_tables("a [TABLE: tb_0001] b", tables) == "a ONLY b"
+
+
+def test_expand_tables_duplicate_marker_renders_once() -> None:
+    # 본문에 같은 tag 마커가 여러 번 나오면 표는 첫 마커에만 싣고 이후 마커는 제거.
+    tables = [{"tag": "tb_0001", "markdown": "TBL"}]
+    out = _expand_tables("a [TABLE: tb_0001] b [TABLE: tb_0001] c", tables)
+    assert out == "a TBL b  c"
+    assert out.count("TBL") == 1
+
+
+def test_expand_tables_distinct_tags_each_render() -> None:
+    # 서로 다른 tag 의 마커는 각각 한 번씩 렌더(중복 제거는 tag 단위).
+    tables = [{"tag": "tb_0001", "markdown": "T1"}, {"tag": "tb_0002", "markdown": "T2"}]
+    out = _expand_tables("[TABLE: tb_0001] [TABLE: tb_0002] [TABLE: tb_0001]", tables)
+    assert out == "T1 T2 "
+
+
 def test_expand_tables_marker_whitespace_variants() -> None:
     tables = [{"tag": "tb_0001", "markdown": "T1"}]
     assert _expand_tables("x [TABLE:tb_0001] y", tables) == "x T1 y"

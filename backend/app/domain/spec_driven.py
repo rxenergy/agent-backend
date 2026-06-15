@@ -19,12 +19,29 @@ from typing import Any
 class SpecSlot:
     """답을 *방어 가능하게* 떠받칠 근거 조각 하나. `keywords` 는 검색 쿼리의 lexical
     앵커(리터럴 보존 — 정규화 금지, F1). N2 QueryFormulator 가 슬롯당 검색쿼리 1개를
-    만들 때 이 keywords 를 query_text 로 옮긴다(BM25 lexical)."""
+    만들 때 이 keywords 를 query_text 로 옮긴다(BM25 lexical).
+
+    `facet` 은 이 슬롯이 *어떤 종류*의 근거를 회수하는지의 라벨이다(값/결론이 아니라 종류
+    — address-not-content 불변, project_answer_spec_address_not_content). 답변 심도 설계
+    (spec_driven_answer_depth.design.v1 §3.2)의 핵심: N1 이 한 개념을 정의·개별기준·적용·
+    정량한계·예외·상호참조 등 *수직* facet 으로 펼쳐 각자 슬롯화하면, N2 가 그 유형에 맞춰
+    쿼리를 빚고(§4) N4 가 그 facet 을 어떻게 표현할지(값이면 verbatim, 열거면 리스트) 안다.
+    optional(미지정 None 허용 — 하위호환). frozen dataclass 라 asdict 재귀 호환(기존 idiom).
+
+    `expected_authority` 는 이 facet 근거가 *어느 권위/문서군*에 사는지의 힌트다(예:
+    definition→정의조항, review_finding→SER/RAI). N2 가 collection filter/boost 를 고를 때
+    보조 신호로 쓴다(권위 분리 — 답변 심도 §4). 역시 라벨이지 값이 아니다."""
 
     name: str
     keywords: tuple[str, ...] = ()
     description: str = ""
     required: bool = True
+    # 회수 근거의 *종류* 라벨(값 아님). definition | criterion | applicability |
+    # quantitative_limit | method | design_claim | review_finding | exception |
+    # cross_reference | None. N2 쿼리 형태·N4 표현형의 신호(spec_driven_answer_depth §3.2).
+    facet: str | None = None
+    # 이 facet 이 사는 권위/문서군 힌트(N2 collection 선택 보조 — 답변 심도 §4). 라벨.
+    expected_authority: str | None = None
 
 
 @dataclass(frozen=True)

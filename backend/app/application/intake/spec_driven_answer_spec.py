@@ -26,6 +26,12 @@ _TRACER = get_tracer("intake")
 _GOVERNING_CLASSES = frozenset(
     {"binding", "guidance", "review_record", "applicant_claim", "mixed"}
 )
+# 슬롯 facet 라벨(회수 근거의 *종류* — 값 아님). 답변 심도 §3.2. 스키마 enum 과 동기.
+# 미지정/미상 라벨은 None 으로 떨군다(silent 오라벨 방지 — 종류 신호가 틀리면 N2/N4 오도).
+_FACETS = frozenset(
+    {"definition", "criterion", "applicability", "quantitative_limit", "method",
+     "design_claim", "review_finding", "exception", "cross_reference"}
+)
 
 
 class SpecDrivenAnswerSpecInstantiator:
@@ -142,8 +148,17 @@ def _parse(text: str) -> dict[str, Any] | None:
         ) if isinstance(kw, list) else ()
         desc = str(s.get("description") or "").strip()
         required = bool(s.get("required", True))
+        # facet — 회수 근거의 종류 라벨(값 아님). enum 외/미지정은 None(오라벨 방지).
+        facet_raw = s.get("facet")
+        facet = str(facet_raw).strip().lower() if facet_raw else None
+        if facet not in _FACETS:
+            facet = None
+        # expected_authority — 자유 라벨(문서군/권위 힌트). 비검증(N2 보조 신호일 뿐).
+        auth_raw = s.get("expected_authority")
+        auth = str(auth_raw).strip() if auth_raw else None
         slots.append(SpecSlot(name=name, keywords=keywords,
-                              description=desc, required=required))
+                              description=desc, required=required,
+                              facet=facet, expected_authority=auth))
     refs_raw = data.get("explicit_references")
     refs = tuple(
         str(r).strip() for r in refs_raw if str(r).strip()
@@ -194,7 +209,10 @@ def _build(parsed: dict[str, Any], method: str, policy_hash: str | None) -> Answ
         + "||" + (gnc or "")
         + "||" + (structure or "")
         + "||" + "|".join(
-            f"{s.name}:{int(s.required)}:{'+'.join(s.keywords)}" for s in slots
+            # facet 을 canonical 에 포함 — 같은 keywords 라도 facet 분해가 다르면 다른
+            # spec(다른 회수 의도)이므로 재현 핀이 구별해야 한다(답변 심도 §3.2).
+            f"{s.name}:{int(s.required)}:{s.facet or '-'}:{'+'.join(s.keywords)}"
+            for s in slots
         )
     )
     spec_hash = hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]

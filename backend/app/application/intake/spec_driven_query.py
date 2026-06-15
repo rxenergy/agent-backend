@@ -149,7 +149,16 @@ def _render_spec(spec: AnswerSpec) -> str:
     ]
     for s in spec.required_slots:
         kw = ", ".join(s.keywords) or "(none)"
-        lines.append(f"- {s.name}: keywords=[{kw}] | {s.description}".rstrip())
+        # facet/expected_authority 를 N2 에 노출 — 프롬프트 rule 9(facet→쿼리형태 표)가
+        # 슬롯별로 쿼리·collection 을 어떻게 빚을지의 신호로 쓴다(답변 심도 §4). 미지정이면
+        # 생략(net-neutral — 라벨 없는 슬롯은 기존과 동일하게 keywords 만으로 빚는다).
+        tags = []
+        if s.facet:
+            tags.append(f"facet={s.facet}")
+        if s.expected_authority:
+            tags.append(f"authority={s.expected_authority}")
+        tag = (" | " + " | ".join(tags)) if tags else ""
+        lines.append(f"- {s.name}: keywords=[{kw}]{tag} | {s.description}".rstrip())
     return "\n".join(lines)
 
 

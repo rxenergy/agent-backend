@@ -30,7 +30,16 @@
             "items": {"type": "string"}
           },
           "description": {"type": "string"},
-          "required": {"type": "boolean"}
+          "required": {"type": "boolean"},
+          "facet": {
+            "type": ["string", "null"],
+            "enum": ["definition", "criterion", "applicability", "quantitative_limit", "method", "design_claim", "review_finding", "exception", "cross_reference", null],
+            "description": "The *kind* of evidence this slot retrieves (a signal for query shape and answer rendering) — NOT a value/conclusion. definition=defined regulatory meaning; criterion=one individual required item; applicability=reactor type/plant condition/licensing stage; quantitative_limit=a numeric limit/threshold facet (the value is retrieved, keywords carry only the address); method=acceptable method/analysis guidance; design_claim=applicant's design assertion; review_finding=NRC's judgment/RAI; exception=exemption/alternative/limit; cross_reference=a clause/appendix/table this one points to (feeds follow-up search)."
+          },
+          "expected_authority": {
+            "type": ["string", "null"],
+            "description": "Hint for which document family / authority holds this facet's evidence (e.g. 'binding 10 CFR', 'guidance RG/SRP/DSRS', 'applicant FSAR', 'review SER/RAI'). A label that helps the query node pick a collection filter/boost — never a value or conclusion."
+          }
         }
       }
     },
