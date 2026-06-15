@@ -90,9 +90,10 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
                                 "page_start": 7,
                                 "page_end": 9,
                                 "text": "Turbine missile protection requirements for SMR... [TABLE: tb_0001]",
-                                # 본문에서 분리된 표(object enabled:false) — full 모드 render 가
-                                # tables[tb_0001]["text"] 로 마커를 인라인 치환한다.
-                                "tables": {"tb_0001": {"text": "| 항목 | 값 |"}},
+                                # 본문에서 분리된 표(array) — full 모드 render 가 매칭 tag 의
+                                # caption+markdown 으로 마커를 인라인 치환한다.
+                                "tables": [{"tag": "tb_0001", "caption": "Tbl",
+                                            "markdown": "| 항목 | 값 |", "html": ""}],
                                 "doc_metadata": {
                                     "AccessionNumber": "ML15355A364",
                                     "DocumentTitle": "NuScale DSRS 3.5.1.3 Turbine Missiles",
@@ -165,7 +166,8 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
     # 싣고, tables 없는 hit 은 None (spec_driven_table_inline_expansion).
     assert chunks[0]["text"] == "Turbine missile protection requirements for SMR... [TABLE: tb_0001]"
     assert chunks[0]["snippet"].startswith("Turbine missile protection")
-    assert chunks[0]["tables"] == {"tb_0001": {"text": "| 항목 | 값 |"}}
+    assert chunks[0]["tables"] == [{"tag": "tb_0001", "caption": "Tbl",
+                                    "markdown": "| 항목 | 값 |", "html": ""}]
     assert chunks[1]["tables"] is None
 
     assert "/nrc-all-v1/_search" in captured["url"]
@@ -392,7 +394,7 @@ async def test_full_text_loaded_uncapped_while_snippet_capped(monkeypatch):
                 "_source": {
                     "chunk_id": "c1", "source_id": "s1", "collection": "RG",
                     "text": long_text,
-                    "tables": {"tb_0001": {"text": "TBL"}},
+                    "tables": [{"tag": "tb_0001", "markdown": "TBL"}],
                 },
             }]}},
         )

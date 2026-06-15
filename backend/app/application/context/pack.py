@@ -13,30 +13,40 @@ from app.domain.retrieval import RetrievedChunk
 CaptureMode = Literal["metadata", "snippets", "full"]
 
 # 인덱싱 단계에서 본문에서 분리된 표 마커. 본문의 `[TABLE: tb_0001]` 를 chunk.tables
-# 의 표 텍스트로 인라인 치환한다(spec_driven_table_inline_expansion).
-_TABLE_MARKER_RE = re.compile(r"\[TABLE:\s*(?P<tb_id>[^\]]+?)\s*\]")
+# 배열의 매칭 엔트리(tag)로 인라인 치환한다(spec_driven_table_inline_expansion).
+_TABLE_MARKER_RE = re.compile(r"\[TABLE:\s*(?P<tag>[^\]]+?)\s*\]")
 
 
-def _render_table_entry(entry: Any) -> str | None:
-    """tables[tb_id] 엔트리 → 치환 텍스트. tables[tb_id]["text"] 만 사용한다
-    (caption/title 등 부가 키는 붙이지 않음). entry 가 (dict 아닌) 문자열이면 그대로
-    폴백한다 — _source.tables(enabled:false) 실제 키 구조 미확정에 방어적."""
-    if isinstance(entry, str):
-        return entry or None
+def _render_table_entry(entry: dict[str, Any]) -> str | None:
+    """tables 엔트리 → 치환 텍스트. caption(있으면) + markdown 을 결합한다. markdown
+    이 비면(표 본문 없음) None 반환 → 호출부가 마커를 보존한다."""
     if not isinstance(entry, dict):
         return None
-    return entry.get("text") or None
+    markdown = (entry.get("markdown") or "").strip()
+    if not markdown:
+        return None
+    caption = (entry.get("caption") or "").strip()
+    return f"**{caption}**\n\n{markdown}" if caption else markdown
 
 
-def _expand_tables(body: str, tables: dict[str, Any] | None) -> str:
-    """본문의 `[TABLE: tb_xxxx]` 마커를 tables[tb_xxxx] 의 표 텍스트로 인라인 치환.
-    tables 가 없거나 해당 tb_id 가 없으면 마커를 그대로 둔다(silent 삭제 금지 —
-    표 누락을 가시화, CLAUDE.md #6)."""
+def _expand_tables(body: str, tables: list[dict[str, Any]] | None) -> str:
+    """본문의 `[TABLE: tag]` 마커를 tables 배열에서 같은 `tag` 엔트리의 caption+markdown
+    으로 인라인 치환한다. tables 가 없거나 해당 tag 가 없으면 마커를 그대로 둔다
+    (silent 삭제 금지 — 표 누락을 가시화, CLAUDE.md #6)."""
     if not tables:
+        return body
+    # tag → 엔트리 인덱스(배열을 매번 선형탐색하지 않도록 1회 구성). dict/문자열tag 만.
+    by_tag = {
+        e["tag"]: e
+        for e in tables
+        if isinstance(e, dict) and isinstance(e.get("tag"), str)
+    }
+    if not by_tag:
         return body
 
     def _sub(m: re.Match[str]) -> str:
-        rendered = _render_table_entry(tables.get(m.group("tb_id").strip()))
+        entry = by_tag.get(m.group("tag").strip())
+        rendered = _render_table_entry(entry) if entry is not None else None
         return rendered if rendered is not None else m.group(0)  # 미매칭=마커 보존
 
     return _TABLE_MARKER_RE.sub(_sub, body)

@@ -242,11 +242,12 @@ class OpenSearchRetrieverTool:
             # 치환할 수 있도록(spec_driven_table_inline_expansion D5).
             snippet=text[:snippet_chars],
             text=text,
-            # 본문에서 분리된 표 원본(_source.tables, object enabled:false). full 모드
-            # render 가 [TABLE: tb_xxxx] 마커를 tables[tb_xxxx]["text"] 로 치환한다(D8).
-            # 모델 계약은 dict[str, Any] — 색인 데이터가 dict 가 아니면(list/str 등 또는
-            # table 미분리 v1 스키마) None 으로 정규화해 ValidationError 를 막는다.
-            tables=src.get("tables") if isinstance(src.get("tables"), dict) else None,
+            # 본문에서 분리된 표 원본(_source.tables, array of {tag,caption,markdown,html}).
+            # full 모드 render 가 [TABLE: tag] 마커를 매칭 엔트리의 caption+markdown 으로
+            # 치환한다(spec_driven_table_inline_expansion). 모델 계약은 list[dict] —
+            # 색인 데이터가 list 가 아니면(table 미분리 v1 스키마 등) None 으로 정규화해
+            # ValidationError 를 막는다.
+            tables=src.get("tables") if isinstance(src.get("tables"), list) else None,
             doc_type=collection,
             revision=None,  # NRC 스키마에 대응 필드 없음
             response_date=response_date,

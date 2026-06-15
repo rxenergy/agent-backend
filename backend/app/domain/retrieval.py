@@ -40,11 +40,12 @@ class RetrievedChunk(BaseModel):
     # token_count 를 그대로 싣는다(목차·헤더·단어 fragment 는 작다). local 어댑터는
     # snippet 단어수로 근사. min_token_count 필터/포스트필터가 이 값을 읽는다.
     token_count: int | None = None
-    # 인덱싱 단계에서 본문에서 분리된 표. 본문(text/snippet)에는 [TABLE: <tb_id>]
-    # 마커가 남고, 표 실제 내용은 tables[<tb_id>]["text"] 에 위치한다. OpenSearch
-    # _source.tables(object, enabled:false) 원본 그대로 — ContextBuilder 가 생성
-    # 프롬프트 렌더 시 마커를 이 dict 로 인라인 치환한다(spec_driven_table_inline_expansion).
-    tables: dict[str, Any] | None = None
+    # 인덱싱 단계에서 본문에서 분리된 표. 본문(text/snippet)에는 [TABLE: <tag>]
+    # 마커가 남고, 표 실제 내용은 tables 배열의 매칭 엔트리(tag/caption/markdown/html)
+    # 에 위치한다. OpenSearch _source.tables(array, object enabled:false) 원본 그대로 —
+    # ContextBuilder 가 생성 프롬프트 렌더 시 마커를 caption+markdown 으로 인라인
+    # 치환한다(spec_driven_table_inline_expansion).
+    tables: list[dict[str, Any]] | None = None
 
 
 class RetrieverSearchInput(BaseModel):
