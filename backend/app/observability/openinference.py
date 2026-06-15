@@ -108,6 +108,43 @@ def set_llm(
     set_io(span, input_value=prompt, output_value=completion)
 
 
+def set_llm_chat(
+    span: Span,
+    *,
+    model_name: str,
+    input_messages: Sequence[tuple[str, str]],
+    completion: str,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+) -> None:
+    """멀티메시지(system+user 등) LLM 호출용 — `set_llm` 의 chat 판. `set_llm` 은
+    단일 user 메시지만 싣지만, 참조 추출(generate_messages)은 system+user 를 보내므로
+    각 입력 메시지를 role 과 함께 `llm.input_messages.{i}` 로 싣는다. Phoenix 가 이
+    스키마로 입력 대화를 그대로 렌더한다(다른 LLM 노드와 동형)."""
+    span.set_attribute(LLM_MODEL_NAME, model_name)
+    for i, (role, content) in enumerate(input_messages):
+        span.set_attribute(f"{LLM_INPUT_MESSAGES}.{i}.message.role", role)
+        span.set_attribute(
+            f"{LLM_INPUT_MESSAGES}.{i}.message.content", _truncate(content)
+        )
+    span.set_attribute(f"{LLM_OUTPUT_MESSAGES}.0.message.role", "assistant")
+    span.set_attribute(
+        f"{LLM_OUTPUT_MESSAGES}.0.message.content", _truncate(completion)
+    )
+    if prompt_tokens:
+        span.set_attribute(LLM_TOKEN_PROMPT, int(prompt_tokens))
+    if completion_tokens:
+        span.set_attribute(LLM_TOKEN_COMPLETION, int(completion_tokens))
+    if prompt_tokens or completion_tokens:
+        span.set_attribute(LLM_TOKEN_TOTAL, int(prompt_tokens + completion_tokens))
+    # Phoenix 타일 미리보기용 input.value/output.value 미러.
+    set_io(
+        span,
+        input_value=[{"role": r, "content": c} for r, c in input_messages],
+        output_value=completion,
+    )
+
+
 def set_retrieval_documents(
     span: Span,
     docs: Sequence[Mapping[str, Any]],

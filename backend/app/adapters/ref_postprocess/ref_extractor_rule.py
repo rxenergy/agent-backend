@@ -16,10 +16,17 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.observability import openinference as oi
+from app.observability.otel import get_tracer
 from app.ports.llm import ChatMessage, GrammarSpec, LLMPort
 
 from .ref_resolver import VALID_KINDS, RefResolver, ResolvedRef, build_source_id_filter
 from .settings import DEFAULT_MAX_OUTPUT_TOKENS_WITH_FOLLOW_UP, RefSettings
+
+# follow-up 참조 추출 LLM 호출을 Phoenix 에 다른 LLM 노드와 동형으로 노출하기 위한
+# tracer. 어댑터(HttpLLM)는 자체 span 을 내지 않으므로, 생성 노드(spec_driven _generate
+# 의 llm.generation span)와 마찬가지로 호출자가 LLM span 을 씌워 모델 입출력을 싣는다.
+_TRACER = get_tracer("agent")
 
 
 @dataclass
@@ -110,15 +117,29 @@ async def extract_raw_refs(
     """
     user = text if not current_source_id else f"current_source_id: {current_source_id}\n\n{text}"
 
-    result = await llm.generate_messages(
-        [
-            ChatMessage(role="system", content=SYSTEM_PROMPT),
-            ChatMessage(role="user", content=user),
-        ],
-        model_options={"max_tokens": settings.max_output_tokens, "temperature": 0.0},
-        grammar=GrammarSpec(kind="json_schema", value=RESOLVE_SCHEMA),
-    )
-    content = result.text or "{}"
+    # 참조 추출 LLM 호출을 LLM-kind span 으로(follow-up 추출 호출과 동형) — Phoenix 에서
+    # 모델 입출력을 다른 노드처럼 확인할 수 있게 한다.
+    with _TRACER.start_as_current_span("llm.ref_extract") as s:
+        oi.set_kind(s, oi.KIND_LLM)
+        if current_source_id:
+            s.set_attribute("follow_up.current_source_id", current_source_id)
+        result = await llm.generate_messages(
+            [
+                ChatMessage(role="system", content=SYSTEM_PROMPT),
+                ChatMessage(role="user", content=user),
+            ],
+            model_options={"max_tokens": settings.max_output_tokens, "temperature": 0.0},
+            grammar=GrammarSpec(kind="json_schema", value=RESOLVE_SCHEMA),
+        )
+        content = result.text or "{}"
+        oi.set_llm_chat(
+            s,
+            model_name=result.model_id,
+            input_messages=[("system", SYSTEM_PROMPT), ("user", user)],
+            completion=content,
+            prompt_tokens=int(result.token_usage.get("prompt_tokens", 0)),
+            completion_tokens=int(result.token_usage.get("completion_tokens", 0)),
+        )
     return _parse_raw_refs(content, current_source_id)
 
 
@@ -283,18 +304,37 @@ async def extract_refs_with_follow_up(
     user_parts.append(f"RETRIEVED CHUNK:\n{chunk_text}")
     user_content = "\n".join(user_parts)
 
-    result = await llm.generate_messages(
-        [
-            ChatMessage(role="system", content=SYSTEM_PROMPT_WITH_FOLLOW_UP),
-            ChatMessage(role="user", content=user_content),
-        ],
-        model_options={
-            "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS_WITH_FOLLOW_UP,
-            "temperature": 0.0,
-        },
-        grammar=GrammarSpec(kind="json_schema", value=RESOLVE_WITH_FOLLOW_UP_SCHEMA),
-    )
-    content = result.text or "{}"
+    # follow-up 추출 LLM 호출을 LLM-kind span 으로 — 다른 노드처럼 Phoenix 에서 모델
+    # 입출력(system+user 메시지, 생성된 JSON)을 그대로 확인할 수 있게 한다. 청크별로
+    # 1개씩 떠 retrieval.follow_up tool span 아래에 nesting 된다(질의·current_source_id
+    # 속성으로 어느 청크 추출인지 식별).
+    with _TRACER.start_as_current_span("llm.follow_up_extract") as s:
+        oi.set_kind(s, oi.KIND_LLM)
+        if current_source_id:
+            s.set_attribute("follow_up.current_source_id", current_source_id)
+        result = await llm.generate_messages(
+            [
+                ChatMessage(role="system", content=SYSTEM_PROMPT_WITH_FOLLOW_UP),
+                ChatMessage(role="user", content=user_content),
+            ],
+            model_options={
+                "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS_WITH_FOLLOW_UP,
+                "temperature": 0.0,
+            },
+            grammar=GrammarSpec(kind="json_schema", value=RESOLVE_WITH_FOLLOW_UP_SCHEMA),
+        )
+        content = result.text or "{}"
+        oi.set_llm_chat(
+            s,
+            model_name=result.model_id,
+            input_messages=[
+                ("system", SYSTEM_PROMPT_WITH_FOLLOW_UP),
+                ("user", user_content),
+            ],
+            completion=content,
+            prompt_tokens=int(result.token_usage.get("prompt_tokens", 0)),
+            completion_tokens=int(result.token_usage.get("completion_tokens", 0)),
+        )
     return _parse_refs_and_follow_ups(content, current_source_id)
 
 
