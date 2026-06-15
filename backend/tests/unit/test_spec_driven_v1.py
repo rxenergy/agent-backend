@@ -676,18 +676,18 @@ def test_slot_floor_no_required_is_pure_topk() -> None:
 
 @pytest.mark.asyncio
 async def test_context_budget_default_and_fetch_fills_to_budget() -> None:
-    # N3 floor 정렬 budget=24(기본, 컨텍스트 확장) + per-query fetch=budget 으로 단일
+    # N3 floor 정렬 budget=20(기본, 컨텍스트 확장) + per-query fetch=budget 으로 단일
     # 쿼리로도 budget 까지 채울 수 있게 구성. 최종 cap 은 token budget(=0=무제한)이라
-    # num_chunks 는 1차 floor budget(24) 안에서만 검증한다(no silent final cap).
+    # num_chunks 는 1차 floor budget(20) 안에서만 검증한다(no silent final cap).
     with tempfile.TemporaryDirectory() as tmp:
         runner = _build(Path(tmp), _script())
-        assert runner._max_context_chunks == 24
+        assert runner._max_context_chunks == 10
         await runner.run(_req())
         pin = _event(tmp)["query_understanding"]["spec_driven"]["retrieval"]
-        assert pin["budget"] == 24           # N3 floor 정렬 budget = 24(확장)
-        assert pin["fetch_k"] == 24          # per-query fetch = budget(top_k 3 < 24)
+        assert pin["budget"] == 10           # N3 floor 정렬 budget = 10(확장)
+        assert pin["fetch_k"] == 10          # per-query fetch = budget(top_k 3 < 10)
         # num_chunks 의 최종 cap 은 context_token_budget 이 지배한다(=0=무제한). N3 floor
-        # budget(24)은 더 이상 최종 상한이 아니므로 1차 전량 보존을 확인한다.
+        # budget(10)은 더 이상 최종 상한이 아니므로 1차 전량 보존을 확인한다.
         assert pin["num_chunks"] == pin["first_pass_kept"]
 
 
