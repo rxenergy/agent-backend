@@ -237,7 +237,7 @@ spec_driven_query_prompts:
 spec_driven_generation_prompts:
   spec_driven_generation_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "081801fa2b4f83ff370eb05149afa4744246b3e7c7ad2d4cb2e53922dfc418ef"}
+    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "00335a297c64dae7971bdf2e03ef3507b86bc350863b3d30e43486973823158e"}
     # top_p — 구조화된 규제 산문의 nucleus 를 좁혀 형식 일관성↑(샘플링 탐색폭↓).
     # seed — 재현성(원칙 5): 같은 프롬프트·옵션이면 OpenAI-compat/vLLM 이 동일 토큰열.
     # max_tokens — full 모드(chunk 전문+표)로 확장된 컨텍스트의 모든 facet(수치·한계값·
