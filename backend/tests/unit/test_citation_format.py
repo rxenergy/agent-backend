@@ -153,3 +153,40 @@ def test_format_appends_weight_tag() -> None:
         _chunk(document_id="10cfr50-46", doc_type=REGULATION, section="50.46", page=1), "cite-1"
     )
     assert "(구속 요건)" in cfr
+
+
+# ── ADAMS PDF 딥링크(#page=N) ────────────────────────────────────────────────
+
+def test_format_adams_deeplinks_with_page_anchor() -> None:
+    # ADAMS(ML번호) 문서 + page → document_id 토큰이 [doc](url#page=N) markdown 링크.
+    s = format_citation(
+        _chunk(document_id="ML18002A422", doc_type=REGULATION, section="4.2", page=12),
+        "cite-0",
+    )
+    assert (
+        "[ML18002A422](https://www.nrc.gov/docs/ML1800/ML18002A422.pdf#page=12)"
+        in s
+    )
+    # 출처 라인 골격(Section/p.)은 보존.
+    assert "Section 4.2" in s
+    assert "p. 12" in s
+
+
+def test_format_adams_no_page_omits_anchor() -> None:
+    # page 결손 시 #page 앵커 없이 링크만(잘못된 페이지로 보내지 않는다).
+    s = format_citation(
+        _chunk(document_id="ML18002A422", doc_type=REGULATION, section="4.2", page=None),
+        "cite-0",
+    )
+    assert "[ML18002A422](https://www.nrc.gov/docs/ML1800/ML18002A422.pdf)" in s
+    assert "#page=" not in s
+
+
+def test_format_non_adams_stays_plaintext() -> None:
+    # 비-ADAMS(RG-/KINS- 등)는 평문 document_id 유지(404 링크 회피).
+    s = format_citation(
+        _chunk(document_id="rg-1-157", doc_type=REGULATION, section="4.2", page=12),
+        "cite-0",
+    )
+    assert "](http" not in s  # markdown 링크 없음.
+    assert "[rg-1-157, Section 4.2" in s
