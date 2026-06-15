@@ -223,11 +223,16 @@ class OpenSearchRetrieverTool:
             score=float(hit.get("_score", 0.0)),
             page=src.get("page_start"),
             section=section,
-            # snippet 캡(_snippet_chars) 은 설정값. N3.5 follow_up 참조 추출이
-            # 이 snippet 만 보므로(text=None), 인용이 캡 뒤로 잘리지 않게 충분히
-            # 길게 둔다(OPENSEARCH_SNIPPET_CHARS, 기본 2048). 본문 전체는 싣지
-            # 않는다 — 생성 컨텍스트(snippets 모드)·추출 둘 다 snippet 만 읽는다.
+            # snippet 캡(_snippet_chars) 은 설정값. snippets 모드를 쓰는 타 variant
+            # (react/v3.1)·follow_up 폴백이 이 snippet 을 보므로 캡을 유지한다
+            # (OPENSEARCH_SNIPPET_CHARS, 기본 2048). text 는 *전문*(캡 없음)으로
+            # 별도로 싣는다 — full 모드(spec_driven)가 표 마커를 잘림 없이 인라인
+            # 치환할 수 있도록(spec_driven_table_inline_expansion D5).
             snippet=text[:snippet_chars],
+            text=text,
+            # 본문에서 분리된 표 원본(_source.tables, object enabled:false). full 모드
+            # render 가 [TABLE: tb_xxxx] 마커를 tables[tb_xxxx]["text"] 로 치환한다(D8).
+            tables=src.get("tables") or None,
             doc_type=collection,
             revision=None,  # NRC 스키마에 대응 필드 없음
             response_date=response_date,

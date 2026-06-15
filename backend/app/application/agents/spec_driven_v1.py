@@ -101,8 +101,10 @@ class SpecDrivenRunner:
         self._llm_router = llm_router
         self._utility_llm = utility_llm
         self._tools = tool_executor
-        # snippets 모드 — chunk window 가 생성 프롬프트 evidence 로 닿게(react/v4 동형).
-        self._context_builder = ContextBuilder(capture_mode="snippets")
+        # full 모드 — chunk *전문*이 생성 프롬프트 evidence 로 닿게 한다. 본문에서
+        # 분리된 표([TABLE: tb_xxxx] 마커)가 snippet 캡에 잘리지 않고 ContextBuilder
+        # 가 chunk.tables 로 인라인 치환할 수 있도록(spec_driven_table_inline_expansion).
+        self._context_builder = ContextBuilder(capture_mode="full")
         self._recorder = recorder
         self._sink = event_sink
         self._app_profile = app_profile
@@ -975,15 +977,19 @@ def _select_with_slot_floor(
     return chunks, coverage
 
 
-# snippets 모드 한정 char→token 휴리스틱(한/영 혼합). vLLM 윈도우 안전 쪽으로
-# 기울도록 과대추정 편향(작은 divisor). token_count(전체 청크)는 snippet 만 싣는
-# 생성 프롬프트 기여분을 과대계상하므로 쓰지 않고 snippet 길이로 추정한다.
+# char→token 휴리스틱(한/영 혼합). vLLM 윈도우 안전 쪽으로 기울도록 과대추정 편향
+# (작은 divisor). token_count(전체 청크)는 생성 프롬프트 기여분과 척도가 달라 쓰지
+# 않고 본문 길이로 추정한다.
 _CHARS_PER_TOKEN = 3
 _CHUNK_HEADER_OVERHEAD = 12  # 인용 헤더 라인([cite-N] doc#chunk (p=..)) 토큰 근사.
 
 
 def _estimate_chunk_tokens(chunk: RetrievedChunk) -> int:
-    body = chunk.snippet or chunk.text or ""
+    # full 모드 render 가 본문으로 text(전문)를 쓰므로 추정도 text 우선으로 일치시킨다
+    # (snippet 우선 시 전문 길이를 과소추정해 예산 거버너가 윈도우 초과를 놓침 — D6).
+    # 표 치환 *전* 길이라 표 본문이 마커보다 길면 약간 과소추정하나, 위 과대추정
+    # 편향이 일부 상쇄한다.
+    body = chunk.text or chunk.snippet or ""
     return max(1, len(body) // _CHARS_PER_TOKEN) + _CHUNK_HEADER_OVERHEAD
 
 

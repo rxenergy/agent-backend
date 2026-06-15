@@ -89,7 +89,10 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
                                 "section_path_str": "3.5 Missile Protection > 3.5.1.3 Turbine Missiles",
                                 "page_start": 7,
                                 "page_end": 9,
-                                "text": "Turbine missile protection requirements for SMR...",
+                                "text": "Turbine missile protection requirements for SMR... [TABLE: tb_0001]",
+                                # 본문에서 분리된 표(object enabled:false) — full 모드 render 가
+                                # tables[tb_0001]["text"] 로 마커를 인라인 치환한다.
+                                "tables": {"tb_0001": {"text": "| 항목 | 값 |"}},
                                 "doc_metadata": {
                                     "AccessionNumber": "ML15355A364",
                                     "DocumentTitle": "NuScale DSRS 3.5.1.3 Turbine Missiles",
@@ -157,6 +160,13 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
     assert chunks[1]["jurisdiction"] is None
     assert chunks[1]["response_date"] == "2016-07-22"
     assert chunks[1]["effective_on"] is None
+
+    # text 전문(캡 없음) + snippet(캡) 둘 다 적재. tables 는 _source 원본 그대로
+    # 싣고, tables 없는 hit 은 None (spec_driven_table_inline_expansion).
+    assert chunks[0]["text"] == "Turbine missile protection requirements for SMR... [TABLE: tb_0001]"
+    assert chunks[0]["snippet"].startswith("Turbine missile protection")
+    assert chunks[0]["tables"] == {"tb_0001": {"text": "| 항목 | 값 |"}}
+    assert chunks[1]["tables"] is None
 
     assert "/nrc-all-v1/_search" in captured["url"]
     assert "search_pipeline=nrc-hybrid-search" in captured["url"]
@@ -367,3 +377,30 @@ async def test_document_resolver_maps_request_error(monkeypatch):
         await tool.invoke(
             {"citation_ids": ["c1"], "chunk_ids": ["kins-1#p7#1"]}, _ctx()
         )
+
+
+async def test_full_text_loaded_uncapped_while_snippet_capped(monkeypatch):
+    # D5 — snippet 은 캡(snippet_chars)되지만 text 는 전문이 잘림 없이 실린다.
+    # 표 마커가 캡 뒤에 있어도 full 모드 render 가 치환할 수 있어야 하기 때문.
+    long_text = "A" * 100 + " [TABLE: tb_0001]"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"hits": {"hits": [{
+                "_id": "h1", "_score": 1.0,
+                "_source": {
+                    "chunk_id": "c1", "source_id": "s1", "collection": "RG",
+                    "text": long_text,
+                    "tables": {"tb_0001": {"text": "TBL"}},
+                },
+            }]}},
+        )
+
+    _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
+    tool = _retriever(snippet_chars=10)  # 마커가 snippet 캡 밖
+    result = await tool.invoke({"query_text": "q", "top_k": 1}, _ctx())
+    chunk = result.output["chunks"][0]
+    assert chunk["text"] == long_text  # 전문(캡 없음) — 마커 포함
+    assert len(chunk["snippet"]) == 10  # snippet 은 캡됨
+    assert "[TABLE:" not in chunk["snippet"]  # 마커가 캡에 잘림(text 에만 남음)

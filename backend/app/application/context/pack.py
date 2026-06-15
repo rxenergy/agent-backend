@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -10,6 +11,35 @@ from app.domain.memory import MemoryRef
 from app.domain.retrieval import RetrievedChunk
 
 CaptureMode = Literal["metadata", "snippets", "full"]
+
+# 인덱싱 단계에서 본문에서 분리된 표 마커. 본문의 `[TABLE: tb_0001]` 를 chunk.tables
+# 의 표 텍스트로 인라인 치환한다(spec_driven_table_inline_expansion).
+_TABLE_MARKER_RE = re.compile(r"\[TABLE:\s*(?P<tb_id>[^\]]+?)\s*\]")
+
+
+def _render_table_entry(entry: Any) -> str | None:
+    """tables[tb_id] 엔트리 → 치환 텍스트. tables[tb_id]["text"] 만 사용한다
+    (caption/title 등 부가 키는 붙이지 않음). entry 가 (dict 아닌) 문자열이면 그대로
+    폴백한다 — _source.tables(enabled:false) 실제 키 구조 미확정에 방어적."""
+    if isinstance(entry, str):
+        return entry or None
+    if not isinstance(entry, dict):
+        return None
+    return entry.get("text") or None
+
+
+def _expand_tables(body: str, tables: dict[str, Any] | None) -> str:
+    """본문의 `[TABLE: tb_xxxx]` 마커를 tables[tb_xxxx] 의 표 텍스트로 인라인 치환.
+    tables 가 없거나 해당 tb_id 가 없으면 마커를 그대로 둔다(silent 삭제 금지 —
+    표 누락을 가시화, CLAUDE.md #6)."""
+    if not tables:
+        return body
+
+    def _sub(m: re.Match[str]) -> str:
+        rendered = _render_table_entry(tables.get(m.group("tb_id").strip()))
+        return rendered if rendered is not None else m.group(0)  # 미매칭=마커 보존
+
+    return _TABLE_MARKER_RE.sub(_sub, body)
 
 
 @dataclass(frozen=True)
@@ -140,6 +170,10 @@ class ContextBuilder:
                 body = chunk.snippet
             else:
                 body = "(metadata-only capture)"
+            # 표 마커 인라인 치환 — capture_mode 무관(있으면 치환). full 모드(text 전문)
+            # 는 마커가 잘리지 않아 전량 치환되고, snippets 모드(타 variant)는 캡 안에
+            # 든 마커만 치환된다(잘린 마커는 보존돼 가시화).
+            body = _expand_tables(body, chunk.tables)
             lines.append(f"{head}\n{body}")
         sections.append("\n\n".join(lines) if lines else "(no retrieved context)")
         return "\n\n".join(sections)

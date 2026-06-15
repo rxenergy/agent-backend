@@ -185,11 +185,32 @@ def format_citation(chunk: RetrievedChunk, citation_id: str) -> str:
     rev_part = f", Rev. {rev}" if rev else ""
     tag = f" ({weight_label(weight)})"
 
+    # ADAMS(ML번호) 문서는 공개 PDF URL 로 딥링크한다. page 가 있으면 PDF fragment
+    # `#page=N` 을 붙여 Chrome(및 PDF.js 기반 뷰어)이 클릭 시 해당 *페이지* 로 바로
+    # 점프하게 한다. 출처 라인의 document_id 토큰을 markdown 링크 [doc](url#page=N)
+    # 로 감싼다. 비-ADAMS(adams_url=None) 또는 page 결손("?") 이면 평문 doc 유지
+    # (무근거/404 링크·잘못된 페이지 앵커를 만들지 않는다).
+    doc_ref = _doc_link(doc, page)
+
     if doc_type == REGULATION:
         # [{doc}, Section {section}, p. {page}{, Rev. {rev}}]
-        return f"[{citation_id}] [{doc}, Section {section}, p. {page}{rev_part}]{tag}"
+        return f"[{citation_id}] [{doc_ref}, Section {section}, p. {page}{rev_part}]{tag}"
     if doc_type == RAI:
         date = chunk.response_date or "?"
-        return f"[{citation_id}] [{doc}, Response p. {page}, {date}]{tag}"
+        return f"[{citation_id}] [{doc_ref}, Response p. {page}, {date}]{tag}"
     # vendor (default)
-    return f"[{citation_id}] [{doc}, Chapter {section}, p. {page}{rev_part}]{tag}"
+    return f"[{citation_id}] [{doc_ref}, Chapter {section}, p. {page}{rev_part}]{tag}"
+
+
+def _doc_link(document_id: str, page: int | str) -> str:
+    """document_id 를 PDF 딥링크 markdown 으로 감싼다(가능할 때만).
+
+    ADAMS document_id → 공개 PDF URL(adams_url). page 가 정수면 `#page=N` fragment 를
+    붙여 Chrome 이 해당 페이지로 바로 열리게 한다. URL 이 없거나(비-ADAMS) page 가
+    결손("?")이면 평문 document_id 를 그대로 반환(404·잘못된 앵커 회피)."""
+    url = adams_url(document_id)
+    if not url:
+        return document_id
+    if isinstance(page, int):
+        url = f"{url}#page={page}"
+    return f"[{document_id}]({url})"
