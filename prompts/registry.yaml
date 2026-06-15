@@ -221,7 +221,7 @@ spec_driven_general_prompts:
 spec_driven_answer_spec_prompts:
   spec_driven_answer_spec_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "b50a275c46d19d6fd4acae138ee2df0c68acc3a44f61c07479616b350355bbd8"}
+    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "897d001ea249797c323264f9a1af3afc906f326cea6f4a35f6803aa96b360cc3"}
     output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "292dd7a9ceb94dd5ed82c66239f4e5a47e1978b7e7da406dc287ea975bfbdb6a"}
     # max_tokens — 슬롯 최대 10개(facet 세분)까지 spec JSON 이 들어가도록 상향(700→1100).
     model_options: {temperature: 0.0, max_tokens: 1100}
@@ -229,7 +229,7 @@ spec_driven_answer_spec_prompts:
 spec_driven_query_prompts:
   spec_driven_query_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "6d92ba0f3cf17025c4c8ed633c8950fa5b9efdbab6df10453b13ac492bdf3cda"}
+    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "c9d06ab9e91992752381043b83c18b02f6cc9960d4417b111193c67e11f3e343"}
     output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "6d01b09d554d9735fe53cc5affd32b0398f27dba65a8380234814968094872e5"}
     # max_tokens — 슬롯당 1쿼리 최대 10개(facet별 분기)까지 들어가도록 상향(700→1100).
     model_options: {temperature: 0.0, max_tokens: 1100}
