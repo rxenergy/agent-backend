@@ -170,10 +170,18 @@ class OpenSearchRetrieverTool:
             ) from exc
 
         hits = (data.get("hits") or {}).get("hits") or []
-        chunks = [
-            self._hit_to_chunk(hit, snippet_chars=self._snippet_chars)
-            for hit in hits[: max(1, tool_input.top_k)]
-        ]
+        # hit→chunk 변환을 hit 단위로 격리한다. 색인 _source 가 모델 계약(예: tables
+        # dict, text str)에 안 맞는 hit 하나가 ValidationError 로 컴프리헨션 전체를
+        # 죽여 검색이 통째로 0건(executor failed)이 되던 회귀를 막는다 — 깨진 hit 만
+        # skip 하고 나머지는 진행한다(_parse_chunks 의 부분진행 철학과 일치).
+        chunks: list[RetrievedChunk] = []
+        for hit in hits[: max(1, tool_input.top_k)]:
+            try:
+                chunks.append(
+                    self._hit_to_chunk(hit, snippet_chars=self._snippet_chars)
+                )
+            except Exception:  # noqa: BLE001 — 깨진 _source 는 건너뛴다(부분 진행).
+                continue
         output = RetrieverSearchOutput(chunks=chunks)
 
         return ToolResult(
@@ -190,7 +198,11 @@ class OpenSearchRetrieverTool:
     def _hit_to_chunk(hit: dict[str, Any], *, snippet_chars: int = 2048) -> RetrievedChunk:
         src = hit.get("_source", {}) or {}
         meta = src.get("doc_metadata") or {}
-        text = src.get("text", "") or ""
+        # text 는 항상 문자열로 강제한다. 색인 _source 의 text 가 str 이 아니면
+        # (list/숫자 등 이상 데이터) snippet 슬라이싱(text[:n])이 TypeError 를,
+        # 모델 검증이 ValidationError 를 내 chunk 변환이 깨진다 → 빈 문자열로 정규화.
+        raw_text = src.get("text", "")
+        text = raw_text if isinstance(raw_text, str) else ""
 
         # source_id는 nrc-all-v1 의 1차 문서 식별자. 없으면 ADAMS AccessionNumber,
         # 그래도 없으면 _id 사용.
@@ -232,7 +244,9 @@ class OpenSearchRetrieverTool:
             text=text,
             # 본문에서 분리된 표 원본(_source.tables, object enabled:false). full 모드
             # render 가 [TABLE: tb_xxxx] 마커를 tables[tb_xxxx]["text"] 로 치환한다(D8).
-            tables=src.get("tables") or None,
+            # 모델 계약은 dict[str, Any] — 색인 데이터가 dict 가 아니면(list/str 등 또는
+            # table 미분리 v1 스키마) None 으로 정규화해 ValidationError 를 막는다.
+            tables=src.get("tables") if isinstance(src.get("tables"), dict) else None,
             doc_type=collection,
             revision=None,  # NRC 스키마에 대응 필드 없음
             response_date=response_date,

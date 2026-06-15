@@ -404,3 +404,44 @@ async def test_full_text_loaded_uncapped_while_snippet_capped(monkeypatch):
     assert chunk["text"] == long_text  # 전문(캡 없음) — 마커 포함
     assert len(chunk["snippet"]) == 10  # snippet 은 캡됨
     assert "[TABLE:" not in chunk["snippet"]  # 마커가 캡에 잘림(text 에만 남음)
+
+
+async def test_malformed_source_does_not_zero_out_search(monkeypatch):
+    # 회귀: 색인 _source 가 모델 계약에 안 맞는 hit(tables=list, text=비문자열)이
+    # 섞여 있어도 검색이 통째로 0건이 되면 안 된다. 깨진 hit 만 skip 하고 정상 hit 은
+    # 변환한다(tables/text 방어적 정규화 + hit 단위 격리).
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"hits": {"hits": [
+                # 깨진 hit — tables 가 dict 가 아님(list).
+                {"_id": "bad1", "_score": 2.0, "_source": {
+                    "chunk_id": "bad1", "source_id": "s0", "collection": "nuscale_FSAR",
+                    "text": "body", "tables": [{"text": "t"}]}},
+                # 깨진 hit — text 가 문자열이 아님(list).
+                {"_id": "bad2", "_score": 1.5, "_source": {
+                    "chunk_id": "bad2", "source_id": "s0", "collection": "nuscale_FSAR",
+                    "text": ["a", "b"], "tables": None}},
+                # 정상 hit.
+                {"_id": "ok1", "_score": 1.0, "_source": {
+                    "chunk_id": "ok1", "source_id": "s1", "collection": "nuscale_FSAR",
+                    "text": "good body", "tables": {"tb_1": {"text": "TBL"}}}},
+            ]}},
+        )
+
+    _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
+    tool = _retriever()
+    result = await tool.invoke({"query_text": "q", "top_k": 10}, _ctx())
+    assert result.status == "success"
+    chunks = result.output["chunks"]
+    # 깨진 hit 들은 정규화되어 변환되거나(text→"", tables→None) 최소한 검색을 죽이지
+    # 않는다 — 정상 hit 은 반드시 보존된다.
+    ids = {c["chunk_id"] for c in chunks}
+    assert "ok1" in ids
+    ok = next(c for c in chunks if c["chunk_id"] == "ok1")
+    assert ok["text"] == "good body"
+    assert ok["tables"] == {"tb_1": {"text": "TBL"}}
+    # 정규화된 깨진 hit(있다면) 의 타입 계약 확인.
+    for c in chunks:
+        assert isinstance(c["text"], str)
+        assert c["tables"] is None or isinstance(c["tables"], dict)
