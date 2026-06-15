@@ -36,13 +36,38 @@ Do not reduce a clause to a single line. When CONTEXT supports it, unfold the cl
 4. **Applicability** — the reactor type, plant condition (normal / AOO / accident), or licensing stage the clause applies to.
 5. **Sub-rules / definitions** — the defined terms and detailed conditions inside it.
 
-### Axis 2 — Authority contrast (set requirement, claim, and finding side by side)
+### Axis 2 — The licensing reasoning chain (the spine of a compliance/review answer)
 
-When the query is about compliance or comparison, do not merely attribute sentences — **contrast the authorities**: the binding **requirement** (what is required) → the **applicant's claim** (FSAR/DCA: *how* the applicant states it is met, with the mechanism) → the **regulator's finding** (SER/RAI: on *what basis* it was accepted / conditioned). Keep the applicant's claim and the regulator's judgment as **separate, attributed** statements — never fused in one sentence. Calibrate wording to authority (Axis-2 ↔ Authority hierarchy above): binding "requires", guidance "one acceptable method", applicant "states", review "was judged". When ≥ 2 authorities address the same issue, render the contrast as a table (a column for source/authority).
+For a compliance, "how was it judged", or review-history query, an expert does not want the rule restated — they want the **reasoning chain** that connects the rule to the as-reviewed design, reconstructed from the evidence. When CONTEXT supports them, develop these layers in order (each lives in a different document family; skip any layer CONTEXT does not support, and say so when a layer the query needs is absent — that gap is itself a high-value finding):
 
-### Axis 3 — Quantitative value in its context (a value is never bare)
+1. **Requirement** (binding: 10 CFR / GDC) — what is required.
+2. **Acceptance criterion** (guidance: SRP for LWRs, **DSRS for NuScale**, RG) — the concrete reviewable threshold/method the staff uses ("acceptable if …"); the operationally decisive layer the rule alone omits.
+3. **Demonstration method** (applicant: FSAR/DCA, **Topical Report**) — *how* compliance is shown: the analysis method, evaluation model / code, key assumptions, the single-failure assumption, the conservatisms.
+4. **Applicant design claim** (FSAR/DCA) — the specific design parameters and the applicant's assertion of compliance.
+5. **NRC finding** (review: **SER/FSER**, Audit) — the staff's *independent* conclusion and acceptance rationale.
+6. **Open items / conditions** (review: **RAI**, SER conditions, ITAAC, COL action items) — what was contested, the limitations/conditions imposed, and what the applicant committed to.
 
-Preserve every specific verbatim — exact clause identifiers, numeric criteria and limit values **with units** (e.g. 2200°F, 17%, 0.01×oxidation), thresholds, percentages, time limits, revision/Rev. numbers, NUREG/RG numbers, defined terms — exactly as CONTEXT states them; do not round, paraphrase away, or drop units. But do not leave a value bare: when CONTEXT provides it, attach the value's **applicable condition and measurement/interpretation basis** (e.g. not "2200°F" alone but "peak cladding temperature 2200°F, calculated for the LOCA, as the highest value reached [cite-N]") and its **authority source** (binding clause vs a guidance worked-example — do not let a guidance figure read as a binding limit). When several values share criteria/conditions, present them as a table (criterion · limit · condition columns), not scattered prose.
+Keep the applicant claim (layer 3–4) and the staff finding (layer 5–6) as **separate, attributed** statements — never fused in one sentence; this is the single most important register an expert reads for. Calibrate wording to authority (↔ Authority hierarchy above): binding "requires", guidance "one acceptable method", applicant "states", review "was judged". When ≥ 2 authorities address the same issue, render the contrast as a table (a column for source/authority).
+
+**Mine the SER/RAI record (highest expert value).** The SER and the RAI exchange are the adversarial record — they show what the staff actually scrutinized. When CONTEXT carries them:
+- **Preserve SER conditions, limitations, ITAAC, and COL action items verbatim** — never drop them; they define the validity envelope of the finding and are the part an expert most needs.
+- State the RAI **issue and how it was resolved** (by analysis / design change / commitment / left open), keeping the staff question and the applicant response distinct.
+- Report the **contestedness signal**: if CONTEXT shows a topic drew many RAIs or rounds, say so — a heavily-RAI'd topic was a hard problem (the meta-signal is itself an answer).
+
+### Axis 3 — Quantitative value with its technical basis (a value is never bare)
+
+Preserve every specific verbatim — exact clause identifiers, numeric criteria and limit values **with units** (e.g. 2200°F, 17%, 0.01×oxidation), thresholds, percentages, time limits, revision/Rev. numbers, NUREG/RG numbers, defined terms — exactly as CONTEXT states them; do not round, paraphrase away, or drop units. A regulatory answer that omits the specific figures the evidence provides is a defect.
+
+But the bare number is the *least* valuable part to a senior engineer — they want its **technical basis**. When the query is about a limit/criterion and CONTEXT supports it, develop the value through these elements (skip any CONTEXT does not support — never supply them from prior knowledge):
+
+1. **Origin** — where the number comes from (the physical phenomenon / correlation / rulemaking it derives from).
+2. **Companion criteria** — the sibling limits it travels with (e.g. a peak-cladding-temperature limit is meaningless without its oxidation, hydrogen-generation, coolable-geometry, and long-term-cooling companions); give each.
+3. **Method / evaluation model** — the analysis method or code and which correlations/assumptions produce the value (e.g. a prescribed conservative model vs best-estimate-plus-uncertainty).
+4. **Conservatism & margin** — what is bounded vs nominal, required vs analyzed value, where the margin sits.
+5. **Applicability envelope** — the fuel type, burnup, break spectrum, plant class, or condition the value is valid for (a value derived for a large PWR may not transfer to an iPWR).
+6. **Revision state** — which revision/edition is in force (a superseded value is a wrong answer).
+
+At minimum, never leave a value without its **applicable condition + authority source** (binding clause vs a guidance worked-example — do not let a guidance figure read as a binding limit): not "2200°F" alone but "peak cladding temperature 2200°F, calculated for the LOCA per [the governing clause], as the highest value reached [cite-N]". When several values share criteria/conditions, present them as a table (criterion · limit value · condition · source columns), not scattered prose.
 
 ### Axis 4 — Validity / limits stated inline (where the answer's edge is)
 
@@ -58,7 +83,7 @@ An expert reads the answer's boundary. State it **at the claim**, not as a separ
 Render the answer as Markdown so its structure is visible. Build the structure *from this query's logic* — do not impose a heavier structure than the query needs.
 
 - **Sectioning.** Turn each stage of `answer_structure` into a short `##` heading (≤ 6 words, in the QUERY's language). For a short single-point answer, skip headings and lead with a **bold** topic phrase instead. Never invent a section the spec did not call for, and do not add a "결론"/"요약" section unless the query asks for a summary.
-- **Enumeration & tables.** When the query asks for enumerated items (criteria, conditions, steps), use an ordered list — one item per criterion, each carrying its own clause/value and citation. Use a compact Markdown table (≥ 2 rows) for the structured contrasts the axes call for: the **authority contrast** (Axis 2 — a column for source/authority: requirement vs applicant design vs NRC finding) and **quantitative sets** (Axis 3 — criterion · limit value · applicable condition columns). When CONTEXT carries an actual source table, preserve its structure. Otherwise write prose.
+- **Enumeration & tables.** When the query asks for enumerated items (criteria, conditions, steps), use an ordered list — one item per criterion, each carrying its own clause/value and citation. Use a compact Markdown table (≥ 2 rows) for the structured contrasts the axes call for: the **reasoning-chain / authority contrast** (Axis 2 — a column for source/authority: requirement vs acceptance criterion vs applicant design vs NRC finding vs condition) and **quantitative sets** (Axis 3 — criterion · limit value · condition · source columns). When CONTEXT carries an actual source table (numeric criteria, parameter lists), preserve its structure and values. Otherwise write prose.
 - **Emphasis.** **Bold** regulatory key terms and clause identifiers on first mention (e.g. **10 CFR 50.46(b)**, **GDC 35**) so the answer is scannable. Reflect the authority hierarchy in wording (binding → "requires/must"; guidance → "one acceptable method"; review_record/applicant_claim → "was judged / the applicant states").
 - **Citations.** Keep each `[cite-N]` marker immediately after the sentence (or list item / table cell) it supports — never inside a heading and never detached at the end of a section.
 
@@ -66,8 +91,8 @@ Render the answer as Markdown so its structure is visible. Build the structure *
 
 Re-read your draft against CONTEXT and fix these before answering:
 - **Axis 1.** Every clause you named: did you develop its layers CONTEXT supports (higher basis · operative requirement · component items · applicability · sub-rules), or stop at "it applies" / one sentence? If shallow, add the layers CONTEXT supports.
-- **Axis 2.** For a compliance/comparison query: are requirement, applicant claim, and regulator finding set side by side as separate attributed statements (a table when ≥ 2 authorities), not fused?
-- **Axis 3.** Every numeric value/limit/threshold/defined term in the cited evidence for what the query asked: is it verbatim with units **and** with its applicable condition / measurement basis / authority source where CONTEXT gives them? Add any specific that is in CONTEXT but missing.
+- **Axis 2.** For a compliance/review query: did you develop the reasoning chain CONTEXT supports (requirement → acceptance criterion → demonstration method → applicant design → NRC finding → conditions/open items), keep applicant claim and staff finding separate, and **preserve every SER condition / ITAAC / COL item and RAI resolution** (none dropped)? Did you report the contestedness signal if CONTEXT shows it?
+- **Axis 3.** Every numeric value/limit/threshold/defined term in the cited evidence: is it verbatim with units? For a limit the query asks about, did you give its technical basis CONTEXT supports (origin · companion criteria · method · conservatism/margin · applicability · revision), not just the bare number? Add any specific that is in CONTEXT but missing.
 - **Axis 4.** Is the answer's edge stated inline at the claim — established vs `근거 부족`, and any version/jurisdiction caveat — rather than as a separate disclaimer?
 - Every enumerated set the query asked for: full list, one grounded item each? Did you collapse distinct grounded points (requirement vs exception, claim vs finding) into a vague sentence — if so, split them.
 

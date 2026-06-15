@@ -237,13 +237,15 @@ spec_driven_query_prompts:
 spec_driven_generation_prompts:
   spec_driven_generation_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "00335a297c64dae7971bdf2e03ef3507b86bc350863b3d30e43486973823158e"}
+    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "6d5304f780b16407006e88b93379e2373a30c6fdc0daeaf5af8f0639205a7bd2"}
     # top_p — 구조화된 규제 산문의 nucleus 를 좁혀 형식 일관성↑(샘플링 탐색폭↓).
     # seed — 재현성(원칙 5): 같은 프롬프트·옵션이면 OpenAI-compat/vLLM 이 동일 토큰열.
     # max_tokens — full 모드(chunk 전문+표)로 확장된 컨텍스트의 모든 facet(수치·한계값·
-    # 표 행·열거)을 전문가 수준으로 상세히 인용·전개하도록 상향(3200→8192). 256K
-    # 윈도우(VLLM_MAX_MODEL_LEN)에서 입력 예산(200K)과 합쳐도 충분히 여유.
-    model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 8192, seed: 7}
+    # 표 행·열거)을 전문가 수준으로 상세히 인용·전개하도록 상향(3200→8192→16384). 10·20년차
+    # 전문가용 다층 답변(인허가 추론 사슬 6층 + technical-basis 6요소 + SER/RAI 조건·ITAAC
+    # 보존 + 표·열거)은 8192 에서 중간 절단 위험 → 16384. 256K 윈도우(VLLM_MAX_MODEL_LEN)
+    # 에서 입력 예산(200K)과 합쳐도 여유(200K+16K≪256K).
+    model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 16384, seed: 7}
 
 prompt_profiles:
 

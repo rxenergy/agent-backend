@@ -22,32 +22,44 @@ def _render_table_entry(entry: dict[str, Any]) -> str | None:
     이 비면(표 본문 없음) None 반환 → 호출부가 마커를 보존한다."""
     if not isinstance(entry, dict):
         return None
-    markdown = (entry.get("markdown") or "").strip()
-    if not markdown:
+    table = (entry.get("markdown") or entry.get("html") or "").strip()
+    if not table:
         return None
     caption = (entry.get("caption") or "").strip()
-    return f"**{caption}**\n\n{markdown}" if caption else markdown
+    return f"**{caption}**\n\n{table}" if caption else table
 
 
 def _expand_tables(body: str, tables: list[dict[str, Any]] | None) -> str:
     """본문의 `[TABLE: tag]` 마커를 tables 배열에서 같은 `tag` 엔트리의 caption+markdown
-    으로 인라인 치환한다. tables 가 없거나 해당 tag 가 없으면 마커를 그대로 둔다
-    (silent 삭제 금지 — 표 누락을 가시화, CLAUDE.md #6)."""
+    으로 인라인 치환한다. 같은 tag 의 엔트리가 여러 개면 배열 순서대로 **누적 결합**한다
+    (분할된 표·동일 태그 다중 표). tables 가 없거나 해당 tag 가 없으면 마커를 그대로
+    둔다(silent 삭제 금지 — 표 누락을 가시화, CLAUDE.md #6)."""
     if not tables:
         return body
-    # tag → 엔트리 인덱스(배열을 매번 선형탐색하지 않도록 1회 구성). dict/문자열tag 만.
-    by_tag = {
-        e["tag"]: e
-        for e in tables
-        if isinstance(e, dict) and isinstance(e.get("tag"), str)
-    }
+    # tag → 엔트리 *리스트*(배열을 매번 선형탐색하지 않도록 1회 구성). dict/문자열tag 만.
+    # 같은 tag 가 중복되면 배열 순서를 보존해 누적한다(덮어쓰지 않음).
+    by_tag: dict[str, list[dict[str, Any]]] = {}
+    for e in tables:
+        if isinstance(e, dict) and isinstance(e.get("tag"), str):
+            by_tag.setdefault(e["tag"], []).append(e)
     if not by_tag:
         return body
 
+    # 본문에 같은 tag 마커가 여러 번 나오면 표는 *한 번만* 렌더링한다(중복 삽입 방지).
+    # 첫 마커에 표를 싣고, 동일 tag 의 이후 마커는 제거한다.
+    seen: set[str] = set()
+
     def _sub(m: re.Match[str]) -> str:
-        entry = by_tag.get(m.group("tag").strip())
-        rendered = _render_table_entry(entry) if entry is not None else None
-        return rendered if rendered is not None else m.group(0)  # 미매칭=마커 보존
+        tag = m.group("tag").strip()
+        entries = by_tag.get(tag) or ()
+        rendered = [r for e in entries if (r := _render_table_entry(e)) is not None]
+        if not rendered:
+            return m.group(0)  # 미매칭(또는 표 본문 없음)=마커 보존
+        if tag in seen:
+            return ""  # 동일 tag 두 번째 이후 마커 — 표 중복 삽입 대신 제거
+        seen.add(tag)
+        # 누적 결합 — 같은 tag 의 여러 *엔트리*를 배열 순서대로 빈 줄로 잇는다.
+        return "\n\n".join(rendered)
 
     return _TABLE_MARKER_RE.sub(_sub, body)
 
