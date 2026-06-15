@@ -87,6 +87,19 @@ def _citation_label(c) -> str:
     return c.document_id or c.citation_id
 
 
+def _citation_url(c) -> str | None:
+    """References 링크 URL — ADAMS PDF + `#page=N` 딥링크. page 가 있으면 PDF
+    fragment 를 붙여 Chrome(및 PDF.js 뷰어)이 클릭 시 해당 *페이지* 로 바로 점프하게
+    한다. 비-ADAMS(adams_url=None) 면 None → 호출측이 평문 라벨. page 결손이면 앵커
+    없이 URL 만(잘못된 페이지로 보내지 않는다)."""
+    url = adams_url(c.document_id)
+    if not url:
+        return None
+    if isinstance(c.page, int):
+        url = f"{url}#page={c.page}"
+    return url
+
+
 def references_section(citations, renumber: dict[str, int]) -> str:
     """본문에서 참조된 인용만, **본문 등장 순서(표시번호순)**로 나열한다. 각 줄은
     본문 마커와 동일한 `[N]` 형식으로 시작한다(`[cite-N]`·`N.` 아님 — 본문↔근거
@@ -104,7 +117,7 @@ def references_section(citations, renumber: dict[str, int]) -> str:
             lines.append(f"[{num}] (근거 메타 없음: {cid})")
             continue
         label = _citation_label(c)
-        url = adams_url(c.document_id)
+        url = _citation_url(c)
         lines.append(f"[{num}] [{label}]({url})" if url else f"[{num}] {label}")
     # 헤더와 본문 사이 빈 줄 필수(marked.js 단락 병합 방지). 항목은 마크다운 hard
     # break("  \n")로 줄을 나눈다 — `[N]` 줄은 리스트가 아니라 단일 `\n`이면 한 줄로

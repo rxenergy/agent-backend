@@ -15,8 +15,9 @@ from app.application.context.citation_format import adams_url
 from app.domain.interaction import AgentResponse, Citation
 
 
-def _cite(cid: str, *, document_id=None, formatted=None) -> Citation:
-    return Citation(citation_id=cid, document_id=document_id, formatted=formatted)
+def _cite(cid: str, *, document_id=None, formatted=None, page=None) -> Citation:
+    return Citation(citation_id=cid, document_id=document_id, formatted=formatted,
+                    page=page)
 
 
 def _resp(
@@ -76,9 +77,9 @@ def test_rewrite_inline_uses_display_numbers():
 
 def test_references_links_adams_and_plain_fallback():
     cites = [
-        _cite("cite-0", document_id="ML18002A422",
+        _cite("cite-0", document_id="ML18002A422", page=12,
               formatted="[cite-0] [ML18002A422, Section C.I.4, p. 12, Rev. 5]"),
-        _cite("cite-1", document_id="RG-1.206",
+        _cite("cite-1", document_id="RG-1.206", page=3,
               formatted="[cite-1] [RG-1.206, Section 1.1, p. 3, Rev. 2]"),
     ]
     m = {"cite-0": 1, "cite-1": 2}
@@ -86,12 +87,21 @@ def test_references_links_adams_and_plain_fallback():
     assert "**근거 (References)**" in out
     # 본문 마커와 동일한 [N] 형식([cite-N]·N. 아님).
     assert "[cite-" not in out
-    # ADAMS → 마크다운 링크.
+    # ADAMS → 마크다운 링크 + #page=N 딥링크(Chrome 이 해당 페이지로 점프).
     assert "[1] [ML18002A422, Section C.I.4, p. 12, Rev. 5]" \
-           "(https://www.nrc.gov/docs/ML1800/ML18002A422.pdf)" in out
+           "(https://www.nrc.gov/docs/ML1800/ML18002A422.pdf#page=12)" in out
     # 비-ADAMS → 평문(링크 없음).
     assert "[2] RG-1.206, Section 1.1, p. 3, Rev. 2" in out
     assert "(http" not in out.split("[2] ")[1]
+
+
+def test_references_adams_link_omits_page_anchor_when_no_page():
+    # page 결손 시 #page 앵커 없이 URL 만(잘못된 페이지로 보내지 않는다).
+    cites = [_cite("cite-0", document_id="ML18002A422", page=None,
+                   formatted="[cite-0] [ML18002A422, Section C.I.4, p. ?]")]
+    out = references_section(cites, {"cite-0": 1})
+    assert "(https://www.nrc.gov/docs/ML1800/ML18002A422.pdf)" in out
+    assert "#page=" not in out
 
 
 def test_references_strips_cite_prefix_and_weight_tag():
