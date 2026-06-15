@@ -409,25 +409,26 @@ async def test_full_text_loaded_uncapped_while_snippet_capped(monkeypatch):
 
 
 async def test_malformed_source_does_not_zero_out_search(monkeypatch):
-    # 회귀: 색인 _source 가 모델 계약에 안 맞는 hit(tables=list, text=비문자열)이
-    # 섞여 있어도 검색이 통째로 0건이 되면 안 된다. 깨진 hit 만 skip 하고 정상 hit 은
+    # 회귀: 색인 _source 가 모델 계약에 안 맞는 hit(tables 가 list 아님, text=비문자열)이
+    # 섞여 있어도 검색이 통째로 0건이 되면 안 된다. 깨진 필드만 정규화하고 정상 hit 은
     # 변환한다(tables/text 방어적 정규화 + hit 단위 격리).
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             json={"hits": {"hits": [
-                # 깨진 hit — tables 가 dict 가 아님(list).
+                # 깨진 hit — tables 가 list 가 아님(dict, table 미분리 구 스키마).
                 {"_id": "bad1", "_score": 2.0, "_source": {
                     "chunk_id": "bad1", "source_id": "s0", "collection": "nuscale_FSAR",
-                    "text": "body", "tables": [{"text": "t"}]}},
+                    "text": "body", "tables": {"tb_1": {"text": "t"}}}},
                 # 깨진 hit — text 가 문자열이 아님(list).
                 {"_id": "bad2", "_score": 1.5, "_source": {
                     "chunk_id": "bad2", "source_id": "s0", "collection": "nuscale_FSAR",
                     "text": ["a", "b"], "tables": None}},
-                # 정상 hit.
+                # 정상 hit — tables 가 list[dict].
                 {"_id": "ok1", "_score": 1.0, "_source": {
                     "chunk_id": "ok1", "source_id": "s1", "collection": "nuscale_FSAR",
-                    "text": "good body", "tables": {"tb_1": {"text": "TBL"}}}},
+                    "text": "good body",
+                    "tables": [{"tag": "tb_1", "markdown": "TBL"}]}},
             ]}},
         )
 
@@ -442,8 +443,11 @@ async def test_malformed_source_does_not_zero_out_search(monkeypatch):
     assert "ok1" in ids
     ok = next(c for c in chunks if c["chunk_id"] == "ok1")
     assert ok["text"] == "good body"
-    assert ok["tables"] == {"tb_1": {"text": "TBL"}}
-    # 정규화된 깨진 hit(있다면) 의 타입 계약 확인.
+    assert ok["tables"] == [{"tag": "tb_1", "markdown": "TBL"}]
+    # 깨진 hit(tables 가 dict)은 None 으로 정규화.
+    bad1 = next(c for c in chunks if c["chunk_id"] == "bad1")
+    assert bad1["tables"] is None
+    # 정규화된 깨진 hit 의 타입 계약 확인.
     for c in chunks:
         assert isinstance(c["text"], str)
-        assert c["tables"] is None or isinstance(c["tables"], dict)
+        assert c["tables"] is None or isinstance(c["tables"], list)
