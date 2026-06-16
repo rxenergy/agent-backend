@@ -88,14 +88,21 @@ def _citation_label(c) -> str:
 
 
 def _citation_url(c) -> str | None:
-    """References 링크 URL — ADAMS PDF + `#page=N` 딥링크. page 가 있으면 PDF
-    fragment 를 붙여 Chrome(및 PDF.js 뷰어)이 클릭 시 해당 *페이지* 로 바로 점프하게
-    한다. 비-ADAMS(adams_url=None) 면 None → 호출측이 평문 라벨. page 결손이면 앵커
-    없이 URL 만(잘못된 페이지로 보내지 않는다)."""
-    url = adams_url(c.document_id)
+    """References 링크 URL. 우선순위(사용자 결정):
+      1. 인덱스 원문 URL(source_url) — doc_metadata.Url(ADAMS) / download_pdfLink
+         (govinfo·10CFR) / detailsLink. 인덱싱 시점 그 청크 원문 경로라 가장 정확.
+      2. adams_url(document_id) — ML번호 정규식 재구성 fallback(구 시드 — source_url 부재).
+      3. None → 호출측이 평문 라벨(무근거/404 링크 회피).
+
+    page 딥링크는 URL 이 `.pdf` 로 끝나고 page 가 정수일 때만 `#page=N` 을 붙인다
+    (HTML detailsLink·eCFR 류엔 PDF fragment 가 무의미). source_url 에 이미 fragment·
+    query 가 있으면 page 앵커를 덧붙이지 않는다(원본 앵커 보존)."""
+    url = getattr(c, "source_url", None) or adams_url(c.document_id)
     if not url:
         return None
-    if isinstance(c.page, int):
+    if (isinstance(c.page, int)
+            and url.lower().endswith(".pdf")
+            and "#" not in url):
         url = f"{url}#page={c.page}"
     return url
 

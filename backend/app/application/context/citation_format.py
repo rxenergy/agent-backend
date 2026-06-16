@@ -31,6 +31,21 @@ VENDOR = "vendor"
 REGULATION = "regulation"
 RAI = "rai"
 
+# 10 CFR clause_id(예: "10CFR50.46", "10 CFR 50.46", "10CFR50.55a") → 사람용
+# "10 CFR §50.46" 표기. title 토큰(10CFR) 뒤 part·section 을 §로 잇는다. 매칭
+# 실패(예상 밖 형식)면 None → 호출측이 document_id 로 fallback.
+_CFR_CLAUSE_RE = re.compile(r"^10\s*CFR\s*(\d+[A-Za-z]?(?:\.[\w()\-]+)?)\s*$", re.IGNORECASE)
+
+
+def cfr_section_label(clause_id: str | None) -> str | None:
+    """10 CFR clause_id → "10 CFR §50.46" 사람용 라벨. 비-CFR/형식 불일치는 None."""
+    if not clause_id:
+        return None
+    m = _CFR_CLAUSE_RE.match(clause_id.strip())
+    if not m:
+        return None
+    return f"10 CFR §{m.group(1)}"
+
 # ── 규범적 무게(normative weight) ──────────────────────────────────────────
 # 출처의 *권위 등급*. `authority_tier`(검색 hard gate, primary/secondary/tertiary)
 # 와 직교한다 — 구속 10CFR 과 비구속 RG 가 둘 다 primary 일 수 있다. 답변이 인용을
@@ -193,6 +208,13 @@ def format_citation(chunk: RetrievedChunk, citation_id: str) -> str:
     doc_ref = _doc_link(doc, page)
 
     if doc_type == REGULATION:
+        # 10 CFR 은 packageId(CFR-YYYY-title10-vol1)가 아니라 조문 ID 로 식별하는 게
+        # 규제 인용 관례 — clause_id(10CFR50.46) → "10 CFR §50.46" 로 doc 토큰을
+        # 치환하고 Section(절 경로)·page 를 잇는다. ADAMS PDF 링크가 없는 govinfo
+        # 문서라 doc_ref 는 평문 packageId 였는데, 사람용으로 §조문이 훨씬 읽힌다.
+        cfr = cfr_section_label(chunk.clause_id)
+        if cfr is not None:
+            return f"[{citation_id}] [{cfr}, Section {section}, p. {page}{rev_part}]{tag}"
         # [{doc}, Section {section}, p. {page}{, Rev. {rev}}]
         return f"[{citation_id}] [{doc_ref}, Section {section}, p. {page}{rev_part}]{tag}"
     if doc_type == RAI:

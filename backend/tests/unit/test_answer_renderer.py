@@ -15,9 +15,10 @@ from app.application.context.citation_format import adams_url
 from app.domain.interaction import AgentResponse, Citation
 
 
-def _cite(cid: str, *, document_id=None, formatted=None, page=None) -> Citation:
+def _cite(cid: str, *, document_id=None, formatted=None, page=None,
+          source_url=None) -> Citation:
     return Citation(citation_id=cid, document_id=document_id, formatted=formatted,
-                    page=page)
+                    page=page, source_url=source_url)
 
 
 def _resp(
@@ -93,6 +94,46 @@ def test_references_links_adams_and_plain_fallback():
     # 비-ADAMS → 평문(링크 없음).
     assert "[2] RG-1.206, Section 1.1, p. 3, Rev. 2" in out
     assert "(http" not in out.split("[2] ")[1]
+
+
+def test_references_prefers_index_source_url_for_10cfr():
+    # 10 CFR(비-ADAMS) 인데 인덱스 source_url(govinfo PDF)이 있으면 평문이 아니라
+    # 그 URL 로 링크 + PDF 라서 #page=N 딥링크.
+    cites = [_cite(
+        "cite-0", document_id="CFR-2024-title10-vol1", page=512,
+        source_url="https://www.govinfo.gov/content/pkg/CFR-2024-title10-vol1/pdf/"
+                   "CFR-2024-title10-vol1-sec50-46.pdf",
+        formatted="[cite-0] [10 CFR §50.46, Section 50.46(b)(1), p. 512] (구속 요건)",
+    )]
+    out = references_section(cites, {"cite-0": 1})
+    assert "[1] [10 CFR §50.46, Section 50.46(b)(1), p. 512]" in out
+    assert ("(https://www.govinfo.gov/content/pkg/CFR-2024-title10-vol1/pdf/"
+            "CFR-2024-title10-vol1-sec50-46.pdf#page=512)") in out
+    assert "(구속 요건)" not in out  # 권위 태그는 References 비노출
+
+
+def test_references_index_url_non_pdf_omits_page_anchor():
+    # HTML detailsLink 류(.pdf 아님)는 #page 앵커를 붙이지 않는다.
+    cites = [_cite(
+        "cite-0", document_id="CFR-2024-title10-vol1", page=512,
+        source_url="https://www.govinfo.gov/app/details/CFR-2024-title10-vol1",
+        formatted="[cite-0] [10 CFR §50.46, Section 50.46, p. 512]",
+    )]
+    out = references_section(cites, {"cite-0": 1})
+    assert "(https://www.govinfo.gov/app/details/CFR-2024-title10-vol1)" in out
+    assert "#page=" not in out
+
+
+def test_references_index_url_with_existing_fragment_not_double_anchored():
+    # source_url 에 이미 fragment 가 있으면 page 앵커를 덧붙이지 않는다(원본 보존).
+    cites = [_cite(
+        "cite-0", document_id="ML18002A422", page=12,
+        source_url="https://www.nrc.gov/docs/ML1800/ML18002A422.pdf#section=3",
+        formatted="[cite-0] [ML18002A422, Section 3, p. 12]",
+    )]
+    out = references_section(cites, {"cite-0": 1})
+    assert "ML18002A422.pdf#section=3)" in out
+    assert "#page=12" not in out
 
 
 def test_references_adams_link_omits_page_anchor_when_no_page():

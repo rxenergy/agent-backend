@@ -45,6 +45,9 @@ class Citation:
     revision: str | None = None
     response_date: str | None = None  # RAI 응답 일자
     formatted: str | None = None  # 기획 doc §4 Citation Format 적용 결과
+    # 원문 다운로드 URL(인덱스 doc_metadata 1차 소스) — References 딥링크용. 없으면
+    # answer_renderer 가 adams_url(ML번호 재구성) → 평문 순으로 강등한다.
+    source_url: str | None = None
 
 
 @dataclass(frozen=True)

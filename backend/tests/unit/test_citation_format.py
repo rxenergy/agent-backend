@@ -9,6 +9,7 @@ from app.application.context.citation_format import (
     REGULATION,
     REVIEW_RECORD,
     VENDOR,
+    cfr_section_label,
     format_citation,
     infer_doc_type,
     normative_weight,
@@ -190,3 +191,40 @@ def test_format_non_adams_stays_plaintext() -> None:
     )
     assert "](http" not in s  # markdown 링크 없음.
     assert "[rg-1-157, Section 4.2" in s
+
+
+# ── 10 CFR §조문 라벨 ─────────────────────────────────────────────────────────
+
+def test_cfr_section_label_variants() -> None:
+    assert cfr_section_label("10CFR50.46") == "10 CFR §50.46"
+    assert cfr_section_label("10 CFR 50.46") == "10 CFR §50.46"
+    assert cfr_section_label("10CFR50.55a") == "10 CFR §50.55a"
+    assert cfr_section_label("10CFR100") == "10 CFR §100"
+    assert cfr_section_label("10CFR50.34(f)") == "10 CFR §50.34(f)"
+    # 비-CFR / 형식 불일치 → None(fallback).
+    assert cfr_section_label("RG_1_157") is None
+    assert cfr_section_label(None) is None
+    assert cfr_section_label("") is None
+
+
+def test_format_10cfr_uses_section_clause_label() -> None:
+    # 10 CFR 은 packageId 대신 조문 ID(clause_id)로 "10 CFR §50.46" 표기 + Section/page.
+    c = RetrievedChunk(
+        chunk_id="ch1", document_id="CFR-2024-title10-vol1", score=0.9,
+        page=512, section="50.46(b)(1)", collection="10CFR", clause_id="10CFR50.46",
+    )
+    s = format_citation(c, "cite-0")
+    assert "[10 CFR §50.46, Section 50.46(b)(1), p. 512]" in s
+    assert "(구속 요건)" in s
+    # govinfo packageId 는 라벨에 노출되지 않는다(사람용 §조문 우선).
+    assert "CFR-2024-title10-vol1" not in s
+
+
+def test_format_10cfr_without_clause_id_falls_back_to_doc() -> None:
+    # clause_id 부재 시 기존 동작(document_id 평문) 유지.
+    c = RetrievedChunk(
+        chunk_id="ch1", document_id="CFR-2024-title10-vol1", score=0.9,
+        page=512, section="50.46", collection="10CFR", clause_id=None,
+    )
+    s = format_citation(c, "cite-0")
+    assert "[CFR-2024-title10-vol1, Section 50.46" in s

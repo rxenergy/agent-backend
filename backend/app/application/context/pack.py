@@ -76,6 +76,11 @@ class CitationCandidate:
     revision: str | None = None
     response_date: str | None = None
     formatted: str | None = None
+    # 원문 다운로드 URL(인덱스 doc_metadata 1차 소스) + 조문 ID — References 딥링크/
+    # 라벨 구성용. answer_renderer 가 source_url 우선 → adams_url 재구성 → 평문 순으로
+    # 강등하고, clause_id(10CFR50.46)로 "10 CFR §50.46" 라벨을 만든다.
+    source_url: str | None = None
+    clause_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -151,6 +156,8 @@ class ContextBuilder:
                     revision=c.revision,
                     response_date=c.response_date,
                     formatted=format_citation(c, cid),
+                    source_url=c.source_url,
+                    clause_id=c.clause_id,
                 )
             )
         candidates = tuple(candidates_list)

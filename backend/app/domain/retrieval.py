@@ -52,6 +52,10 @@ class RetrievedChunk(BaseModel):
     std_status: str | None = None  # current | history | draft | withdrawn | ... (RG/SRP/DSRS)
     std_design: str | None = None  # US_460 | US_600 (nuscale_*)
     std_canonical_id: str | None = None  # 버전 묶음 키(예: RG-1.206) — Rev 미포함
+    # 원문 다운로드 URL — 인덱스 doc_metadata 에 이미 존재(ADAMS=Url, govinfo/10CFR=
+    # download_pdfLink, fallback detailsLink). References 딥링크의 *1차* 소스. 없으면
+    # 호출측(answer_renderer)이 adams_url(ML번호 재구성) → 평문 순으로 강등한다.
+    source_url: str | None = None
 
 
 class RetrieverSearchInput(BaseModel):

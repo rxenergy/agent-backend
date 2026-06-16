@@ -358,6 +358,10 @@ def _smr_agent_metadata(
                 "response_date": c.response_date,
                 "regulation_clause": c.regulation_clause,
                 "formatted": c.formatted,
+                # 원문 다운로드 URL(인덱스 doc_metadata 1차 소스) — dumb client 도
+                # 출처를 직접 링크할 수 있게 노출(원칙 8). content 의 References 가
+                # 이미 마크다운 링크를 싣지만, 구조화 소비자(eval/감사)도 URL 을 본다.
+                "source_url": c.source_url,
             }
             for c in response.citations
         ],

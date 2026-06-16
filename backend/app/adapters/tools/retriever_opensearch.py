@@ -217,6 +217,13 @@ class OpenSearchRetrieverTool:
         response_date = meta.get("DocumentDate") or meta.get("dateIssued")
         title = meta.get("DocumentTitle") or meta.get("title")
 
+        # 원문 다운로드 URL — References 딥링크의 1차 소스. ADAMS 는 doc_metadata.Url,
+        # govinfo(10CFR/FR)는 download_pdfLink(없으면 detailsLink HTML). 인덱싱 시점에
+        # 그 청크 원문을 가져온 경로라 ML번호 재구성보다 정확하다(10CFR 도 평문이 아닌
+        # 실제 링크로 표출). 빈 문자열/비문자열은 None 으로 정규화(호출측 fallback 발동).
+        raw_url = meta.get("Url") or meta.get("download_pdfLink") or meta.get("detailsLink")
+        source_url = raw_url.strip() or None if isinstance(raw_url, str) else None
+
         # v3.1 규제 메타 (Node 6 G3). 인덱스 _source 에 명시 필드가 있으면 그대로
         # 사용하고, 없으면 가능한 범위에서 유도 — 재인덱싱 이전에도 G3 가 동작하도록.
         collection = src.get("collection")
@@ -267,6 +274,7 @@ class OpenSearchRetrieverTool:
             std_status=meta.get("std_status") or None,
             std_design=meta.get("std_design") or None,
             std_canonical_id=meta.get("std_canonical_id") or None,
+            source_url=source_url,
         )
 
 
