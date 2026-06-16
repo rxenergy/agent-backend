@@ -40,10 +40,10 @@ def test_regulatory_grounding_defaults_na_for_other_variants():
     assert meta["regulatory_grounding"] == "n_a"
 
 
-def test_citations_expose_source_url_and_tables():
-    # 구조화 소비자(eval/감사)용 — citation 의 source_url·tables 원본이 smr_agent 에
-    # 노출된다(원칙 8, spec_driven_table_citation_references D7). OpenWebUI 는 무시하나
-    # content 의 References 가 사람용 렌더를 담당.
+def test_citations_expose_source_url_and_table_meta():
+    # 구조화 소비자(eval/감사)용 — source_url·kind·table_tag 노출. 표는 **메타만**
+    # (tag/caption/has_body) — 본문(markdown/html)은 제외해 finish 프레임이 SSE 버퍼
+    # 한도를 넘지 않게(본문은 content References 가 렌더). OpenWebUI 는 smr 무시.
     tables = [{"tag": "t", "caption": "C", "markdown": "| a |", "html": ""}]
     cite = Citation(citation_id="cite-1", document_id="ML18002A422",
                     source_url="https://www.nrc.gov/docs/ML1800/ML18002A422.pdf",
@@ -54,7 +54,9 @@ def test_citations_expose_source_url_and_tables():
     )
     c0 = meta["citations"][0]
     assert c0["source_url"] == "https://www.nrc.gov/docs/ML1800/ML18002A422.pdf"
-    assert c0["tables"] == tables
+    # 표 메타만(본문 markdown/html 비노출 — 프레임 비대화 방지).
+    assert c0["tables"] == [{"tag": "t", "caption": "C", "has_body": True}]
+    assert "markdown" not in c0["tables"][0]
     # 입도 구분(kind/table_tag)도 구조화 소비자에 노출(table 근거 분리 집계).
     assert c0["kind"] == "table"
     assert c0["table_tag"] == "t"

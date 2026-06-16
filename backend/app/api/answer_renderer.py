@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 
 from app.application.context.citation_format import adams_url
+from app.application.context.table_render import table_body_markdown
 
 # 인용 마커 그룹 — 한 대괄호 안의 cite-N 하나 *또는* 결합형(쉼표/세미콜론/공백
 # 구분). 모델이 계약을 어기고 `[cite-0, cite-2]` 처럼 묶어 내도 깨지지 않게 그룹째
@@ -122,7 +123,9 @@ def _render_reference_tables(tables) -> str:
     for e in tables:
         if not isinstance(e, dict):
             continue
-        body = (e.get("markdown") or e.get("html") or "").strip()
+        # 표 본문은 GFM markdown 으로 정규화 — markdown 우선, html 만 있으면 파이프표로
+        # 변환(OpenWebUI 가 raw HTML 을 텍스트로 노출하는 문제 회피, table_render).
+        body = table_body_markdown(e).strip()
         if not body:
             continue
         caption = (e.get("caption") or "").strip()

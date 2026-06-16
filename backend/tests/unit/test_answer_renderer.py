@@ -219,14 +219,18 @@ def test_references_chunk_cite_with_tables_renders_label_only():
     assert "[1] [ML18002A422, Section 6.2, p. 45]" in out
 
 
-def test_references_table_cite_html_fallback_when_no_markdown():
-    # markdown 비고 html 만 → raw <table> 그대로(marked.js 통과).
-    html = "<table><tr><td>PCT</td><td>2200°F</td></tr></table>"
+def test_references_table_cite_html_converted_to_markdown():
+    # markdown 비고 html 만 → GFM 파이프표로 변환(raw HTML 텍스트 노출 방지, table_render).
+    html = ("<table><tr><th>항목</th><th>한계값</th></tr>"
+            "<tr><td>PCT</td><td>2200°F</td></tr></table>")
     cites = [_cite("cite-0", document_id="ML1", kind="table",
                    formatted="[cite-0] [ML1, p. 1, 표: t]",
                    tables=[{"tag": "t", "caption": "", "markdown": "", "html": html}])]
     out = references_section(cites, {"cite-0": 1})
-    assert html in out
+    assert "<table>" not in out  # raw HTML 노출 안 함
+    assert "| 항목 | 한계값 |" in out  # 헤더 행(th)
+    assert "| --- | --- |" in out     # 구분선
+    assert "| PCT | 2200°F |" in out  # 데이터 행
 
 
 def test_references_mixed_table_and_chunk_isolation():

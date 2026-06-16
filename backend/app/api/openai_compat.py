@@ -322,6 +322,25 @@ async def chat_completions(req: ChatCompletionRequest, request: Request):
     }
 
 
+def _table_meta(tables) -> list[dict[str, Any]] | None:
+    """citation 의 tables → smr 노출용 경량 메타(tag/caption/has_body)만. 표 본문
+    (markdown/html)은 제외해 finish 프레임이 SSE 버퍼 한도를 넘지 않게 한다 — 본문은
+    content 의 References 가 렌더한다. None/비-list/빈 dict 는 안전 처리."""
+    if not tables:
+        return None
+    out: list[dict[str, Any]] = []
+    for e in tables:
+        if not isinstance(e, dict):
+            continue
+        has_body = bool((e.get("markdown") or e.get("html") or "").strip())
+        out.append({
+            "tag": e.get("tag"),
+            "caption": e.get("caption"),
+            "has_body": has_body,
+        })
+    return out or None
+
+
 def _smr_agent_metadata(
     *,
     interaction_id: str,
@@ -362,11 +381,11 @@ def _smr_agent_metadata(
                 # 출처를 직접 링크할 수 있게 노출(원칙 8). content 의 References 가
                 # 이미 마크다운 링크를 싣지만, 구조화 소비자(eval/감사)도 URL 을 본다.
                 "source_url": c.source_url,
-                # 본문에서 분리된 표(원본 list — {tag,caption,markdown,html}). content
-                # 의 References 가 이미 표를 마크다운/HTML 로 렌더하지만(OpenWebUI 가시),
-                # 구조화 소비자(eval/감사)는 이 원본을 파싱한다(원칙 8 — silent 금지,
-                # spec_driven_table_citation_references D7).
-                "tables": c.tables,
+                # 표 *메타*(tag/caption/has_body)만 — 표 본문(markdown/html)은 content
+                # 의 References 가 이미 렌더하고, 원본을 smr 에 실으면 finish 프레임이
+                # SSE 버퍼 한도(131072B)를 넘는다(표 다수 시). 구조화 소비자는 어떤 표가
+                # 인용됐는지(tag/caption)를 이 메타로 알고, 본문은 content 에서 읽는다.
+                "tables": _table_meta(c.tables),
                 # 인용 입도(spec_driven_table_citation_granularity) — chunk 본문 / 표 구분.
                 # kind="table" 이면 table_tag 로 어느 표인지(구조화 소비자가 본문 근거와
                 # 표 근거를 분리 집계).
@@ -376,6 +395,42 @@ def _smr_agent_metadata(
             for c in response.citations
         ],
     }
+
+
+# SSE content 프레임당 안전 페이로드 상한(문자 기준). 클라이언트(OpenWebUI httpx)가
+# 한 줄(SSE event)당 131072 바이트 버퍼 한계를 두므로, 큰 References/표를 한 프레임에
+# 실으면 `Got more than 131072 bytes` 로 끊긴다. JSON escape·UTF-8 멀티바이트 오버헤드를
+# 감안해 넉넉히 낮게 잡는다(24KB) — 분할은 누적 렌더라 표/마크다운 결과에 영향 없다.
+_SSE_CONTENT_LIMIT = 24_000
+
+
+def _split_content(text: str, limit: int = _SSE_CONTENT_LIMIT) -> list[str]:
+    """긴 content 를 limit 이하 조각으로 분할(여러 SSE 프레임용). 줄 경계(`\\n`)를
+    우선 보존하고, 단일 줄이 limit 을 넘으면 그 줄만 문자 단위로 강제 분할한다. 빈
+    문자열은 빈 리스트(프레임 미생성)."""
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    buf = ""
+    for line in text.splitlines(keepends=True):
+        if len(line) > limit:
+            # 줄 자체가 한도 초과 — 먼저 버퍼 비우고 그 줄을 강제 분할.
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            for i in range(0, len(line), limit):
+                chunks.append(line[i:i + limit])
+            continue
+        if len(buf) + len(line) > limit:
+            chunks.append(buf)
+            buf = line
+        else:
+            buf += line
+    if buf:
+        chunks.append(buf)
+    return chunks
 
 
 def _frame(
@@ -566,14 +621,15 @@ async def _sse_stream_from_runner(
                 )
                 if not tokens_streamed:
                     # 토큰이 없던 경로(거부/fake_echo): 전체 본문을 boundary 에서
-                    # compose(마커 재번호 + References + 고지 callout) 해 단일 content.
+                    # compose(마커 재번호 + References + 고지 callout). 큰 표가 실릴 수
+                    # 있어 SSE 프레임 한도(131072B)를 넘지 않게 분할 emit(_split_content).
                     composed = compose_answer_body(response)
-                    if composed:
+                    for part in _split_content(composed):
                         yield _frame(
                             interaction_id=interaction_id,
                             composite_id=composite_id,
                             created=created,
-                            delta={"content": composed},
+                            delta={"content": part},
                         )
                 else:
                     # 토큰이 스트리밍된 경로: 잔여 버퍼 flush 후 trailer(고지 callout +
@@ -589,12 +645,15 @@ async def _sse_stream_from_runner(
                         )
                     trailer = answer_trailer(response, cite_rewriter.renumber)
                     if trailer:
-                        yield _frame(
-                            interaction_id=interaction_id,
-                            composite_id=composite_id,
-                            created=created,
-                            delta={"content": "\n\n" + trailer},
-                        )
+                        # 표 포함 트레일러가 거대할 수 있어 프레임당 한도로 분할 emit
+                        # (클라이언트 131072B 버퍼 초과 방지). 첫 조각에만 선행 빈 줄.
+                        for i, part in enumerate(_split_content(trailer)):
+                            yield _frame(
+                                interaction_id=interaction_id,
+                                composite_id=composite_id,
+                                created=created,
+                                delta={"content": ("\n\n" + part) if i == 0 else part},
+                            )
                 yield _frame(
                     interaction_id=interaction_id,
                     composite_id=composite_id,

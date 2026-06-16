@@ -171,3 +171,37 @@ def test_non_streaming_path_unchanged(fake_app):
     assert body["object"] == "chat.completion"
     assert body["choices"][0]["message"]["role"] == "assistant"
     assert body["smr_agent"]["agent_variant"] == "fake_echo_v0"
+
+
+# --- _split_content: 큰 content 의 SSE 프레임 분할(131072B 버퍼 초과 방지) -------
+def test_split_content_short_text_single_chunk():
+    assert openai_compat._split_content("짧은 본문") == ["짧은 본문"]
+    assert openai_compat._split_content("") == []
+
+
+def test_split_content_respects_line_boundaries():
+    # 줄 경계를 우선 보존하며 limit 이하로 묶는다.
+    text = "줄1\n줄2\n줄3\n"
+    parts = openai_compat._split_content(text, limit=8)
+    assert "".join(parts) == text           # 무손실
+    assert all(len(p) <= 8 for p in parts)  # 모든 조각 한도 이하
+    assert len(parts) > 1                   # 실제 분할됨
+
+
+def test_split_content_force_splits_overlong_line():
+    # 단일 줄이 limit 초과 → 그 줄만 문자 단위 강제 분할(무손실).
+    text = "x" * 50
+    parts = openai_compat._split_content(text, limit=20)
+    assert "".join(parts) == text
+    assert all(len(p) <= 20 for p in parts)
+    assert len(parts) == 3
+
+
+def test_split_content_large_table_trailer_under_limit():
+    # 거대 표 트레일러를 분할하면 모든 조각이 한도 이하(클라이언트 버퍼 초과 방지).
+    big = "**근거 (References)**\n\n" + "\n".join(
+        f"| 행{i} | 값{i} |" for i in range(5000)
+    )
+    parts = openai_compat._split_content(big)
+    assert "".join(parts) == big
+    assert all(len(p) <= openai_compat._SSE_CONTENT_LIMIT for p in parts)

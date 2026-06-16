@@ -10,6 +10,7 @@ from app.application.context.citation_format import (
     format_table_citation,
     infer_doc_type,
 )
+from app.application.context.table_render import table_body_markdown
 from app.domain.interaction import ChatTurn
 from app.domain.memory import MemoryRef
 from app.domain.retrieval import RetrievedChunk
@@ -22,15 +23,26 @@ _TABLE_MARKER_RE = re.compile(r"\[TABLE:\s*(?P<tag>[^\]]+?)\s*\]")
 
 
 def _render_table_entry(entry: dict[str, Any]) -> str | None:
-    """tables 엔트리 → 치환 텍스트. caption(있으면) + markdown 을 결합한다. markdown
-    이 비면(표 본문 없음) None 반환 → 호출부가 마커를 보존한다."""
+    """tables 엔트리 → 치환 텍스트. caption(있으면) + 표 본문(GFM markdown)을 결합한다.
+    표 본문은 table_body_markdown 이 markdown 우선·html 은 파이프표로 변환해 돌려준다
+    (raw HTML 텍스트 노출 방지). 본문이 비면 None → 호출부가 마커를 보존."""
     if not isinstance(entry, dict):
         return None
-    table = (entry.get("markdown") or entry.get("html") or "").strip()
+    table = table_body_markdown(entry).strip()
     if not table:
         return None
     caption = (entry.get("caption") or "").strip()
     return f"**{caption}**\n\n{table}" if caption else table
+
+
+def _referenced_table_tags(body: str | None) -> set[str]:
+    """본문에서 `[TABLE: tag]` 마커가 실제로 가리키는 tag 집합. 본문이 참조하지 않는
+    표(인덱싱 시 같은 chunk 에 묶였으나 마커 없음)는 cite 로 승격하지 않기 위함
+    (spec_driven_table_citation_granularity — 본문 미참조 표 제외). 대소문자/공백은
+    마커 정규식이 흡수한다."""
+    if not body:
+        return set()
+    return {m.group("tag").strip() for m in _TABLE_MARKER_RE.finditer(body)}
 
 
 def _strip_table_markers(body: str) -> str:
@@ -200,12 +212,21 @@ class ContextBuilder:
                     tables=None,
                 )
             )
-            # 표 cite — 그 chunk 의 각 표를 독립 후보로 승격. 출처 메타는 parent chunk
-            # 승계(D3), 라벨은 parent formatted + "(표: caption)" 접미(answer_renderer
-            # 가 References 에서 표를 렌더할 식별). markdown·html 둘 다 빈 표는 건너뛴다
-            # (인용 가능한 실체가 없음 — 모델이 빈 cite 를 달 수 없게).
+            # 표 cite — 그 chunk 의 표 중 **본문이 [TABLE: tag] 로 실제 가리키는 표만**
+            # 독립 후보로 승격한다(spec_driven_table_citation_granularity — 본문 미참조
+            # 표 제외). 인덱싱 시 같은 chunk 에 묶였어도 본문이 안 가리키면 컨텍스트·
+            # References 에 싣지 않는다(과도한 context·무관 표 노출 차단). 본문 소스는
+            # capture_mode 와 정합(full=text 전문, 그 외=snippet) — render 가 보는 것과
+            # 같은 본문에서 마커를 읽어야 한다. 출처 메타는 parent chunk 승계(D3).
+            # markdown·html 둘 다 빈 표는 건너뛴다(인용 실체 없음).
+            ref_body = c.text if (self._capture_mode == "full" and c.text) else c.snippet
+            referenced_tags = _referenced_table_tags(ref_body)
             for entry in (c.tables or ()):
                 if not isinstance(entry, dict):
+                    continue
+                tag = entry.get("tag")
+                # 본문 마커가 가리키지 않는 표는 제외(tag 없는 표도 참조 불가 → 제외).
+                if not tag or tag not in referenced_tags:
                     continue
                 if not (entry.get("markdown") or entry.get("html") or "").strip():
                     continue

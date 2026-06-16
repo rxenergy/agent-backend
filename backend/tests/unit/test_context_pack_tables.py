@@ -211,6 +211,43 @@ def test_build_table_cite_skips_empty_table_body() -> None:
     assert pack.citation_candidates[0].kind == "chunk"
 
 
+def test_build_only_body_referenced_tables_become_cites() -> None:
+    # 본문이 [TABLE: tag] 로 가리키는 표만 cite 로 승격(미참조 표 제외) — context 절감·
+    # 무관 표 노출 차단. tb_0001 만 본문 마커, tb_0002 는 미참조 → cite 안 됨.
+    tables = [
+        {"tag": "tb_0001", "caption": "쓰임", "markdown": "| a |", "html": ""},
+        {"tag": "tb_0002", "caption": "안쓰임", "markdown": "| b |", "html": ""},
+    ]
+    b = ContextBuilder(capture_mode="full")
+    pack = b.build(
+        interaction_id="i", query_text="q", chat_history=(),
+        conversation_summary=None, scenario_object="n_a", scenario_depth="n_a",
+        entities={}, chunks=[_chunk(chunk_id="ch0", text="본문 [TABLE: tb_0001] 끝",
+                                    tables=tables)],
+    )
+    cands = pack.citation_candidates
+    assert len(cands) == 2  # chunk cite + tb_0001 cite (tb_0002 제외)
+    table_cites = [c for c in cands if c.kind == "table"]
+    assert len(table_cites) == 1
+    assert table_cites[0].table_tag == "tb_0001"
+
+
+def test_build_snippets_mode_uses_snippet_markers() -> None:
+    # snippets 모드(full 아님)는 snippet 의 마커를 본문 참조로 본다(render 와 정합).
+    tables = [{"tag": "tb_0001", "markdown": "| a |"},
+              {"tag": "tb_0002", "markdown": "| b |"}]
+    b = ContextBuilder(capture_mode="snippets")
+    pack = b.build(
+        interaction_id="i", query_text="q", chat_history=(),
+        conversation_summary=None, scenario_object="n_a", scenario_depth="n_a",
+        entities={}, chunks=[_chunk(snippet="snip [TABLE: tb_0002] 끝",
+                                    text="full [TABLE: tb_0001] 끝", tables=tables)],
+    )
+    table_cites = [c for c in pack.citation_candidates if c.kind == "table"]
+    # snippets 모드는 snippet 의 tb_0002 만 참조(full text 의 tb_0001 아님).
+    assert [c.table_tag for c in table_cites] == ["tb_0002"]
+
+
 def test_build_no_tables_single_chunk_cite() -> None:
     b = ContextBuilder(capture_mode="full")
     pack = b.build(
