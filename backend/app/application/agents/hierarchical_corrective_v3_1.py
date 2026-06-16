@@ -43,7 +43,6 @@ from app.domain.errors import (
 from app.domain.interaction import (
     AgentRequest,
     AgentResponse,
-    ChatTurn,
     Citation,
     ToolCallRecord,
 )
@@ -554,14 +553,23 @@ class HierarchicalCorrectiveRunner:
                 "memory.session_load", {"session_id": request.session_id}, ctx,
             )
             record(session_load)
+            # 새 SessionState 스키마(범용) — scenario_object/depth 는 variant_state[variant],
+            # 누적 entity 는 tracked_references 로 매핑해 읽는다(설계 §9).
             prior_so = prior_sd = None
-            prior_entities: dict[str, list[str]] = {}
+            prior_refs: list[str] = []
+            prior_variant = None
             conversation_summary: str | None = None
             if session_load.output and session_load.output.get("present"):
-                prior_so = session_load.output.get("active_scenario_object")
-                prior_sd = session_load.output.get("active_scenario_depth")
-                prior_entities = session_load.output.get("active_entities") or {}
-                conversation_summary = session_load.output.get("conversation_summary")
+                conversation_summary = session_load.output.get("running_summary")
+                prior_variant = session_load.output.get("last_variant_id")
+                vstate = (session_load.output.get("variant_state") or {}).get(
+                    self.spec.variant_id, {}
+                )
+                prior_so = vstate.get("scenario_object")
+                prior_sd = vstate.get("scenario_depth")
+                prior_refs = [r.get("ref_id")
+                              for r in session_load.output.get("tracked_references", [])
+                              if r.get("ref_id")]
 
             # Node 5 — retrieval_execute (다전략 fan-out + RRF). span 이 전략별
             # tool.retriever.search 를 묶어 Phoenix 에서 한 그룹으로 보이게 한다.
@@ -870,14 +878,19 @@ class HierarchicalCorrectiveRunner:
             )
             record(approved)
 
+            # 범용 게이트 — scenario_object/depth 를 continuity_signals 로, 현재 entity 를
+            # reference 로 넣어 기존 의미(scenario shift·50% entity overlap)를 동등 보존(§9).
+            current_refs = [v for vals in entities.values() for v in vals]
             decision = decide_session_injection(
-                has_chat_history=bool(request.chat_history),
-                prior_scenario_object=prior_so,
-                prior_scenario_depth=prior_sd,
-                current_scenario_object=scenario_object,
-                current_scenario_depth=scenario_depth,
-                prior_entities=prior_entities,
-                current_entities=entities,
+                has_history=bool(request.chat_history),
+                variant_switched=bool(prior_variant
+                                      and prior_variant != self.spec.variant_id),
+                prior_references=prior_refs,
+                current_references=current_refs,
+                continuity_signals={
+                    "scenario_object": (prior_so, scenario_object),
+                    "scenario_depth": (prior_sd, scenario_depth),
+                },
             )
 
             # Node 10 — memory_inject
@@ -1215,21 +1228,26 @@ class HierarchicalCorrectiveRunner:
             # 에서 VERIFICATION_FAILED refuse. 아직 국소 재작성 없음.
             await emit_step("selective_regenerate", "skipped")
 
-            # session_update
-            new_turns = list(request.chat_history) + [
-                ChatTurn(role="user", content=request.query_text)
-            ]
+            # session_update — 새 SessionState 스키마(누적은 도구 내부). entity →
+            # new_references(ref_type=entity), scenario_object/depth → variant_state(§9).
             session_update = await self._tools.invoke(
                 "memory.session_update",
                 {
                     "session_id": request.session_id or "",
-                    "recent_turns": [{"role": t.role, "content": t.content} for t in new_turns][-10:],
-                    "active_entities": entities,
-                    "active_scenario_object": scenario_object,
-                    "active_scenario_depth": scenario_depth,
-                    "conversation_summary": conversation_summary or "",
-                    "last_retrieved_chunk_ids": chunk_ids,
-                    "last_memory_ids_used": memory_ids_used,
+                    "variant_id": self.spec.variant_id,
+                    "user_turn": request.query_text,
+                    "assistant_turn": llm_result.text,
+                    "new_references": [
+                        {"ref_id": v, "ref_type": "entity"}
+                        for vals in entities.values() for v in vals
+                    ],
+                    "retrieved_chunk_ids": chunk_ids,
+                    "running_summary": conversation_summary or None,
+                    "memory_ids_used": memory_ids_used,
+                    "variant_state": {
+                        "scenario_object": scenario_object,
+                        "scenario_depth": scenario_depth,
+                    },
                 },
                 ctx,
             )

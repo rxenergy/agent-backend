@@ -208,7 +208,7 @@ react_generation_prompts:
 spec_driven_triage_prompts:
   spec_driven_triage_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/triage_v1.md,            version: v1, sha256: "76d390e82407bfec371acadf613ed62ff687886dc69b1de65da2b7c7b2bf4b32"}
+    prompt:        {path: spec_driven/triage_v1.md,            version: v1, sha256: "727d6461961f533f50ee36afad63ada682e2e1879cc9b0335ec3a4ae0215e84d"}
     output_schema: {path: spec_driven/schemas/triage_v1.json,  version: v1, sha256: "347c9af3b64434746b72098e8d0f7e465c3c82c691ac236d7d0c309695c995bd"}
     model_options: {temperature: 0.0, max_tokens: 300}
 
@@ -221,8 +221,8 @@ spec_driven_general_prompts:
 spec_driven_answer_spec_prompts:
   spec_driven_answer_spec_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "897d001ea249797c323264f9a1af3afc906f326cea6f4a35f6803aa96b360cc3"}
-    output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "292dd7a9ceb94dd5ed82c66239f4e5a47e1978b7e7da406dc287ea975bfbdb6a"}
+    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "220681c9aa5c88c84c9a10e20b966914321d30f17f2f739231f587de89f3f04e"}
+    output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "cfa433336ccb7b4efd8f99c634c33e55636ed135b41c46f2ca1600a172863e7a"}
     # max_tokens — 슬롯 최대 10개(facet 세분)까지 spec JSON 이 들어가도록 상향(700→1100).
     model_options: {temperature: 0.0, max_tokens: 1100}
 
@@ -237,7 +237,7 @@ spec_driven_query_prompts:
 spec_driven_generation_prompts:
   spec_driven_generation_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "6d5304f780b16407006e88b93379e2373a30c6fdc0daeaf5af8f0639205a7bd2"}
+    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "712010f5a81ef5d91ac12350f4c295ca3ae84cd27155da8a9fc8b609d05f9a57"}
     # top_p — 구조화된 규제 산문의 nucleus 를 좁혀 형식 일관성↑(샘플링 탐색폭↓).
     # seed — 재현성(원칙 5): 같은 프롬프트·옵션이면 OpenAI-compat/vLLM 이 동일 토큰열.
     # max_tokens — full 모드(chunk 전문+표)로 확장된 컨텍스트의 모든 facet(수치·한계값·

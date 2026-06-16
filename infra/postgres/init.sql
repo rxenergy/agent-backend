@@ -1,24 +1,27 @@
--- v2 §17 — State DB schema. Phase 3 uses only session_memory; remaining tables
--- are created up-front for forward compatibility.
+-- v2 §17 — State DB schema. Phase 3 uses session_state (범용 멀티턴 세션 — variant-agnostic
+-- 코어 + namespaced variant_state); remaining tables are created up-front for forward
+-- compatibility. 설계: docs/plans/spec_driven_session_memory.design.v1.md §2.2.
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE TABLE IF NOT EXISTS session_memory (
-    session_id TEXT PRIMARY KEY,
-    user_id TEXT,
-    project_id TEXT,
-    active_entities JSONB NOT NULL DEFAULT '{}',
-    active_scenario_object TEXT,
-    active_scenario_depth TEXT,
-    conversation_summary TEXT,
-    recent_turns JSONB NOT NULL DEFAULT '[]',
-    last_retrieved_chunk_ids JSONB NOT NULL DEFAULT '[]',
+CREATE TABLE IF NOT EXISTS session_state (
+    session_id           TEXT PRIMARY KEY,
+    user_id              TEXT,
+    project_id           TEXT,
+    last_variant_id      TEXT,
+    turn_count           INTEGER NOT NULL DEFAULT 0,
+    recent_turns         JSONB NOT NULL DEFAULT '[]',
+    running_summary      TEXT NOT NULL DEFAULT '',
+    tracked_references   JSONB NOT NULL DEFAULT '[]',
+    retrieval_history    JSONB NOT NULL DEFAULT '[]',
+    topic_signature      TEXT,
     last_memory_ids_used JSONB NOT NULL DEFAULT '[]',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ
+    variant_state        JSONB NOT NULL DEFAULT '{}',
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at           TIMESTAMPTZ
 );
-CREATE INDEX IF NOT EXISTS idx_session_memory_expires ON session_memory (expires_at);
+CREATE INDEX IF NOT EXISTS idx_session_state_expires ON session_state (expires_at);
 
 CREATE TABLE IF NOT EXISTS memory_candidates (
     memory_id TEXT PRIMARY KEY,

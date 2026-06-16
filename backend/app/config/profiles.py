@@ -10,11 +10,11 @@ import structlog
 
 from app.adapters.event_sink.filesystem import FilesystemEventSink
 from app.adapters.event_sink.minio import MinioEventSink
-from app.adapters.session_store.in_memory import InMemorySessionMemoryStore
+from app.adapters.session_store.in_memory import InMemorySessionStateStore
 from app.adapters.llm.fake import FakeEchoLLM
 from app.adapters.llm.http import HttpLLM
 from app.adapters.postgres.client import create_pool
-from app.adapters.postgres.session_memory_store import PostgresSessionMemoryStore
+from app.adapters.postgres.session_state_store import PostgresSessionStateStore
 from app.adapters.tools.document_local import (
     LocalDocumentFetchSectionTool,
     LocalDocumentResolverTool,
@@ -78,7 +78,7 @@ from app.config.settings import LLMPoolEntry, Settings
 from app.domain.agents import VariantSpec
 from app.ports.event_sink import EventSinkPort
 from app.ports.llm import LLMPort
-from app.ports.memory_store import SessionMemoryStore
+from app.ports.session_state_store import SessionStateStore
 
 
 @dataclass
@@ -288,12 +288,12 @@ async def build_container(settings: Settings) -> AppContainer:
     corpus_map: Any = None
 
     if needs_tool_stack:
-        session_store: SessionMemoryStore
+        session_store: SessionStateStore
         if settings.memory_store == "postgres":
             pool = await create_pool(settings.state_db_url)
-            session_store = PostgresSessionMemoryStore(pool)
+            session_store = PostgresSessionStateStore(pool)
         else:
-            session_store = InMemorySessionMemoryStore()
+            session_store = InMemorySessionStateStore()
 
         registry = ToolRegistry.from_yaml(settings.tool_registry_path)
 

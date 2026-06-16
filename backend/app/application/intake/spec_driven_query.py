@@ -7,10 +7,12 @@ from app.application.agents.events import LazyReasoning, current_emitter
 from app.application.intake.reasoning_capture import extract_reasoning, stream_capture
 from app.domain.spec_driven import AnswerSpec, FormulatedQuery
 from app.observability import openinference as oi
+from app.observability.logging import get_logger
 from app.observability.otel import get_tracer
-from app.ports.llm import GrammarSpec, LLMPort
+from app.ports.llm import GrammarSpec, LLMPort, LLMUnavailableError
 
 _TRACER = get_tracer("intake")
+_LOG = get_logger("intake.spec_driven_query")
 
 # spec_driven_v1 N2 — Query Formulation Node. Answer Spec 의 슬롯·명시적 참조를 *구체
 # 검색쿼리*(슬롯당 1개)로 옮긴다(설계 §3.2). 리터럴 키워드 보존 + 명시적 참조 verbatim
@@ -122,7 +124,18 @@ class QueryFormulator:
                 if lazy is not None and not lazy.emitted:
                     await lazy.feed(extract_reasoning(res.text))
                 queries = _parse(res.text)
-            except Exception:  # noqa: BLE001 — 미가용/파싱불가 → 결정론 fallback
+            except LLMUnavailableError as exc:
+                # 외부 요소(LLM 미가용)는 파싱불가(내부)와 구분해 명시 추적 — fallback
+                # 쿼리로 떨어진 *이유*가 외부 미가용임을 span/로그에 남긴다(silent degrade
+                # 사각지대 제거). trace_id 는 structlog _add_trace_context 가 자동 주입.
+                span.set_attribute("query_formulation.upstream_error", str(exc)[:500])
+                span.record_exception(exc)
+                _LOG.warning("query_formulation_llm_unavailable",
+                             upstream_error=str(exc)[:500],
+                             error_type=type(exc).__name__,
+                             model_id=getattr(self._llm, "model_id", "unknown"))
+                queries = ()
+            except Exception:  # noqa: BLE001 — 파싱불가 → 결정론 fallback
                 queries = ()
             if not queries:
                 method = "fallback"

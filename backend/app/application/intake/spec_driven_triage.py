@@ -5,10 +5,12 @@ from typing import Any
 
 from app.domain.spec_driven import TriageDecision
 from app.observability import openinference as oi
+from app.observability.logging import get_logger
 from app.observability.otel import get_tracer
-from app.ports.llm import GrammarSpec, LLMPort
+from app.ports.llm import GrammarSpec, LLMPort, LLMUnavailableError
 
 _TRACER = get_tracer("intake")
+_LOG = get_logger("intake.spec_driven_triage")
 
 # spec_driven_v1 N0 — Triage Node(라우팅 판정). 원질의를 보고 답을 *방어*하려면 코퍼스
 # 근거가 필요한지(`retrieval`) 아니면 모델 도메인 추론으로 충분한지(`general`)를 **소형
@@ -48,10 +50,17 @@ class SpecDrivenTriage:
         self._model_options = dict(model_options or {"temperature": 0.0})
         self._policy_hash = policy_hash
 
-    async def triage(self, query_text: str) -> TriageDecision:
+    async def triage(
+        self, query_text: str, *, prior_context: str | None = None
+    ) -> TriageDecision:
         # .replace (not .format): 프롬프트 본문 few-shot 의 JSON 예시 { } 가 .format 에서
         # KeyError. N1/N2 와 동일 idiom.
         prompt = self._prompt.replace("{query}", query_text)
+        # 멀티턴 후속 턴 — prior_context(직전 요약 + 참조)를 동반해 모델이 지시표현
+        # (그/이/해당)을 해소하게 한다(룰 재작성 아님 — feedback_model_over_rule). 정적
+        # 프롬프트 body 는 불변(policy_hash 안정), 동적 입력만 추가.
+        if prior_context:
+            prompt = prior_context.rstrip() + "\n\n" + prompt
         with _TRACER.start_as_current_span("intake.spec_driven_triage") as span:
             oi.set_kind(span, oi.KIND_LLM)
             oi.set_io(span, input_value=prompt)
@@ -86,7 +95,18 @@ class SpecDrivenTriage:
                         "references_specifics": decision.references_specifics,
                     })
                     return decision
-            except Exception:  # noqa: BLE001 — 미가용/파싱불가 → 안전 degrade(retrieval)
+            except LLMUnavailableError as exc:
+                # 외부 요소(LLM 엔드포인트 4xx/5xx/타임아웃/연결거부)는 파싱불가(내부)와
+                # 구분해 명시 추적한다 — span 속성 + structlog(trace_id 자동 주입,
+                # Loki↔Tempo). 결과는 동일 degrade 지만, 안전 기본값으로 떨어진 *이유*가
+                # 외부 미가용임을 감사에서 알 수 있다(silent degrade 사각지대 제거).
+                span.set_attribute("triage.upstream_error", str(exc)[:500])
+                span.record_exception(exc)
+                _LOG.warning("triage_llm_unavailable",
+                             upstream_error=str(exc)[:500],
+                             error_type=type(exc).__name__,
+                             model_id=getattr(self._llm, "model_id", "unknown"))
+            except Exception:  # noqa: BLE001 — 파싱불가 → 안전 degrade(retrieval)
                 pass
             # degradation(라우팅 규칙 아님): 모델 출력 없음 → retrieval(안전 기본값).
             decision = TriageDecision(

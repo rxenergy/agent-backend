@@ -8,10 +8,12 @@ from app.application.agents.events import LazyReasoning, current_emitter
 from app.application.intake.reasoning_capture import extract_reasoning, stream_capture
 from app.domain.spec_driven import AnswerSpec, SpecSlot
 from app.observability import openinference as oi
+from app.observability.logging import get_logger
 from app.observability.otel import get_tracer
-from app.ports.llm import GrammarSpec, LLMPort
+from app.ports.llm import GrammarSpec, LLMPort, LLMUnavailableError
 
 _TRACER = get_tracer("intake")
+_LOG = get_logger("intake.spec_driven_answer_spec")
 
 # spec_driven_v1 N1 — "답변 사양" 인스턴스화(Define Spec Node). 원질의에서 의도 +
 # 명시적 문서참조(리터럴) + 근거 슬롯(슬롯별 lexical keywords) + 권위 등급 + 논리 구조를
@@ -56,11 +58,17 @@ class SpecDrivenAnswerSpecInstantiator:
         self._policy_hash = policy_hash
 
     async def instantiate(
-        self, query_text: str, *, reasoning_label: str | None = None
+        self, query_text: str, *, reasoning_label: str | None = None,
+        prior_context: str | None = None,
     ) -> AnswerSpec:
         # .replace (not .format): 프롬프트 본문에 JSON 예시의 { } 가 있어 .format 은
         # KeyError. LLMClassifier/AnswerSpecInstantiator 와 동일 idiom.
         prompt = self._prompt.replace("{query}", query_text)
+        # 멀티턴 후속 — prior_context 동반 시 N1 이 지시표현을 해소해 explicit_references
+        # 를 승계한다(예: "그 중 PCT 한계" → 직전 10 CFR 50.46 승계). 정적 body 불변
+        # (policy_hash 안정), 동적 입력만 prepend.
+        if prior_context:
+            prompt = prior_context.rstrip() + "\n\n" + prompt
         with _TRACER.start_as_current_span("intake.spec_driven_answer_spec") as span:
             oi.set_kind(span, oi.KIND_LLM)
             oi.set_io(span, input_value=prompt)
@@ -111,7 +119,17 @@ class SpecDrivenAnswerSpecInstantiator:
                         "governing_normative_class": spec.governing_normative_class,
                     })
                     return spec
-            except Exception:  # noqa: BLE001 — 미가용/파싱불가 → 결정론 fallback
+            except LLMUnavailableError as exc:
+                # 외부 요소(LLM 미가용)는 파싱불가(내부)와 구분해 명시 추적 — fallback spec
+                # 으로 떨어진 *이유*가 외부 미가용임을 span/로그에 남긴다(silent degrade
+                # 사각지대 제거). trace_id 는 structlog _add_trace_context 가 자동 주입.
+                span.set_attribute("answer_spec.upstream_error", str(exc)[:500])
+                span.record_exception(exc)
+                _LOG.warning("answer_spec_llm_unavailable",
+                             upstream_error=str(exc)[:500],
+                             error_type=type(exc).__name__,
+                             model_id=getattr(self._llm, "model_id", "unknown"))
+            except Exception:  # noqa: BLE001 — 파싱불가 → 결정론 fallback
                 pass
             spec = _fallback(query_text, self._policy_hash)
             span.set_attribute("answer_spec.method", "fallback")
@@ -170,12 +188,16 @@ def _parse(text: str) -> dict[str, Any] | None:
     structure_raw = data.get("answer_structure")
     structure = str(structure_raw).strip() if structure_raw else None
     intent = str(data.get("intent") or "unknown").strip() or "unknown"
+    # topic_label — 멀티턴 주제 전환 감지용 1줄 라벨(없으면 None). 라벨이지 값 아님.
+    topic_raw = data.get("topic_label")
+    topic_label = str(topic_raw).strip() if topic_raw else None
     return {
         "intent": intent,
         "explicit_references": refs,
         "required_slots": tuple(slots),
         "answer_structure": structure,
         "governing_normative_class": gnc,
+        "topic_label": topic_label,
     }
 
 
@@ -191,6 +213,7 @@ def _fallback(query_text: str, policy_hash: str | None) -> AnswerSpec:
         "required_slots": (slot,),
         "answer_structure": None,
         "governing_normative_class": None,
+        "topic_label": None,
     }
     return _build(parsed, "fallback", policy_hash)
 
@@ -201,6 +224,7 @@ def _build(parsed: dict[str, Any], method: str, policy_hash: str | None) -> Answ
     structure = parsed["answer_structure"]
     gnc = parsed["governing_normative_class"]
     intent = parsed["intent"]
+    topic_label = parsed.get("topic_label")
     # spec_hash = canonical 문자열 sha16(dict-bearing 인스턴스를 해시하지 않는다 —
     # finder._build 와 동일 규율). 슬롯·keywords·refs·구조·권위·의도를 평탄 직렬화.
     canon = (
@@ -222,6 +246,7 @@ def _build(parsed: dict[str, Any], method: str, policy_hash: str | None) -> Answ
         required_slots=slots,
         answer_structure=structure,
         governing_normative_class=gnc,
+        topic_label=topic_label,
         instantiation_method=method,
         spec_hash=spec_hash,
         policy_hash=policy_hash,

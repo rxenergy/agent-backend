@@ -5,55 +5,89 @@ from app.application.memory.policies import decide_session_injection
 
 def test_first_turn_does_not_inject() -> None:
     d = decide_session_injection(
-        has_chat_history=False,
-        prior_scenario_object="O4",
-        prior_scenario_depth="D2",
-        current_scenario_object="O4",
-        current_scenario_depth="D2",
-        prior_entities={"plant": ["APR1400"]},
-        current_entities={"plant": ["APR1400"]},
+        has_history=False,
+        variant_switched=False,
+        continuity_signals={"route": ("retrieval", "retrieval")},
+        prior_references=["10 CFR 50.46"],
+        current_references=["10 CFR 50.46"],
     )
     assert d.inject is False
-    assert d.reason == "no_chat_history"
+    assert d.reason == "no_history"
 
 
-def test_scenario_shift_suppresses() -> None:
+def test_variant_switch_suppresses() -> None:
     d = decide_session_injection(
-        has_chat_history=True,
-        prior_scenario_object="O4",
-        prior_scenario_depth="D2",
-        current_scenario_object="O2",  # shifted
-        current_scenario_depth="D2",
-        prior_entities={"plant": ["APR1400"]},
-        current_entities={"plant": ["APR1400"]},
+        has_history=True,
+        variant_switched=True,
+        prior_references=["10 CFR 50.46"],
+        current_references=["10 CFR 50.46"],
     )
     assert d.inject is False
-    assert d.reason == "scenario_object_shift"
+    assert d.reason == "variant_switch"
 
 
-def test_entity_overlap_below_threshold_suppresses() -> None:
+def test_continuity_signal_shift_suppresses() -> None:
     d = decide_session_injection(
-        has_chat_history=True,
-        prior_scenario_object="O4",
-        prior_scenario_depth="D2",
-        current_scenario_object="O4",
-        current_scenario_depth="D2",
-        prior_entities={"plant": ["APR1400", "i-SMR"]},
-        current_entities={"plant": ["NuScale"]},  # no overlap
+        has_history=True,
+        variant_switched=False,
+        continuity_signals={
+            "route": ("retrieval", "retrieval"),
+            "authority": ("binding", "guidance"),  # shifted
+        },
+        prior_references=["10 CFR 50.46"],
+        current_references=["10 CFR 50.46"],
     )
     assert d.inject is False
-    assert d.reason == "entity_overlap_below_threshold"
+    assert d.reason == "authority_shift"
 
 
-def test_follow_up_injects() -> None:
+def test_topic_shift_suppresses() -> None:
     d = decide_session_injection(
-        has_chat_history=True,
-        prior_scenario_object="O4",
-        prior_scenario_depth="D2",
-        current_scenario_object="O4",
-        current_scenario_depth="D2",
-        prior_entities={"plant": ["APR1400"]},
-        current_entities={"plant": ["APR1400"]},
+        has_history=True,
+        variant_switched=False,
+        current_topic_signature="seismic",
+        prior_topic_signature="eccs",
+        prior_references=["10 CFR 50.46"],
+        current_references=["10 CFR 50.46"],
+    )
+    assert d.inject is False
+    assert d.reason == "topic_shift"
+
+
+def test_reference_overlap_below_threshold_suppresses() -> None:
+    d = decide_session_injection(
+        has_history=True,
+        variant_switched=False,
+        prior_references=["10 CFR 50.46", "RG 1.157"],
+        current_references=["GDC 35"],  # no overlap
+    )
+    assert d.inject is False
+    assert d.reason == "reference_overlap_below_threshold"
+
+
+def test_follow_up_injects_with_matched_references() -> None:
+    d = decide_session_injection(
+        has_history=True,
+        variant_switched=False,
+        continuity_signals={"route": ("retrieval", "retrieval")},
+        prior_references=["10 CFR 50.46", "RG 1.157"],
+        current_references=["10 CFR 50.46"],
     )
     assert d.inject is True
     assert d.reason == "follow_up"
+    assert d.matched_references == ["10 CFR 50.46"]
+
+
+def test_pure_anaphora_injects_when_current_refs_empty() -> None:
+    # 후속이 새 명시참조 없이 "그건 왜?" — current refs 비어있음 → overlap 게이트 미적용,
+    # prior refs 전체를 anaphora 해소용으로 동반.
+    d = decide_session_injection(
+        has_history=True,
+        variant_switched=False,
+        continuity_signals={"route": ("retrieval", "retrieval")},
+        prior_references=["10 CFR 50.46"],
+        current_references=[],
+    )
+    assert d.inject is True
+    assert d.reason == "follow_up"
+    assert d.matched_references == ["10 CFR 50.46"]

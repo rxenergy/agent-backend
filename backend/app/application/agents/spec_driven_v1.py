@@ -28,12 +28,18 @@ from app.application.intake.spec_driven_answer_spec import (
 )
 from app.application.intake.spec_driven_query import QueryFormulator
 from app.application.intake.spec_driven_triage import SpecDrivenTriage
+from app.application.memory.policies import (
+    SessionInjectionDecision,
+    decide_session_injection,
+)
 from app.domain.agents import VariantSpec
 from app.domain.errors import RefusalReason, VerificationStatus
 from app.domain.interaction import AgentRequest, AgentResponse, Citation, ToolCallRecord
+from app.domain.memory import MemoryRef, MemoryReviewStatus, StalenessStatus
 from app.domain.retrieval import RetrievedChunk, RetrieverSearchOutput
 from app.domain.spec_driven import AnswerSpec, FormulatedQuery
 from app.observability import openinference as oi
+from app.observability.logging import get_logger
 from app.observability.metrics import get_metrics
 from app.observability.otel import get_tracer
 from app.ports.event_sink import EventSinkPort
@@ -41,6 +47,7 @@ from app.ports.llm import LLMPort, LLMResult, LLMUnavailableError
 from app.ports.tool import ToolExecutionContext
 
 _TRACER = get_tracer("agent")
+_LOG = get_logger("agent.spec_driven_v1")
 
 SPEC_DRIVEN_VARIANT_ID = "spec_driven_v1"
 _SEARCH_TOOL = "retrieval.search"
@@ -53,6 +60,37 @@ _CITE_RE = re.compile(r"\s*\[cite-\d+\]")
 
 def _sha16(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _topic_signature(spec: AnswerSpec) -> str | None:
+    """멀티턴 topic-shift 감지용 시그니처. N1 topic_label(모델 산출, 표현=모델) sha16 우선,
+    없으면 결정론 fallback(governing_class + 정렬 explicit_references) — 둘 다 없으면 None
+    (게이트는 양쪽 존재 시에만 비교하므로 None 은 topic 게이트를 비활성)."""
+    if spec.topic_label:
+        return _sha16(spec.topic_label.strip().lower())
+    refs = "|".join(sorted(spec.explicit_references))
+    basis = (spec.governing_normative_class or "") + "||" + refs
+    return _sha16(basis) if refs or spec.governing_normative_class else None
+
+
+def _source_ids_of(chunks: list[RetrievedChunk],
+                   fq_list: list[dict[str, Any]]) -> list[str]:
+    """N5 retrieval_history 용 source_id 집합. 최종 청크의 document_id + follow-up
+    target_source_ids 를 합쳐 dedup(검색 scope 힌트 — 후속 턴 재검색 우선순위 입력)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for c in chunks:
+        # follow-up scope 와 정합하도록 source_id(ADAMS/packageId) 우선, 없으면 document_id.
+        sid = getattr(c, "source_id", None) or getattr(c, "document_id", None)
+        if sid and sid not in seen:
+            seen.add(sid)
+            out.append(sid)
+    for fq in fq_list:
+        for sid in fq.get("target_source_ids", []) or []:
+            if sid and sid not in seen:
+                seen.add(sid)
+                out.append(sid)
+    return out
 
 
 class SpecDrivenRunner:
@@ -96,6 +134,11 @@ class SpecDrivenRunner:
         context_token_budget: int = 0,
         follow_up_fetch_k: int = 8,
         follow_up_keep_k: int = 3,
+        summarizer: Any = None,
+        session_memory_enabled: bool = False,
+        session_keep_turns: int = 10,
+        session_retrieval_window: int = 5,
+        session_overlap_threshold: float = 0.5,
     ) -> None:
         self.spec = spec
         self._llm_router = llm_router
@@ -128,6 +171,15 @@ class SpecDrivenRunner:
         # (관련성 게이트 — "필요·중요 내용만"). keep_k ≤ fetch_k.
         self._follow_up_fetch_k = follow_up_fetch_k
         self._follow_up_keep_k = follow_up_keep_k
+        # 멀티턴 세션 메모리(drill-down 후속 질의 지원 — 설계 spec_driven_session_memory).
+        # 기본 비활성(opt-in) → 단일턴 동작·기존 테스트 불변. enabled 시 N-1 session_load →
+        # N0/N1 에 prior_context 동반(anaphora 해소) → N1.5 2단 게이트 → N4 CONVERSATION_SUMMARY
+        # → N5 session_update(누적은 memory.session_update 도구 내부).
+        self._summarizer = summarizer
+        self._session_enabled = session_memory_enabled
+        self._session_keep_turns = session_keep_turns
+        self._session_retrieval_window = session_retrieval_window
+        self._session_overlap_threshold = session_overlap_threshold
         self._citation_contract: str | None = None
         if citation_contract_path:
             from pathlib import Path
@@ -234,6 +286,15 @@ class SpecDrivenRunner:
                 project_id=request.project_id,
             )
 
+            # === N-1 Session Load (멀티턴 — opt-in) =======================
+            # 직전 세션 상태를 적재하고 prior_context(요약+참조)를 만든다. 사전 게이트
+            # (history/variant_switch)만으로 N0/N1 에 prior_context 를 동반할지 결정한다
+            # (current route/authority/topic 는 아직 미확정 → 사후 게이트는 N1 뒤).
+            sess = await self._session_load(request, ctx, record)
+            prior_context = (
+                self._build_prior_context(sess) if sess["pre_inject"] else None
+            )
+
             # === N0 Triage Node (라우팅 판정 — 소형 모델 단독, 결정론 룰 없음) ====
             await emit_step("triage", "started")
             n0 = SpecDrivenTriage(
@@ -243,7 +304,7 @@ class SpecDrivenRunner:
                 model_options=self._triage_source.model_options or None,
                 policy_hash=self._triage_source.policy_hash,
             )
-            triage = await n0.triage(request.query_text)
+            triage = await n0.triage(request.query_text, prior_context=prior_context)
             triage_pin: dict[str, Any] = {
                 "route": triage.route,
                 "references_specifics": triage.references_specifics,
@@ -267,7 +328,7 @@ class SpecDrivenRunner:
             if triage.route == "general":
                 return await self._run_general(
                     request, started, tool_calls, llm=llm, llm_id=llm_id,
-                    triage_pin=triage_pin,
+                    triage_pin=triage_pin, ctx=ctx, sess=sess, record=record,
                 )
 
             # === N1 Define Spec Node =====================================
@@ -280,10 +341,17 @@ class SpecDrivenRunner:
                 policy_hash=self._answer_spec_source.policy_hash,
             )
             spec = await n1.instantiate(request.query_text,
-                                        reasoning_label="답변 사양 정의")
+                                        reasoning_label="답변 사양 정의",
+                                        prior_context=prior_context)
             await emit_step("define_spec", "ok", method=spec.instantiation_method,
                             num_slots=len(spec.required_slots),
                             num_refs=len(spec.explicit_references))
+
+            # === N1.5 Inject Decision (사후 게이트 — 결정론) ==============
+            # current route/authority/topic/refs(N0·N1 산출)까지 넣어 N4 주입·memory_ref
+            # 기록의 최종 여부를 결정한다. 사전 통과/사후 차단(예: 권위 시프트)이면 N0/N1 은
+            # 맥락을 봤지만 N4 evidence 맥락엔 싣지 않는다(해소하되 오염 차단).
+            post = self._post_gate(request, sess, triage, spec)
             # thinking 은 N1 LazyReasoning 이 native CoT(없으면 모델 rationale 필드)로
             # `**답변 사양 정의**` 아래 직접 싣는다 — runner 가 카운트를 재서술하지 않는다.
 
@@ -581,8 +649,27 @@ class SpecDrivenRunner:
                         "first_pass_dropped": first_pass_dropped,
                     },
                     "evidence_gap": evidence_gap,
+                    "session": self._session_pin(sess, post),
                 }
             }
+
+            # 사후 게이트 통과 시 conversation_summary(맥락) + session memory_ref 를 N4 에
+            # 싣는다(memory ≠ evidence — summary 는 # CONVERSATION_SUMMARY, 청크와 분리).
+            inject = post.inject and bool(sess["state"])
+            convo_summary = (
+                (sess["state"] or {}).get("running_summary") or None
+            ) if inject else None
+            memory_refs: tuple[MemoryRef, ...] = ()
+            memory_ids_used: list[str] = []
+            if inject and request.session_id:
+                memory_ids_used.append(request.session_id)
+                memory_refs = (
+                    MemoryRef(
+                        memory_id=request.session_id, memory_type="session",
+                        review_status=MemoryReviewStatus.APPROVED.value,
+                        staleness_status=StalenessStatus.FRESH.value,
+                    ),
+                )
 
             # === N4 Generation ===========================================
             await emit_step("context_build", "started")
@@ -590,9 +677,10 @@ class SpecDrivenRunner:
                 pack = self._context_builder.build(
                     interaction_id=request.interaction_id,
                     query_text=request.query_text,
-                    chat_history=(), conversation_summary=None,
+                    chat_history=request.chat_history if inject else (),
+                    conversation_summary=convo_summary,
                     scenario_object="n_a", scenario_depth="n_a",
-                    entities={}, chunks=chunks, memory_refs=(),
+                    entities={}, chunks=chunks, memory_refs=memory_refs,
                     tool_result_refs=tuple(tool_result_refs),
                 )
                 s.set_attribute("context_hash", pack.context_hash)
@@ -653,6 +741,25 @@ class SpecDrivenRunner:
                                     latency_ms=response.latency_ms,
                                     scenario_object="n_a", scenario_depth="n_a")
 
+            # === N5 Session Update (멀티턴 — 누적은 도구 내부) ============
+            # explicit_references 를 누적 참조로, follow-up source_id·chunk_id 를 검색
+            # 이력으로, governing_class/route 를 variant_state 로 싣는다. topic_signature
+            # 는 N1 topic_label sha16(없으면 결정론 fallback).
+            await self._session_update(
+                request, ctx, record,
+                user_turn=request.query_text, assistant_turn=answer_text,
+                references=list(spec.explicit_references),
+                chunk_ids=chunk_ids, source_ids=_source_ids_of(chunks, fq_list),
+                topic_signature=_topic_signature(spec),
+                memory_ids_used=memory_ids_used,
+                variant_state={
+                    "governing_normative_class": spec.governing_normative_class or "",
+                    "route": triage.route,
+                    "intent": spec.intent,
+                },
+                prior_summary=(sess["state"] or {}).get("running_summary"),
+            )
+
             with _TRACER.start_as_current_span("event.persist") as s:
                 event = self._recorder.build(
                     request=request, response=response,
@@ -669,6 +776,8 @@ class SpecDrivenRunner:
                     tool_calls=tuple(tool_calls),
                     regulatory_grounding="n_a",
                     query_understanding=qu_pin,
+                    memory_ids_used=tuple(memory_ids_used),
+                    memory_types_used=tuple("session" for _ in memory_ids_used),
                 )
                 await self._recorder.persist(event)
                 s.set_attribute("interaction_id", request.interaction_id)
@@ -682,10 +791,21 @@ class SpecDrivenRunner:
     # ------------------------------------------------------------------
     async def _run_general(self, request: AgentRequest, started: float,
                            tool_calls: list[ToolCallRecord], *, llm: LLMPort,
-                           llm_id: str, triage_pin: dict[str, Any]) -> AgentResponse:
+                           llm_id: str, triage_pin: dict[str, Any],
+                           ctx: ToolExecutionContext | None = None,
+                           sess: dict[str, Any] | None = None,
+                           record=None) -> AgentResponse:
         metrics = get_metrics()
+        sess = sess or {"enabled": False, "state": None, "pre_inject": False,
+                        "load_present": False, "pre_reason": "disabled"}
         qu_pin: dict[str, Any] = {
-            "spec_driven": {"route": "general", "triage": triage_pin}
+            "spec_driven": {
+                "route": "general", "triage": triage_pin,
+                # general 은 주입 안 함(자기완결 추론) — 사후 게이트도 미적용.
+                "session": self._session_pin(
+                    sess, SessionInjectionDecision(False, "general_route")
+                ),
+            }
         }
 
         # 빈 pack — context_hash·snapshot 을 retrieval 경로와 동형으로 남긴다(재현).
@@ -716,7 +836,7 @@ class SpecDrivenRunner:
         llm_result = await self._generate(
             request, rendered_text, started, tool_calls, llm=llm,
             model_options=self._general_source.model_options,
-            query_understanding=qu_pin,
+            query_understanding=qu_pin, node="general",
         )
         if isinstance(llm_result, AgentResponse):
             return llm_result  # LLM-unavailable refusal
@@ -745,6 +865,18 @@ class SpecDrivenRunner:
         metrics.record_terminal(outcome="general_answer", latency_ms=response.latency_ms,
                                 scenario_object="n_a", scenario_depth="n_a")
 
+        # N5 — general 턴도 대화/turn_count 를 누적한다(route=general 기록, 참조는 비어
+        # 있을 수 있음). ctx/record 가 없으면(직접 호출/테스트) skip.
+        if ctx is not None and record is not None:
+            await self._session_update(
+                request, ctx, record,
+                user_turn=request.query_text, assistant_turn=answer_text,
+                references=[], chunk_ids=[], source_ids=[],
+                topic_signature=None, memory_ids_used=[],
+                variant_state={"route": "general"},
+                prior_summary=(sess.get("state") or {}).get("running_summary"),
+            )
+
         with _TRACER.start_as_current_span("event.persist") as s:
             event = self._recorder.build(
                 request=request, response=response,
@@ -766,6 +898,157 @@ class SpecDrivenRunner:
             s.set_attribute("interaction_id", request.interaction_id)
 
         return response
+
+    # ------------------------------------------------------------------
+    # 멀티턴 세션 메모리 — N-1 load / 사전·사후 게이트 / N5 update / 재현 핀.
+    # 설계: docs/plans/spec_driven_session_memory.design.v1.md.
+    # ------------------------------------------------------------------
+    async def _session_load(self, request: AgentRequest,
+                            ctx: ToolExecutionContext, record) -> dict[str, Any]:
+        """N-1 — session_load + 사전 게이트(history/variant_switch). 비활성/세션ID 부재/
+        미배선·실패 시 graceful(pre_inject=False)."""
+        out: dict[str, Any] = {
+            "enabled": self._session_enabled, "state": None,
+            "load_present": False, "pre_inject": False, "pre_reason": "disabled",
+        }
+        if not self._session_enabled or not request.session_id:
+            out["pre_reason"] = "disabled" if not self._session_enabled else "no_session_id"
+            return out
+        try:
+            res = await self._tools.invoke(
+                "memory.session_load", {"session_id": request.session_id}, ctx,
+            )
+            record(res)
+            if res.output and res.output.get("present"):
+                out["state"] = dict(res.output)
+                out["load_present"] = True
+        except Exception:  # noqa: BLE001 — ToolUnknown 등 graceful skip(단일턴 degrade).
+            return out
+        # 사전 게이트 — current route/authority/topic 미확정이라 history/variant_switch 만.
+        if not request.chat_history:
+            out["pre_reason"] = "no_history"
+            return out
+        if not out["load_present"]:
+            out["pre_reason"] = "no_prior_state"
+            return out
+        prior_variant = (out["state"] or {}).get("last_variant_id")
+        if prior_variant and prior_variant != self.spec.variant_id:
+            out["pre_reason"] = "variant_switch"
+            return out
+        out["pre_inject"] = True
+        out["pre_reason"] = "follow_up"
+        return out
+
+    def _build_prior_context(self, sess: dict[str, Any]) -> str | None:
+        """사전 게이트 통과 시 N0/N1 에 동반할 PRIOR CONTEXT 블록(요약 + 상위 salience
+        참조). anaphora 해소용 *맥락*이지 evidence 가 아니다(프롬프트가 명시)."""
+        state = sess.get("state") or {}
+        summary = (state.get("running_summary") or "").strip()
+        refs = [r.get("ref_id") for r in state.get("tracked_references", [])
+                if r.get("ref_id")][:8]
+        if not summary and not refs:
+            return None
+        lines = ["# PRIOR CONTEXT (직전 대화 — 질의의 지시표현 해소용, 근거 아님)"]
+        if summary:
+            lines.append(summary)
+        if refs:
+            lines.append("이전 참조: " + ", ".join(refs))
+        return "\n".join(lines)
+
+    def _post_gate(self, request: AgentRequest, sess: dict[str, Any],
+                   triage, spec: AnswerSpec) -> SessionInjectionDecision:
+        """N1.5 — 사후 게이트(route/authority/topic/ref overlap 전부). 비활성/미적재면
+        주입 안 함."""
+        if not sess.get("enabled") or not sess.get("load_present"):
+            return SessionInjectionDecision(False, sess.get("pre_reason", "disabled"))
+        state = sess.get("state") or {}
+        vstate = (state.get("variant_state") or {}).get(self.spec.variant_id, {})
+        prior_variant = state.get("last_variant_id")
+        return decide_session_injection(
+            has_history=bool(request.chat_history),
+            variant_switched=bool(prior_variant
+                                  and prior_variant != self.spec.variant_id),
+            current_topic_signature=_topic_signature(spec),
+            prior_topic_signature=state.get("topic_signature"),
+            prior_references=[r.get("ref_id")
+                              for r in state.get("tracked_references", [])
+                              if r.get("ref_id")],
+            current_references=list(spec.explicit_references),
+            continuity_signals={
+                "route": (vstate.get("route"), triage.route),
+                "authority": (vstate.get("governing_normative_class"),
+                              spec.governing_normative_class),
+            },
+            overlap_threshold=self._session_overlap_threshold,
+        )
+
+    def _session_pin(self, sess: dict[str, Any],
+                     post: SessionInjectionDecision) -> dict[str, Any]:
+        """재현 핀(원칙 5/6 — silent 동작 금지) — pre/post 게이트·참조·신호를 기록."""
+        state = sess.get("state") or {}
+        prior_refs = [r.get("ref_id") for r in state.get("tracked_references", [])
+                      if r.get("ref_id")]
+        return {
+            "enabled": sess.get("enabled", False),
+            "session_id_present": bool(state) or sess.get("load_present", False),
+            "loaded": sess.get("load_present", False),
+            "turn_count": state.get("turn_count", 0),
+            "pre_gate": {"inject": sess.get("pre_inject", False),
+                         "reason": sess.get("pre_reason", "disabled")},
+            "post_gate": {"inject": post.inject, "reason": post.reason,
+                          "matched_references": post.matched_references},
+            "prior_references": prior_refs,
+            "prior_topic": state.get("topic_signature"),
+        }
+
+    async def _session_update(self, request: AgentRequest,
+                              ctx: ToolExecutionContext, record, *,
+                              user_turn: str, assistant_turn: str,
+                              references: list[str], chunk_ids: list[str],
+                              source_ids: list[str], topic_signature: str | None,
+                              memory_ids_used: list[str],
+                              variant_state: dict[str, Any],
+                              prior_summary: str | None = None) -> None:
+        """N5 — session_update(누적은 도구 내부). 비활성/세션ID 부재/미배선 graceful skip.
+        running_summary 는 summarizer 가 있고 keep_turns 초과 시에만 압축(없으면 None →
+        도구가 prior 보존)."""
+        if not self._session_enabled or not request.session_id:
+            return
+        running_summary: str | None = None
+        if self._summarizer is not None:
+            try:
+                summ = await self._summarizer.summarize(
+                    prior_summary=prior_summary,
+                    chat_history=request.chat_history,
+                )
+                # compressed=False(윈도우 내)면 prior 보존 의미로 None(도구가 미갱신).
+                running_summary = summ.summary if summ.compressed else None
+            except Exception:  # noqa: BLE001 — 요약 실패는 미갱신(prior 보존).
+                running_summary = None
+        try:
+            res = await self._tools.invoke(
+                "memory.session_update",
+                {
+                    "session_id": request.session_id,
+                    "variant_id": self.spec.variant_id,
+                    "user_turn": user_turn,
+                    "assistant_turn": assistant_turn,
+                    "new_references": [{"ref_id": r, "ref_type": "regulation"}
+                                       for r in references],
+                    "retrieved_chunk_ids": chunk_ids,
+                    "retrieved_source_ids": source_ids,
+                    "running_summary": running_summary,
+                    "topic_signature": topic_signature,
+                    "memory_ids_used": memory_ids_used,
+                    "variant_state": variant_state,
+                    "keep_turns": self._session_keep_turns,
+                    "retrieval_window": self._session_retrieval_window,
+                },
+                ctx,
+            )
+            record(res)
+        except Exception:  # noqa: BLE001 — ToolUnknown/실패 graceful(상태 미갱신).
+            pass
 
     def _render_general_prompt(self, query_text: str) -> str:
         """N4-G 프롬프트 — general body + 원질의 + 출력-언어 trailer(최고 recency).
@@ -816,7 +1099,8 @@ class SpecDrivenRunner:
     # ------------------------------------------------------------------
     async def _generate(self, request, prompt_text, started, tool_calls, *,
                         llm: LLMPort, model_options: dict[str, Any] | None = None,
-                        query_understanding: dict[str, Any] | None = None):
+                        query_understanding: dict[str, Any] | None = None,
+                        node: str = "generation"):
         # 생성 파라메터(temperature/max_tokens)는 호출자가 노드별 registry source
         # (N4=spec_driven_generation_v1, N4-G=spec_driven_general_v1)의 model_options
         # 로 넘긴다. 미전달 시 어댑터 하드코딩 기본(temperature=0.0, max_tokens=1024)
@@ -833,8 +1117,26 @@ class SpecDrivenRunner:
                     llm_result = await llm.generate(
                         prompt_text, model_options=opts
                     )
-            except LLMUnavailableError:
+            except LLMUnavailableError as exc:
                 s.set_attribute("llm.status", "unavailable")
+                # upstream(외부 LLM) 원인을 span 에 남긴다(v3_1 분류기와 동형) — 내부
+                # 원인은 trace 에만, 사용자 응답엔 싣지 않는다(원칙 6). 어댑터가 실은
+                # 메시지("upstream 4xx: ...", httpx 예외 등)가 그대로 닿는다.
+                s.record_exception(exc)
+                s.set_attribute("llm.upstream_error", str(exc)[:500])
+                # 구조화 로그(structlog → stdout JSON + OTLP→Loki). _add_trace_context 가
+                # trace_id/span_id 를 실어 Loki↔Tempo 점프가 가능하고, 외부 요소
+                # (LLM 엔드포인트 4xx/5xx/타임아웃/연결거부)를 추적한다. getattr 는
+                # llm 어댑터 종류 무관(fake adapter 는 model_id 없음) 안전 접근.
+                _LOG.warning(
+                    "llm_unavailable",
+                    node=node,
+                    interaction_id=request.interaction_id,
+                    variant=self.spec.variant_id,
+                    model_id=getattr(llm, "model_id", "unknown"),
+                    upstream_error=str(exc)[:500],
+                    error_type=type(exc).__name__,
+                )
                 return await self._refuse(
                     request, started, tool_calls, RefusalReason.LLM_UNAVAILABLE,
                     error_code="llm_unavailable", query_understanding=query_understanding,
@@ -1083,4 +1385,9 @@ def _build_spec_driven(spec: VariantSpec, deps: AgentDeps) -> "SpecDrivenRunner"
         context_token_budget=t.get("spec_driven_context_token_budget", 0),
         follow_up_fetch_k=t.get("spec_driven_follow_up_fetch_k", 8),
         follow_up_keep_k=t.get("spec_driven_follow_up_keep_k", 3),
+        summarizer=deps.summarizer,
+        session_memory_enabled=t.get("spec_driven_session_memory_enabled", False),
+        session_keep_turns=t.get("spec_driven_session_keep_turns", 10),
+        session_retrieval_window=t.get("spec_driven_session_retrieval_window", 5),
+        session_overlap_threshold=t.get("spec_driven_session_overlap_threshold", 0.5),
     )

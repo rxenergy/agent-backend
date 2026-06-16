@@ -64,6 +64,10 @@ class AnswerSpec:
     # binding | guidance | review_record | applicant_claim | mixed | null.
     # 답을 anchor 할 권위 등급(권위 인플레이션 방지 — 생성 프롬프트 ladder).
     governing_normative_class: str | None = None
+    # 주제 라벨(멀티턴 topic-shift 감지용 — session_memory 설계 §6.5). 모델이 1줄로
+    # 산출(표현=모델). 게이트가 prior/current topic_label 동등성으로 주제 전환을 본다.
+    # 단일턴/미산출 시 None. 라벨이지 값/근거가 아니다(address-not-content 불변).
+    topic_label: str | None = None
     instantiation_method: str = "stub"  # "llm" | "fallback" | "stub"
     spec_hash: str | None = None
     policy_hash: str | None = None

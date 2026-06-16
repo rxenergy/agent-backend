@@ -43,6 +43,10 @@
         }
       }
     },
-    "answer_structure": {"type": ["string", "null"]}
+    "answer_structure": {"type": ["string", "null"]},
+    "topic_label": {
+      "type": ["string", "null"],
+      "description": "A short topic label (a few words) identifying the subject this query is about (e.g. 'ECCS acceptance criteria', 'seismic design'). Used only for multi-turn topic-shift detection across follow-up turns — a label, never a value or conclusion. Omit/null for one-off queries."
+    }
   }
 }

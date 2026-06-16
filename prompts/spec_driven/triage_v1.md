@@ -53,6 +53,10 @@ If none of the above applies and the query is defensible by general domain knowl
 질의: GDC 35 의 개정 이력에서 현재 유효한 판은?
 {"rationale":"특정 조문(GDC 35)의 version-as-identity 판단 — 코퍼스만 알 수 있음","references_specifics":true,"route":"retrieval"}
 
+## Follow-up turns (PRIOR CONTEXT, when present)
+
+If a `# PRIOR CONTEXT` block precedes the query, this is a follow-up in an ongoing conversation. Read the query's referring expressions (그것/이/해당/위/that/this) against the prior summary/references before routing: a follow-up that drills into a *specific* prior clause/document/value (e.g. prior turn cited `10 CFR 50.46`, now "그 중 PCT 한계는?") inherits that specificity and is `retrieval`. PRIOR CONTEXT is only for resolving the query — do not treat it as the answer.
+
 ## Output
 
 Emit a single JSON only (no prose, no code fences). Field order: rationale → references_specifics → route. Write the `rationale` in the query's language (Korean query → Korean rationale). When uncertain, choose retrieval.

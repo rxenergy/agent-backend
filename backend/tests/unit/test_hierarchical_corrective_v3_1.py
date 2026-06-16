@@ -10,7 +10,7 @@ import yaml
 from tests.unit._prompts_fixture import build_prompts
 from app.adapters.event_sink.filesystem import FilesystemEventSink
 from app.adapters.llm.fake import FakeEchoLLM
-from app.adapters.session_store.in_memory import InMemorySessionMemoryStore
+from app.adapters.session_store.in_memory import InMemorySessionStateStore
 from app.adapters.tools.document_local import LocalDocumentResolverTool
 from app.adapters.tools.memory_approved_stub import ApprovedSearchStubTool
 from app.adapters.tools.memory_session_local import SessionLoadTool, SessionUpdateTool
@@ -167,7 +167,7 @@ def _make_runner(
     registry = ToolRegistry.from_yaml(_tool_registry_yaml(tmp))
     sink = FilesystemEventSink(root=str(tmp / "events"), prefix="t")
     recorder = EventRecorder(sink, app_profile="local")
-    store = InMemorySessionMemoryStore()
+    store = InMemorySessionStateStore()
     from app.adapters.tools.document_local import LocalDocumentFetchSectionTool
     from app.adapters.tools.reranker_local import LocalRerankerTool
     tools = {

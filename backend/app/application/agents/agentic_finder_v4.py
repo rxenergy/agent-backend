@@ -42,7 +42,6 @@ from app.domain.errors import (
 from app.domain.interaction import (
     AgentRequest,
     AgentResponse,
-    ChatTurn,
     Citation,
     ToolCallRecord,
 )
@@ -558,14 +557,24 @@ class AgenticFinderRunner:
                 "memory.session_load", {"session_id": request.session_id}, ctx,
             )
             record(session_load)
+            # 새 SessionState 스키마(범용) — finder 의미를 매핑해 읽는다: scenario_object/
+            # depth 는 variant_state[variant] 에, 누적 entity 는 tracked_references 에.
             prior_so = prior_sd = None
-            prior_entities: dict[str, list[str]] = {}
-            conversation_summary: str | None = None
+            prior_refs: list[str] = []
+            prior_summary: str | None = None
+            prior_variant = None
             if session_load.output and session_load.output.get("present"):
-                prior_so = session_load.output.get("active_scenario_object")
-                prior_sd = session_load.output.get("active_scenario_depth")
-                prior_entities = session_load.output.get("active_entities") or {}
-                conversation_summary = session_load.output.get("conversation_summary")
+                prior_summary = session_load.output.get("running_summary")
+                prior_variant = session_load.output.get("last_variant_id")
+                vstate = (session_load.output.get("variant_state") or {}).get(
+                    self.spec.variant_id, {}
+                )
+                prior_so = vstate.get("scenario_object")
+                prior_sd = vstate.get("scenario_depth")
+                prior_refs = [r.get("ref_id")
+                              for r in session_load.output.get("tracked_references", [])
+                              if r.get("ref_id")]
+            conversation_summary: str | None = prior_summary
 
             approved = await self._tools.invoke(
                 "memory.approved_search",
@@ -573,12 +582,20 @@ class AgenticFinderRunner:
                  "scenario_depth": scenario_depth, "top_k": 5}, ctx,
             )
             record(approved)
+            # 범용 게이트 — finder 의 scenario_object/depth 를 continuity_signals 로,
+            # 현재 entity 를 reference 로(이름 평탄화) 넣어 기존 의미(scenario shift·50%
+            # entity overlap)를 동등 보존한다(설계 §9 마이그레이션).
+            current_refs = [v for vals in entities.values() for v in vals]
             decision = decide_session_injection(
-                has_chat_history=bool(request.chat_history),
-                prior_scenario_object=prior_so, prior_scenario_depth=prior_sd,
-                current_scenario_object=scenario_object,
-                current_scenario_depth=scenario_depth,
-                prior_entities=prior_entities, current_entities=entities,
+                has_history=bool(request.chat_history),
+                variant_switched=bool(prior_variant
+                                      and prior_variant != self.spec.variant_id),
+                prior_references=prior_refs,
+                current_references=current_refs,
+                continuity_signals={
+                    "scenario_object": (prior_so, scenario_object),
+                    "scenario_depth": (prior_sd, scenario_depth),
+                },
             )
 
             # N5 — memory_inject (재사용)
@@ -736,22 +753,28 @@ class AgenticFinderRunner:
             # 로 통과(F-7 audit sidechannel 배선 후 PENDING_AUDIT). 런타임 게이트 없음.
             verification_status = VerificationStatus.SKIPPED.value
 
-            # N5 post — session_update(재사용).
-            new_turns = list(request.chat_history) + [
-                ChatTurn(role="user", content=request.query_text)
-            ]
+            # N5 post — session_update(새 SessionState 스키마). 누적(turn/salience/윈도우/
+            # variant merge)은 도구 내부가 책임진다 — finder 는 이번 턴 신호만 넘긴다.
+            # entity → new_references(ref_type=entity), scenario_object/depth →
+            # variant_state[variant] 로 매핑(설계 §9). running_summary 는 압축됐을 때만 갱신.
             session_update = await self._tools.invoke(
                 "memory.session_update",
                 {
                     "session_id": request.session_id or "",
-                    "recent_turns": [{"role": t.role, "content": t.content}
-                                     for t in new_turns][-10:],
-                    "active_entities": entities,
-                    "active_scenario_object": scenario_object,
-                    "active_scenario_depth": scenario_depth,
-                    "conversation_summary": conversation_summary or "",
-                    "last_retrieved_chunk_ids": chunk_ids,
-                    "last_memory_ids_used": memory_ids_used,
+                    "variant_id": self.spec.variant_id,
+                    "user_turn": request.query_text,
+                    "assistant_turn": llm_result.text,
+                    "new_references": [
+                        {"ref_id": v, "ref_type": "entity"}
+                        for vals in entities.values() for v in vals
+                    ],
+                    "retrieved_chunk_ids": chunk_ids,
+                    "running_summary": conversation_summary or None,
+                    "memory_ids_used": memory_ids_used,
+                    "variant_state": {
+                        "scenario_object": scenario_object,
+                        "scenario_depth": scenario_depth,
+                    },
                 },
                 ctx,
             )

@@ -167,6 +167,14 @@ Rule: for a `design_claim` facet on a passive design, slot the design-specific m
 질의: 10 CFR 50 Appendix B에서 'safety-related'는 어떻게 정의돼?
 {"reasoning":"질의가 '10 CFR 50 Appendix B'와 'safety-related'를 명시하므로 verbatim 보존, definition 의도, binding. 좁은 정의 질의라 정의 개념 + 정의 출처 조문 둘로 분해. 정의 *문구* 는 답이라 적지 않는다.","intent":"definition","explicit_references":["10 CFR 50 Appendix B"],"governing_normative_class":"binding","required_slots":[{"name":"safety_related_definition","keywords":["safety-related","10 CFR 50 Appendix B","important to safety","definition"],"description":"질의가 묻는 용어의 규제상 정의 — 정의 문구는 검색이 회수","required":true},{"name":"definition_source_clause","keywords":["10 CFR 50.2","definitions","safety-related"],"description":"정의를 담는 조문(정의 조항 10 CFR 50.2) — 출처 anchor","required":false}],"answer_structure":"질의 용어의 규제 정의를 그 정의 조문 근거로 제시"}
 
+## topic_label (multi-turn)
+
+Emit a short `topic_label` (a few words) naming the subject this query is about (e.g. `ECCS acceptance criteria`, `RPV fracture toughness`, `seismic design`). It is used only to detect topic shifts across follow-up turns — a label, never a value/conclusion. Keep it stable for the same subject so a genuine follow-up keeps the same label and a new subject gets a new one. Null/omit is acceptable for a one-off query.
+
+## Follow-up turns (PRIOR CONTEXT, when present)
+
+If a `# PRIOR CONTEXT` block precedes the query, this is a follow-up turn in an ongoing conversation. Resolve the query's referring expressions (그것/이/해당/위/that/this) against the prior summary and prior references, and **carry forward the explicit references they point to** — e.g. a prior turn about `10 CFR 50.46` followed by "그 중 PCT 한계는?" inherits `10 CFR 50.46` into `explicit_references` and slots the PCT-limit facet. Do not invent references the prior context does not contain. PRIOR CONTEXT is context for resolving the query only — it is not evidence and not the answer.
+
 ## Language seam (important)
 
 Read the query in its original language (Korean is possible), but **slot keywords and explicit_references are English** (English corpus). Keep `answer_structure` short and language-neutral. When mapping a Korean query's concept to an English canonical term, keep the *literal form of explicit references* (regulatory IDs) unchanged.
