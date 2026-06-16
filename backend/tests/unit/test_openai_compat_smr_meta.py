@@ -45,9 +45,9 @@ def test_citations_expose_source_url_and_tables():
     # 노출된다(원칙 8, spec_driven_table_citation_references D7). OpenWebUI 는 무시하나
     # content 의 References 가 사람용 렌더를 담당.
     tables = [{"tag": "t", "caption": "C", "markdown": "| a |", "html": ""}]
-    cite = Citation(citation_id="cite-0", document_id="ML18002A422",
+    cite = Citation(citation_id="cite-1", document_id="ML18002A422",
                     source_url="https://www.nrc.gov/docs/ML1800/ML18002A422.pdf",
-                    tables=tables)
+                    tables=tables, kind="table", table_tag="t")
     meta = _smr_agent_metadata(
         interaction_id="i1", runner_variant="spec_driven_v1",
         resolved_llm="x", response=_resp(citations=(cite,)),
@@ -55,3 +55,6 @@ def test_citations_expose_source_url_and_tables():
     c0 = meta["citations"][0]
     assert c0["source_url"] == "https://www.nrc.gov/docs/ML1800/ML18002A422.pdf"
     assert c0["tables"] == tables
+    # 입도 구분(kind/table_tag)도 구조화 소비자에 노출(table 근거 분리 집계).
+    assert c0["kind"] == "table"
+    assert c0["table_tag"] == "t"

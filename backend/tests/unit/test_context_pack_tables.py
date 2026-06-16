@@ -114,8 +114,8 @@ def _render(chunks, mode: str = "full") -> str:
     return b.render_for_prompt(pack)
 
 
-def test_full_mode_expands_real_table_with_caption_and_markdown() -> None:
-    # 사용자 실제 데이터 형태(tag/caption/markdown/html 배열).
+def test_full_mode_table_goes_to_tables_block_not_body() -> None:
+    # 입도 분리(D1): 표는 본문에서 빠지고 # TABLES 블록에 별도 cite 로 렌더.
     table = {
         "tag": "tb_0001",
         "caption": ("PROBABILITY OF TURBINE FAILURE RESULTING IN THE EJECTION OF "
@@ -125,23 +125,30 @@ def test_full_mode_expands_real_table_with_caption_and_markdown() -> None:
                      "| A | P₁ < 10⁻⁴ | P₁ < 10⁻⁵ | minimum reliability |"),
     }
     ctx = _render([_chunk(text="터빈 미사일 보호 [TABLE: tb_0001] 이후", tables=[table])])
-    assert "[TABLE:" not in ctx  # 마커 치환됨
+    assert "[TABLE:" not in ctx  # 본문 마커 제거됨(인라인 치환 아님)
+    # 표는 # TABLES 블록에 독립 cite 로.
+    assert "# TABLES" in ctx
     assert "**PROBABILITY OF TURBINE FAILURE" in ctx  # caption(bold)
     assert "| Case | FAVORABLE | UNFAVORABLE | ACTION |" in ctx  # markdown 표 헤더
     assert "P₁ < 10⁻⁴" in ctx  # 표 값 verbatim
+    # 본문 cite-0(chunk) + 표 cite-1(table) — 통합 풀.
+    assert "[cite-0]" in ctx and "[cite-1] (표" in ctx
 
 
-def test_snippets_mode_also_expands_within_cap() -> None:
+def test_snippets_mode_table_also_separated() -> None:
     ctx = _render([
         _chunk(snippet="요건 [TABLE: tb_0001] 끝",
                tables=[{"tag": "tb_0001", "markdown": "표내용"}]),
     ], mode="snippets")
     assert "표내용" in ctx and "[TABLE:" not in ctx
+    assert "# TABLES" in ctx
 
 
-def test_full_mode_no_tables_leaves_marker_visible() -> None:
+def test_full_mode_no_tables_marker_stripped_no_tables_block() -> None:
+    # 표 데이터 없이 마커만 있으면(엣지) 본문 마커는 제거, # TABLES 블록은 미생성.
     ctx = _render([_chunk(text="요건 [TABLE: tb_0001] 끝", tables=None)])
-    assert "[TABLE: tb_0001]" in ctx
+    assert "[TABLE: tb_0001]" not in ctx  # 깨진 마커를 본문에 남기지 않음
+    assert "# TABLES" not in ctx  # 렌더할 표 cite 없음
 
 
 # --- to_snapshot (full 모드 — 치환 전 원본 text + tables 보존) ---------------
@@ -158,3 +165,59 @@ def test_snapshot_full_mode_preserves_original_text_and_tables() -> None:
     # 스냅샷에는 치환 *전* 원본이 남아 로직 변경 시에도 재현 가능(원칙 5).
     assert snap["chunks"][0]["text"] == "body [TABLE: tb_0001] tail"
     assert snap["chunks"][0]["tables"] == tables
+
+
+# --- 입도 분리: chunk 본문 cite + 표별 table cite(spec_driven_table_citation_granularity)
+def test_build_splits_chunk_and_table_into_separate_cites() -> None:
+    # 표 2개 chunk → cite 3개: 본문 cite-0(chunk) + table cite-1/cite-2(통합 풀).
+    tables = [
+        {"tag": "tb_0001", "caption": "C1", "markdown": "| a |", "html": ""},
+        {"tag": "tb_0002", "caption": "C2", "markdown": "| b |", "html": ""},
+    ]
+    b = ContextBuilder(capture_mode="full")
+    pack = b.build(
+        interaction_id="i", query_text="q", chat_history=(),
+        conversation_summary=None, scenario_object="n_a", scenario_depth="n_a",
+        entities={}, chunks=[_chunk(chunk_id="ch0",
+                                    text="x [TABLE: tb_0001][TABLE: tb_0002] y",
+                                    tables=tables)],
+    )
+    cands = pack.citation_candidates
+    assert len(cands) == 3
+    # 본문 cite — kind=chunk, 표 자동 렌더 안 함(tables=None).
+    assert cands[0].citation_id == "cite-0"
+    assert cands[0].kind == "chunk" and cands[0].tables is None
+    # 표 cite — kind=table, parent 승계, 단일 표.
+    assert cands[1].citation_id == "cite-1"
+    assert cands[1].kind == "table" and cands[1].parent_chunk_id == "ch0"
+    assert cands[1].table_tag == "tb_0001" and cands[1].tables == [tables[0]]
+    assert cands[2].citation_id == "cite-2" and cands[2].table_tag == "tb_0002"
+    # 표 cite 출처 메타는 parent chunk 승계(D3).
+    assert cands[1].document_id == cands[0].document_id
+    # 표 cite 라벨에 표 식별(caption) 포함.
+    assert "표: C1" in (cands[1].formatted or "")
+
+
+def test_build_table_cite_skips_empty_table_body() -> None:
+    # markdown·html 둘 다 빈 표는 cite 로 승격하지 않는다(인용 실체 없음).
+    tables = [{"tag": "tb_0001", "caption": "C", "markdown": "", "html": ""}]
+    b = ContextBuilder(capture_mode="full")
+    pack = b.build(
+        interaction_id="i", query_text="q", chat_history=(),
+        conversation_summary=None, scenario_object="n_a", scenario_depth="n_a",
+        entities={}, chunks=[_chunk(text="x [TABLE: tb_0001] y", tables=tables)],
+    )
+    assert len(pack.citation_candidates) == 1  # 본문 cite 만
+    assert pack.citation_candidates[0].kind == "chunk"
+
+
+def test_build_no_tables_single_chunk_cite() -> None:
+    b = ContextBuilder(capture_mode="full")
+    pack = b.build(
+        interaction_id="i", query_text="q", chat_history=(),
+        conversation_summary=None, scenario_object="n_a", scenario_depth="n_a",
+        entities={}, chunks=[_chunk(text="no tables")],
+    )
+    assert len(pack.citation_candidates) == 1
+    assert pack.citation_candidates[0].kind == "chunk"
+    assert pack.citation_candidates[0].tables is None

@@ -100,13 +100,44 @@ def build_hybrid_query(
             filter_clauses.append({"term": {"search_type": st}})
     # v3.1 hard-scope(filters) — corpus_map 이 high-confidence 일 때만 채운다.
     # 단일 값은 term, 리스트는 terms. 모든 sub-query 에 공통 적용(hybrid.filter).
+    #
+    # wildcard 지원(spec_driven FSAR canonical) — 값에 `*`/`?` 가 들어있으면 exact
+    # term 이 아니라 keyword `wildcard` 절로 변환한다. FSAR canonical 은 같은 챕터가
+    # `FSAR-Part02-Ch09` 와 `FSAR-Part02-T2-Ch09` 두 표기로 갈리고 Section 유무도
+    # 다양해(`...-Ch09` vs `...-Sec9.01`), 챕터 단위 스코프는 exact 로 못 잡는다.
+    # `FSAR-Part02*Ch09` 같은 패턴이 두 표기·하위섹션을 한 번에 흡수한다(인덱스 실측).
+    # 리스트 내 wildcard 값은 should(OR)로 묶어 terms 와 동치 의미를 유지한다.
+    # keyword 필드라 wildcard 가 동작(analyzed text 면 토큰 단위라 부정확).
+    def _has_glob(v: Any) -> bool:
+        return isinstance(v, str) and ("*" in v or "?" in v)
+
     for field_name, value in (ti.filters or {}).items():
         if value is None or value == [] or value == "":
             continue
         if isinstance(value, (list, tuple, set)):
             vals = [v for v in value if v not in (None, "")]
-            if vals:
-                filter_clauses.append({"terms": {field_name: list(vals)}})
+            if not vals:
+                continue
+            globs = [v for v in vals if _has_glob(v)]
+            exacts = [v for v in vals if not _has_glob(v)]
+            if globs and not exacts:
+                # 전부 wildcard — 단일이면 wildcard 절, 다중이면 should(OR).
+                if len(globs) == 1:
+                    filter_clauses.append({"wildcard": {field_name: globs[0]}})
+                else:
+                    filter_clauses.append({"bool": {"should": [
+                        {"wildcard": {field_name: g}} for g in globs
+                    ], "minimum_should_match": 1}})
+            elif globs:
+                # exact + wildcard 혼합 — terms(OR) ∪ wildcard(OR) 를 should 로 합친다.
+                shoulds: list[dict[str, Any]] = [{"terms": {field_name: exacts}}]
+                shoulds += [{"wildcard": {field_name: g}} for g in globs]
+                filter_clauses.append({"bool": {"should": shoulds,
+                                                "minimum_should_match": 1}})
+            else:
+                filter_clauses.append({"terms": {field_name: exacts}})
+        elif _has_glob(value):
+            filter_clauses.append({"wildcard": {field_name: value}})
         else:
             filter_clauses.append({"term": {field_name: value}})
     # v3.1 노이즈 floor(Layer 2) — 본문 토큰 < N 인 chunk(목차·헤더·단어 fragment)

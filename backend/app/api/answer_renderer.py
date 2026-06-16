@@ -107,29 +107,84 @@ def _citation_url(c) -> str | None:
     return url
 
 
+def _render_reference_tables(tables) -> str:
+    """citation 의 tables(list[dict] — {tag,caption,markdown,html})를 References 표
+    블록 마크다운으로. caption(있으면 `**bold**`) + markdown(우선) / html(차순). markdown·
+    html 둘 다 비면 그 엔트리는 건너뛴다. 여러 엔트리는 빈 줄로 누적(pack._expand_tables
+    의 누적 규칙과 동형). 표 본문이 하나도 없으면 빈 문자열(호출부가 표 블록 미삽입).
+
+    marked.js 는 GFM 파이프표·raw `<table>` 모두 렌더하나, 파이프표는 **앞뒤 빈 줄로
+    격리**돼야 단락에 병합되지 않는다 — 호출부(references_section)가 표 블록을 `\n\n` 로
+    감싸 분리 단락으로 둔다."""
+    if not tables:
+        return ""
+    blocks: list[str] = []
+    for e in tables:
+        if not isinstance(e, dict):
+            continue
+        body = (e.get("markdown") or e.get("html") or "").strip()
+        if not body:
+            continue
+        caption = (e.get("caption") or "").strip()
+        blocks.append(f"**{caption}**\n\n{body}" if caption else body)
+    return "\n\n".join(blocks)
+
+
 def references_section(citations, renumber: dict[str, int]) -> str:
     """본문에서 참조된 인용만, **본문 등장 순서(표시번호순)**로 나열한다. 각 줄은
     본문 마커와 동일한 `[N]` 형식으로 시작한다(`[cite-N]`·`N.` 아님 — 본문↔근거
-    번호가 한눈에 매칭). ADAMS URL 파생되면 라벨에 마크다운 링크."""
+    번호가 한눈에 매칭). ADAMS/govinfo URL 파생되면 라벨에 마크다운 링크.
+
+    표 보유 citation(spec_driven_table_citation_references)은 라벨 줄 *아래* 에 실제
+    표(markdown/HTML)를 빈 줄로 격리해 렌더한다 — 담당자가 답변 화면에서 표를 직접
+    확인. 표 없는 citation 은 기존과 동일(라벨/링크만)."""
     if not renumber:
         return ""
     by_id = {c.citation_id: c for c in citations}
-    lines: list[str] = []
+    # 단락(segment) 단위 조립 — 표 없는 라벨은 hard break("  \n")로 한 단락에 모으고,
+    # 표 보유 항목은 빈 줄(`\n\n`)로 격리한 독립 단락으로 둔다(파이프표 단락 병합 방지).
+    segments: list[str] = []
+    pending_labels: list[str] = []  # 아직 단락에 안 묶인 표-없는 라벨 줄들.
+
+    def _flush_labels() -> None:
+        if pending_labels:
+            segments.append("  \n".join(pending_labels))
+            pending_labels.clear()
+
     # renumber 값(표시번호)은 본문 첫 등장 순으로 부여되므로 그 순으로 정렬하면
     # 곧 본문 출력 순서다.
     for cid, num in sorted(renumber.items(), key=lambda kv: kv[1]):
         c = by_id.get(cid)
         if c is None:
             # 후보에 없는 참조(계약 위반 가능) — KeyError 대신 가시 표기.
-            lines.append(f"[{num}] (근거 메타 없음: {cid})")
+            pending_labels.append(f"[{num}] (근거 메타 없음: {cid})")
             continue
         label = _citation_label(c)
         url = _citation_url(c)
-        lines.append(f"[{num}] [{label}]({url})" if url else f"[{num}] {label}")
-    # 헤더와 본문 사이 빈 줄 필수(marked.js 단락 병합 방지). 항목은 마크다운 hard
-    # break("  \n")로 줄을 나눈다 — `[N]` 줄은 리스트가 아니라 단일 `\n`이면 한 줄로
-    # 접힌다(ordered-list `N.` 의 줄바꿈 의미를 잃은 대가).
-    return "**근거 (References)**\n\n" + "  \n".join(lines)
+        # 이중 링크 방지 — format_citation 이 ADAMS 문서 inner 에 이미 `[ML..](url)`
+        # 마크다운 링크를 넣는 경우가 있다(_doc_link). 그 라벨을 다시 `[label](url)` 로
+        # 감싸면 `[[ML..](url), …](url)` 중첩이 된다. 라벨에 이미 markdown 링크(`](`)가
+        # 있으면 재감싸지 않고 평문으로 둔다(라벨 안 링크가 출처로 동작).
+        if url and "](" not in label:
+            label_line = f"[{num}] [{label}]({url})"
+        else:
+            label_line = f"[{num}] {label}"
+        # 표 cite(kind="table")만 표 블록을 렌더한다(spec_driven_table_citation_granularity).
+        # chunk cite 는 tables=None 이라 라벨만 — 본문 근거와 표 근거가 분리되어, 본문만
+        # 인용된 chunk 의 무관한 표가 노출되지 않는다(선행 "chunk 표 전량 렌더" 폐기).
+        is_table = getattr(c, "kind", "chunk") == "table"
+        table_md = _render_reference_tables(getattr(c, "tables", None)) if is_table else ""
+        if table_md:
+            # 표 보유 항목 — 직전까지 모인 라벨 단락을 닫고, 라벨+표를 빈 줄로 격리한
+            # 독립 단락으로 추가(라벨 ↔ 표 사이도 빈 줄 — marked.js 파이프표 격리).
+            _flush_labels()
+            segments.append(f"{label_line}\n\n{table_md}")
+        else:
+            pending_labels.append(label_line)
+    _flush_labels()
+    # 헤더와 본문 사이 빈 줄 필수(marked.js 단락 병합 방지). 단락 간 빈 줄(`\n\n`)로
+    # 잇는다 — 표 단락이 인접 라벨과 병합되지 않게.
+    return "**근거 (References)**\n\n" + "\n\n".join(segments)
 
 
 def caveat_callouts(response) -> str:

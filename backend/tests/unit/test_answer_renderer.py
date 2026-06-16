@@ -16,9 +16,10 @@ from app.domain.interaction import AgentResponse, Citation
 
 
 def _cite(cid: str, *, document_id=None, formatted=None, page=None,
-          source_url=None, tables=None) -> Citation:
+          source_url=None, tables=None, kind="chunk", table_tag=None) -> Citation:
     return Citation(citation_id=cid, document_id=document_id, formatted=formatted,
-                    page=page, source_url=source_url, tables=tables)
+                    page=page, source_url=source_url, tables=tables,
+                    kind=kind, table_tag=table_tag)
 
 
 def _resp(
@@ -183,6 +184,97 @@ def test_references_missing_citation_is_visible_not_crash():
 
 def test_references_empty_when_no_refs():
     assert references_section([_cite("cite-0")], {}) == ""
+
+
+# --- References 표 렌더(spec_driven_table_citation_granularity) ---------------
+# 입도 분리: kind="table" 인 cite 만 표를 렌더한다. kind="chunk" 는 라벨만(본문 근거).
+
+_GFM_TABLE = "| 항목 | 한계값 |\n| --- | --- |\n| PCT | 2200°F |"
+
+
+def test_references_renders_table_cite_below_label():
+    # 표 cite(kind="table") → 라벨 줄 아래 빈 줄 격리 + caption(bold) + GFM 표.
+    cites = [_cite("cite-0", document_id="ML18002A422", page=45, kind="table",
+                   table_tag="tb_0001",
+                   formatted="[cite-0] [ML18002A422, Section 6.2, p. 45, 표: 표 6.2-1 ECCS 한계값]",
+                   tables=[{"tag": "tb_0001", "caption": "표 6.2-1 ECCS 한계값",
+                            "markdown": _GFM_TABLE, "html": ""}])]
+    out = references_section(cites, {"cite-0": 1})
+    # 라벨 ↔ 표 사이 빈 줄(파이프표 격리) + caption bold + 표 본문.
+    assert "**표 6.2-1 ECCS 한계값**" in out
+    assert _GFM_TABLE in out
+    # 라벨 줄(ADAMS 딥링크) 직후 빈 줄로 표가 분리(단락 병합 방지).
+    assert "#page=45)\n\n**표 6.2-1 ECCS 한계값**" in out
+
+
+def test_references_chunk_cite_with_tables_renders_label_only():
+    # chunk cite 는 tables 가 실려도(이론상) 표를 렌더하지 않는다 — 본문 근거와 표 근거
+    # 분리(선행 "chunk 표 전량 렌더" 폐기). 실제로는 build 가 chunk cite tables=None.
+    cites = [_cite("cite-0", document_id="ML18002A422", page=45, kind="chunk",
+                   formatted="[cite-0] [ML18002A422, Section 6.2, p. 45]",
+                   tables=[{"tag": "t", "caption": "C", "markdown": _GFM_TABLE}])]
+    out = references_section(cites, {"cite-0": 1})
+    assert _GFM_TABLE not in out
+    assert "**C**" not in out
+    assert "[1] [ML18002A422, Section 6.2, p. 45]" in out
+
+
+def test_references_table_cite_html_fallback_when_no_markdown():
+    # markdown 비고 html 만 → raw <table> 그대로(marked.js 통과).
+    html = "<table><tr><td>PCT</td><td>2200°F</td></tr></table>"
+    cites = [_cite("cite-0", document_id="ML1", kind="table",
+                   formatted="[cite-0] [ML1, p. 1, 표: t]",
+                   tables=[{"tag": "t", "caption": "", "markdown": "", "html": html}])]
+    out = references_section(cites, {"cite-0": 1})
+    assert html in out
+
+
+def test_references_mixed_table_and_chunk_isolation():
+    # 표 cite 항목은 독립 단락(`\n\n` 격리), chunk cite 라벨은 hard break 단락에 모임.
+    cites = [
+        _cite("cite-0", document_id="RG-1", formatted="[cite-0] [RG-1, p. 1]"),
+        _cite("cite-1", document_id="ML2", kind="table", table_tag="t",
+              formatted="[cite-1] [ML2, p. 2, 표: T]",
+              tables=[{"tag": "t", "caption": "T", "markdown": _GFM_TABLE}]),
+        _cite("cite-2", document_id="RG-3", formatted="[cite-2] [RG-3, p. 3]"),
+    ]
+    out = references_section(cites, {"cite-0": 1, "cite-1": 2, "cite-2": 3})
+    # 표 단락이 인접 라벨과 병합되지 않게 빈 줄로 격리(ML2 는 ADAMS 정규식 미매칭 → 평문).
+    assert "\n\n**T**\n\n" in out
+    assert _GFM_TABLE in out
+    # chunk cite-0/cite-2 라벨은 그대로 존재.
+    assert "[1] RG-1, p. 1" in out
+    assert "[3] RG-3, p. 3" in out
+
+
+def test_references_table_cite_empty_body_renders_label_only():
+    # 표 본문(markdown·html) 없음 → 라벨만(표 블록 미삽입).
+    cites = [_cite("cite-0", document_id="ML1", kind="table",
+                   formatted="[cite-0] [ML1, p. 1, 표: t]",
+                   tables=[{"tag": "t", "caption": "C", "markdown": "", "html": ""}])]
+    out = references_section(cites, {"cite-0": 1})
+    assert out == "**근거 (References)**\n\n[1] ML1, p. 1, 표: t"
+
+
+def test_references_no_tables_attr_is_safe():
+    # tables=None(기본 chunk cite) → 기존 출력 불변(회귀 가드).
+    cites = [_cite("cite-0", document_id="RG-1", formatted="[cite-0] [RG-1, p. 1]")]
+    out = references_section(cites, {"cite-0": 1})
+    assert out == "**근거 (References)**\n\n[1] RG-1, p. 1"
+
+
+def test_references_no_double_link_when_label_already_linked():
+    # format_citation 이 ADAMS inner 에 이미 [ML..](url) 링크를 넣으면, References 는
+    # 재감싸지 않는다(이중 링크 [[ML..](url), …](url) 방지). 라벨 안 링크가 출처.
+    cites = [_cite(
+        "cite-0", document_id="ML18002A422", page=45,
+        formatted="[cite-0] [[ML18002A422](https://www.nrc.gov/docs/ML1800/"
+                  "ML18002A422.pdf#page=45), Chapter 6.2, p. 45]",
+    )]
+    out = references_section(cites, {"cite-0": 1})
+    assert "[[ML" not in out  # 이중 링크 없음
+    # 라벨 안의 단일 markdown 링크는 보존.
+    assert "[ML18002A422](https://www.nrc.gov/docs/ML1800/ML18002A422.pdf#page=45)" in out
 
 
 # --- caveat callouts -------------------------------------------------------

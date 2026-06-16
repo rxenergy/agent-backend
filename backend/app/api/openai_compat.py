@@ -367,6 +367,11 @@ def _smr_agent_metadata(
                 # 구조화 소비자(eval/감사)는 이 원본을 파싱한다(원칙 8 — silent 금지,
                 # spec_driven_table_citation_references D7).
                 "tables": c.tables,
+                # 인용 입도(spec_driven_table_citation_granularity) — chunk 본문 / 표 구분.
+                # kind="table" 이면 table_tag 로 어느 표인지(구조화 소비자가 본문 근거와
+                # 표 근거를 분리 집계).
+                "kind": getattr(c, "kind", "chunk"),
+                "table_tag": getattr(c, "table_tag", None),
             }
             for c in response.citations
         ],

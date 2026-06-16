@@ -5,7 +5,11 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-from app.application.context.citation_format import format_citation, infer_doc_type
+from app.application.context.citation_format import (
+    format_citation,
+    format_table_citation,
+    infer_doc_type,
+)
 from app.domain.interaction import ChatTurn
 from app.domain.memory import MemoryRef
 from app.domain.retrieval import RetrievedChunk
@@ -27,6 +31,18 @@ def _render_table_entry(entry: dict[str, Any]) -> str | None:
         return None
     caption = (entry.get("caption") or "").strip()
     return f"**{caption}**\n\n{table}" if caption else table
+
+
+def _strip_table_markers(body: str) -> str:
+    """본문에서 `[TABLE: tag]` 마커를 제거(spec_driven_table_citation_granularity D1).
+    표는 # TABLES 의 독립 cite 로 분리되므로 본문에는 마커를 남기지 않는다 — 모델이
+    본문 근거와 표 근거를 섞지 않게. 마커 자리에 연속 공백이 생기지 않도록 양옆 공백을
+    1칸으로 정규화한다(인접 토큰 붙음·이중 공백 회피)."""
+    if "[TABLE:" not in body:
+        return body
+    stripped = _TABLE_MARKER_RE.sub(" ", body)
+    # 마커 제거로 생긴 다중 공백을 1칸으로(줄바꿈은 보존 — 단락 구조 유지).
+    return re.sub(r"[ \t]{2,}", " ", stripped)
 
 
 def _expand_tables(body: str, tables: list[dict[str, Any]] | None) -> str:
@@ -81,11 +97,19 @@ class CitationCandidate:
     # 강등하고, clause_id(10CFR50.46)로 "10 CFR §50.46" 라벨을 만든다.
     source_url: str | None = None
     clause_id: str | None = None
-    # 본문에서 분리된 표(chunk.tables 원본 list[dict] — {tag,caption,markdown,html}).
-    # References 란에 실제 표(markdown/HTML)를 렌더하기 위해 chunk 에서 전파한다
-    # (spec_driven_table_citation_references). frozen dataclass 의 eq/hash 대상에서
-    # 제외(compare=False) — list[dict] 는 unhashable 이라 자동 __hash__ 가 깨질 수 있고,
-    # 표 데이터는 동등성 판정 축이 아니다(citation_id/chunk_id 가 식별).
+    # 인용 입도(spec_driven_table_citation_granularity) — chunk 본문과 개별 표를 별도
+    # cite 후보로 분리해 generation 이 표 근거/본문 근거를 구분 인용하게 한다.
+    #   kind="chunk" : chunk 본문 후보. tables=None(표는 별도 table 후보로 승격됨).
+    #   kind="table" : 표 1개 후보. parent_chunk_id/table_tag 로 소속 표 지정,
+    #                  tables=[그 표 dict] (References 가 이 단일 표를 렌더).
+    # 출처 메타(document_id/page/source_url/clause_id/section/doc_type)는 table 후보도
+    # parent chunk 에서 승계한다(표는 그 chunk 의 일부 — D3).
+    kind: Literal["chunk", "table"] = "chunk"
+    parent_chunk_id: str | None = None
+    table_tag: str | None = None
+    # 표 본문(list[dict] — {tag,caption,markdown,html}). kind="table" 일 때 원소 1개,
+    # kind="chunk" 면 None. References 가 markdown/HTML 로 렌더(answer_renderer).
+    # frozen dataclass eq/hash 제외(compare=False) — list[dict] 는 unhashable.
     tables: list[dict[str, Any]] | None = field(default=None, compare=False)
 
 
@@ -146,9 +170,15 @@ class ContextBuilder:
         memory_refs: tuple[MemoryRef, ...] = (),
         tool_result_refs: tuple[str, ...] = (),
     ) -> ContextPack:
+        # 통합 cite-N 풀(spec_driven_table_citation_granularity D2) — chunk 마다 본문
+        # cite 1개 + 그 chunk 가 보유한 표 개수만큼 table cite. 단일 카운터(_n)로 번호를
+        # 매겨 본문/표가 같은 [cite-N] 공간을 공유한다(본문에서 [n] 로 표시·검증 동일).
+        # 배치 순서: chunk 본문 cite 직후 그 chunk 의 표 cite 들(parent 인접·가독성).
         candidates_list: list[CitationCandidate] = []
-        for i, c in enumerate(chunks):
-            cid = f"cite-{i}"
+        n = 0
+        for c in chunks:
+            cid = f"cite-{n}"
+            n += 1
             dt = c.doc_type or infer_doc_type(c.document_id)
             candidates_list.append(
                 CitationCandidate(
@@ -164,9 +194,43 @@ class ContextBuilder:
                     formatted=format_citation(c, cid),
                     source_url=c.source_url,
                     clause_id=c.clause_id,
-                    tables=c.tables,
+                    kind="chunk",
+                    parent_chunk_id=c.chunk_id,
+                    # 본문 cite 는 표를 자동 렌더하지 않는다(표는 아래 table cite 로 분리).
+                    tables=None,
                 )
             )
+            # 표 cite — 그 chunk 의 각 표를 독립 후보로 승격. 출처 메타는 parent chunk
+            # 승계(D3), 라벨은 parent formatted + "(표: caption)" 접미(answer_renderer
+            # 가 References 에서 표를 렌더할 식별). markdown·html 둘 다 빈 표는 건너뛴다
+            # (인용 가능한 실체가 없음 — 모델이 빈 cite 를 달 수 없게).
+            for entry in (c.tables or ()):
+                if not isinstance(entry, dict):
+                    continue
+                if not (entry.get("markdown") or entry.get("html") or "").strip():
+                    continue
+                t_cid = f"cite-{n}"
+                n += 1
+                candidates_list.append(
+                    CitationCandidate(
+                        citation_id=t_cid,
+                        chunk_id=c.chunk_id,
+                        document_id=c.document_id,
+                        page=c.page,
+                        score=c.score,
+                        doc_type=dt,
+                        section=c.section,
+                        revision=c.revision,
+                        response_date=c.response_date,
+                        formatted=format_table_citation(c, t_cid, entry),
+                        source_url=c.source_url,
+                        clause_id=c.clause_id,
+                        kind="table",
+                        parent_chunk_id=c.chunk_id,
+                        table_tag=entry.get("tag"),
+                        tables=[entry],
+                    )
+                )
         candidates = tuple(candidates_list)
         context_hash = _hash_context(
             query_text=query_text,
@@ -192,26 +256,61 @@ class ContextBuilder:
         )
 
     def render_for_prompt(self, pack: ContextPack) -> str:
+        """N4 생성 컨텍스트 렌더(spec_driven_table_citation_granularity).
+
+        `# CONTEXT` — kind="chunk" 후보의 본문(표 마커는 제거). 표는 본문에서 분리해
+        모델이 표 근거와 본문 근거를 섞지 않게 한다(D1).
+        `# TABLES` — kind="table" 후보. 각 표를 고유 `[cite-N]` 블록(caption+표)으로 제시.
+        후보↔chunk 정렬은 parent_chunk_id→chunk dict 조회(1:1 zip 가정 해체 — D5)."""
         sections: list[str] = []
         if pack.conversation_summary:
             sections.append(f"# CONVERSATION_SUMMARY\n{pack.conversation_summary}")
-        lines: list[str] = []
-        for cand, chunk in zip(pack.citation_candidates, pack.chunks, strict=True):
+
+        by_chunk_id = {c.chunk_id: c for c in pack.chunks}
+
+        # --- # CONTEXT: 본문 후보(kind="chunk") -----------------------------
+        body_lines: list[str] = []
+        for cand in pack.citation_candidates:
+            if cand.kind != "chunk":
+                continue
+            chunk = by_chunk_id.get(cand.parent_chunk_id or cand.chunk_id)
             head = cand.formatted or (
-                f"[{cand.citation_id}] {chunk.document_id}#{chunk.chunk_id} (p={chunk.page})"
+                f"[{cand.citation_id}] {cand.document_id}#{cand.chunk_id} (p={cand.page})"
             )
+            if chunk is None:
+                body_lines.append(f"{head}\n(chunk unavailable)")
+                continue
             if self._capture_mode == "full" and chunk.text:
                 body = chunk.text
             elif self._capture_mode in ("snippets", "full") and chunk.snippet:
                 body = chunk.snippet
             else:
                 body = "(metadata-only capture)"
-            # 표 마커 인라인 치환 — capture_mode 무관(있으면 치환). full 모드(text 전문)
-            # 는 마커가 잘리지 않아 전량 치환되고, snippets 모드(타 variant)는 캡 안에
-            # 든 마커만 치환된다(잘린 마커는 보존돼 가시화).
-            body = _expand_tables(body, chunk.tables)
-            lines.append(f"{head}\n{body}")
-        sections.append("\n\n".join(lines) if lines else "(no retrieved context)")
+            # 표 마커 제거 — 표는 # TABLES 의 독립 cite 로 분리됐다(본문에 인라인 치환
+            # 하지 않는다, D1). 마커는 silent 삭제가 아니라 *분리* 이므로 표 자체는
+            # # TABLES 에 그대로 보인다(원칙 6 — 누락 아님).
+            body = _strip_table_markers(body)
+            body_lines.append(f"{head}\n{body}")
+        sections.append("\n\n".join(body_lines) if body_lines
+                        else "(no retrieved context)")
+
+        # --- # TABLES: 표 후보(kind="table"), 있을 때만 ----------------------
+        table_lines: list[str] = []
+        for cand in pack.citation_candidates:
+            if cand.kind != "table" or not cand.tables:
+                continue
+            entry = cand.tables[0]
+            rendered = _render_table_entry(entry)
+            if rendered is None:
+                continue
+            # 출처(문서·페이지)를 헤더에 병기 — 표가 어느 chunk 에서 왔는지 가시.
+            src = f"{cand.document_id or '?'}"
+            if cand.page is not None:
+                src += f", p. {cand.page}"
+            table_lines.append(f"[{cand.citation_id}] (표 — {src})\n{rendered}")
+        if table_lines:
+            sections.append("# TABLES\n" + "\n\n".join(table_lines))
+
         return "\n\n".join(sections)
 
     def to_snapshot(self, pack: ContextPack) -> dict[str, Any]:

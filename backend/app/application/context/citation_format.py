@@ -224,6 +224,32 @@ def format_citation(chunk: RetrievedChunk, citation_id: str) -> str:
     return f"[{citation_id}] [{doc_ref}, Chapter {section}, p. {page}{rev_part}]{tag}"
 
 
+def _table_suffix(entry: dict) -> str:
+    """표 cite 라벨의 inner 끝에 붙는 표 식별 — caption(있으면) 또는 tag. References
+    에서 같은 출처(parent chunk)의 본문 cite 와 표 cite 를 사람이 구별하게 한다."""
+    caption = (entry.get("caption") or "").strip() if isinstance(entry, dict) else ""
+    if caption:
+        return f", 표: {caption}"
+    tag = (entry.get("tag") or "").strip() if isinstance(entry, dict) else ""
+    return f", 표: {tag}" if tag else ", 표"
+
+
+def format_table_citation(chunk: RetrievedChunk, citation_id: str,
+                          entry: dict) -> str:
+    """표 cite 의 출처 라벨(spec_driven_table_citation_granularity D3) — parent chunk 의
+    `format_citation` 출력 inner 에 `, 표: {caption}` 를 끼운다. 출처(문서/페이지/링크)는
+    parent 와 동일하고 표 식별만 덧붙어, answer_renderer 의 `_FORMATTED_RE`(`[cite-N]
+    [inner] (tail)`)가 inner+표식별을 라벨로 추출한다(parent 와 동일 딥링크 유지)."""
+    base = format_citation(chunk, citation_id)
+    suffix = _table_suffix(entry)
+    # base 형식: "[cite-N] [INNER] (weight)" 또는 "[cite-N] [INNER]". 마지막 inner
+    # 닫는 `]` 앞에 표식별을 끼운다(weight 태그는 `]` *뒤*라 보존).
+    close = base.rfind("]")
+    if close == -1:
+        return base + suffix
+    return base[:close] + suffix + base[close:]
+
+
 def _doc_link(document_id: str, page: int | str) -> str:
     """document_id 를 PDF 딥링크 markdown 으로 감싼다(가능할 때만).
 
