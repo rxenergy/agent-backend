@@ -77,8 +77,9 @@ _STATUS_VALUES = frozenset({
 })
 _STATUS_COLLECTIONS = frozenset({"RG", "SRP", "DSRS"})
 
-# std_design 은 nuscale_* 만 보유. 값 표기는 인덱스 적재 표기(언더스코어, 확정).
-_DESIGN_VALUES = frozenset({"US_460", "US_600"})
+# std_design 은 nuscale_* 만 보유. 값 표기는 인덱스 적재 표기(언더스코어 없음 — 실측
+# 확인: agg 결과 US600/US460/PreApp). PreApp=Pre-Application 단계 문서.
+_DESIGN_VALUES = frozenset({"US460", "US600", "PreApp"})
 _DESIGN_COLLECTION_PREFIX = "nuscale_"
 
 # canonical_id 정규화 가능 형식(NRC_MANUAL 한정 — 데이터 설명 "canonical ID 규칙").

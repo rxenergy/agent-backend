@@ -40,8 +40,8 @@
           },
           "design": {
             "type": ["string", "null"],
-            "enum": ["US_460", "US_600", null],
-            "description": "NuScale design family. Applies ONLY to nuscale_* collections (regulatory documents have no design — leave null there). US_600 = the original Design Certification Application (DCA, ~50 MWe/module); US_460 = the later Standard Design Approval Application (SDAA, uprated ~77 MWe/module). Default to 'US_460' (the latest design) unless the query explicitly names US_600 / DCA / Docket 05200048."
+            "enum": ["US600", "US460", "PreApp", null],
+            "description": "NuScale design family. Applies ONLY to nuscale_* collections (regulatory documents have no design — leave null there). US600 = the certified Design Certification Application (DCA, ~50 MWe/module); US460 = the later Standard Design Approval Application (SDAA, uprated ~77 MWe/module); PreApp = pre-application-stage documents that predate the DCA. Default to 'US600' (the certified baseline design) unless the query explicitly names US460 / the SDAA / Docket 05200050, or pre-application material."
           },
           "design_mode": {
             "type": "string",

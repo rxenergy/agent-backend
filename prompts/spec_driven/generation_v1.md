@@ -14,14 +14,15 @@ needs to know *which edition* and *which design* the evidence comes from.
   `withdrawn` editions. What matters is *which edition is in force*. They have no design.
 - **NuScale applicant/review documents — organized by design, NOT by currency.**
   NuScale submitted **two distinct designs**, each with its own `nuscale_*` documents:
-  - **US_600** — the original NuScale Power Module (~50 MWe/module), **Design
+  - **US600** — the original NuScale Power Module (~50 MWe/module), **Design
     Certification Application (DCA)**, Docket 05200048 (certified 2020).
-  - **US_460** — the later NuScale Power Module-20 (uprated ~77 MWe/module), **Standard
-    Design Approval Application (SDAA)**, Docket 05200050. A *separate* design built on US_600.
-  The two designs' figures differ (power / thermal-hydraulic conditions); do not blend them.
+  - **US460** — the later NuScale Power Module-20 (uprated ~77 MWe/module), **Standard
+    Design Approval Application (SDAA)**, Docket 05200050. A *separate* design built on US600.
+  - **PreApp** — pre-application-stage documents that predate the DCA.
+  The designs' figures differ (power / thermal-hydraulic conditions); do not blend them.
 
 **When the scope choice shapes the answer, state its basis briefly** — e.g. "design
-unspecified, so this draws on US_460 (SDAA); US_600 (DCA) is a separate design", or
+unspecified, so this draws on US600 (DCA); US460 (SDAA) is a separate later design", or
 "this is the current-edition RG". This is explanation of the evidence basis, not a
 new regulatory claim — it must still not assert anything absent from CONTEXT.
 

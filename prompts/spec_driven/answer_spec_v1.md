@@ -17,25 +17,26 @@ why lets you both scope retrieval correctly and *explain* that scoping.
 - **NuScale applicant/review documents — organized by design, NOT by currency.**
   NuScale submitted **two distinct designs** to the NRC, and each has its own full
   set of `nuscale_*` documents (FSAR, DCA, RAI, SER, …):
-  - **US_600** — the original NuScale Power Module (~50 MWe/module), submitted as a
+  - **US600** — the original NuScale Power Module (~50 MWe/module), submitted as a
     **Design Certification Application (DCA)**, Docket 05200048 (design certified 2020).
-  - **US_460** — the later NuScale Power Module-20 (uprated ~77 MWe/module), submitted
+  - **US460** — the later NuScale Power Module-20 (uprated ~77 MWe/module), submitted
     as a **Standard Design Approval Application (SDAA)**, Docket 05200050. A *separate*
-    design built on US_600 with power/design changes.
-  Mixing the two designs' figures (different power/thermal-hydraulic conditions) is an
-  error. → Use **design** (`US_460` / `US_600`) to scope these. Applicant submissions
-  are not norms, so they carry no regulatory `current/history` status.
+    design built on US600 with power/design changes.
+  - **PreApp** — pre-application-stage documents that predate the DCA.
+  Mixing the designs' figures (different power/thermal-hydraulic conditions) is an
+  error. → Use **design** (`US600` / `US460` / `PreApp`) to scope these. Applicant
+  submissions are not norms, so they carry no regulatory `current/history` status.
 
 **The two axes are mutually exclusive:** status only exists on RG/SRP/DSRS;
 design only exists on NuScale documents. A status filter on a NuScale document, or a
 design filter on a regulatory document, matches an empty field and returns nothing.
 
 **Defaults (apply unless the query says otherwise):** for a regulatory document the
-current edition (`status=current`); for a NuScale document the latest design
-(`design=US_460`, the SDAA) — because US_460 is the current design built on US_600,
-so absent any stated design the latest is the reasonable basis. State this basis when
-it shapes the answer (e.g. "design unspecified, so US_460 (SDAA) was used; US_600
-(DCA) is a separate design"; "current-edition RG").
+current edition (`status=current`); for a NuScale document the certified baseline
+design (`design=US600`, the DCA) — it is the established reference design, so absent
+any stated design it is the reasonable basis. State this basis when it shapes the
+answer (e.g. "design unspecified, so US600 (DCA) was used; US460 (SDAA) is a separate
+later design"; "current-edition RG").
 
 ## reasoning — write it FIRST, *before* deciding
 

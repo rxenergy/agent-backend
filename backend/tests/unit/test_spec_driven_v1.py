@@ -503,20 +503,24 @@ def test_parse_status_only_on_regulatory_collections() -> None:
 
 def test_parse_design_only_on_nuscale_collections() -> None:
     # design 은 nuscale_* 에만 합성된다(§5.3). 규제 collection 의 design 은 무시 + dropped.
+    # 값 표기는 인덱스 실측값(US600/US460/PreApp, 언더스코어 없음).
     qs = _parse(json.dumps({"queries": [
         {"slot_name": "nu", "query_text": "FSAR ECCS", "collection": "nuscale_FSAR",
-         "design": "US_600", "design_mode": "filter"},
+         "design": "US600", "design_mode": "filter"},
+        {"slot_name": "pre", "query_text": "pre-app", "collection": "nuscale_etc",
+         "design": "PreApp", "design_mode": "boost"},  # PreApp enum 허용
         {"slot_name": "rg", "query_text": "RG 1.206", "collection": "RG",
-         "design": "US_460"},  # 규제 collection → 무시 + dropped
+         "design": "US460"},  # 규제 collection → 무시 + dropped
         {"slot_name": "bad", "query_text": "FSAR", "collection": "nuscale_FSAR",
-         "design": "US_999"},  # enum 외 → 미설정(값 자체가 무효라 audit 도 안 함)
+         "design": "US_460"},  # 언더스코어 표기는 enum 외 → 미설정(무효값, audit 안 함)
     ]}))
     by = {q.slot_name: q for q in qs}
-    assert by["nu"].filters[_DESIGN_FIELD] == ["US_600"]
+    assert by["nu"].filters[_DESIGN_FIELD] == ["US600"]
+    assert by["pre"].target[_DESIGN_FIELD] == ["PreApp"]
     assert _DESIGN_FIELD not in by["rg"].filters and _DESIGN_FIELD not in by["rg"].target
     assert by["rg"].scope_audit.get("design_dropped") is True
     assert _DESIGN_FIELD not in by["bad"].target and _DESIGN_FIELD not in by["bad"].filters
-    assert "design_dropped" not in by["bad"].scope_audit  # 무효값은 drop 이 아님
+    assert "design_dropped" not in by["bad"].scope_audit  # 무효값(언더스코어)은 drop 이 아님
 
 
 def test_parse_canonical_id_gate_pass_and_reject() -> None:
