@@ -28,11 +28,17 @@ _LOG = get_logger("intake.spec_driven_answer_spec")
 _GOVERNING_CLASSES = frozenset(
     {"binding", "guidance", "review_record", "applicant_claim", "mixed"}
 )
-# 슬롯 facet 라벨(회수 근거의 *종류* — 값 아님). 답변 심도 §3.2. 스키마 enum 과 동기.
-# 미지정/미상 라벨은 None 으로 떨군다(silent 오라벨 방지 — 종류 신호가 틀리면 N2/N4 오도).
+# 슬롯 facet 라벨(회수 근거의 *종류* — 값 아님). 인허가 추론 사슬의 한 층
+# (spec_driven_expert_grade.design.v1 §2.1). 스키마 enum 과 동기(11종). 미지정/미상
+# 라벨은 None 으로 떨군다(silent 오라벨 방지 — 종류 신호가 틀리면 N2 라우팅/N4 표현 오도).
+# requirement(구속요건)·acceptance_criterion(SRP/DSRS 합격기준)·demonstration_method(입증
+# 방법·코드·가정)·applicant_design(설계주장 FSAR/DCA)·review_finding(SER 판단)·
+# open_item_condition(RAI·조건·ITAAC)·technical_basis(값의 출처·보수성·적용범위·개정)·
+# exemption_departure(GDC exemption/PDC — SMR)·applicability·definition·cross_reference.
 _FACETS = frozenset(
-    {"definition", "criterion", "applicability", "quantitative_limit", "method",
-     "design_claim", "review_finding", "exception", "cross_reference"}
+    {"requirement", "acceptance_criterion", "demonstration_method", "applicant_design",
+     "review_finding", "open_item_condition", "technical_basis", "exemption_departure",
+     "applicability", "definition", "cross_reference"}
 )
 
 

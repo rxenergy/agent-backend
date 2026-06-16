@@ -274,9 +274,14 @@ class QueryFormulator:
             if not queries:
                 method = "fallback"
                 queries = _fallback_queries(query_text, spec)
-            # 안전망 (1)·(2)·(3): refs verbatim 보장 + collection boost 유도 + 중복 제거.
+            # 안전망 (1)·(2)·(3)·(4): refs verbatim 보장(스코프된 ref 제외) + collection
+            # boost 유도 + 스코프된 문서명 제거 + 중복 제거.
             queries = _ensure_references(queries, spec.explicit_references)
             queries = _attach_targets(queries)
+            # (4) 스코프(=filter)된 문서명을 query_text 에서 제거 — _ensure_references /
+            # 모델이 남긴 verbatim 문서명을 *마지막에* 떼어낸다. _attach_targets 의 boost
+            # 유도가 query_text 의 reference 토큰을 읽으므로 그 *뒤*에 둔다(유도 비파괴).
+            queries = _strip_scoped_references(queries, spec.explicit_references)
             queries = _dedup_queries(queries)
             span.set_attribute("query_formulation.method", method)
             span.set_attribute("query_formulation.num_queries", len(queries))
@@ -409,17 +414,47 @@ def _fallback_queries(
     return tuple(out)
 
 
+def _reference_is_scoped(ref: str, q: FormulatedQuery) -> bool:
+    """이 reference 가 쿼리 q 에서 *filter* 모드 스코프로 실현됐는지(=문서명이 lexical
+    앵커로 불필요한지) 판정한다. boost-only/미스코프는 False(앵커 유지 — 사용자 결정).
+
+    - canonical_id filter — exact 문서 타깃. ref 가 그 문서를 가리키면(파생 collection 이
+      쿼리 collection 과 일치, 또는 collection 미지정) 스코프로 본다.
+    - collection filter — ref 의 파생 collection 이 filter collection 과 같으면 스코프.
+
+    `_CANONICAL_FIELD`/`collection` 이 target(boost)에만 있고 filters 에 없으면 hard-narrow
+    가 아니므로 스코프 아님(False → query_text 의 ref 유지)."""
+    ref_coll = _derive_collection(ref)
+    filt_coll = q.filters.get("collection")
+    coll = filt_coll[0] if isinstance(filt_coll, list) and filt_coll else None
+    # collection filter 정합 — ref 가 그 collection 으로 파생되면 그 문서군으로 좁혀졌다.
+    if coll and ref_coll == coll:
+        return True
+    # canonical_id filter — 특정 문서 버전 exact 타깃. ref 의 collection 이 쿼리
+    # collection 과 모순되지 않으면(같거나, collection 미지정이면) 그 ref 를 좁힌 것으로 본다.
+    if _CANONICAL_FIELD in q.filters:
+        if coll is None or ref_coll is None or ref_coll == coll:
+            return True
+    return False
+
+
 def _ensure_references(
     queries: tuple[FormulatedQuery, ...], refs: tuple[str, ...]
 ) -> tuple[FormulatedQuery, ...]:
-    """안전망 (1): 모든 explicit_reference 가 ≥1 쿼리의 query_text 에 verbatim 으로
-    들어가게 보장. 모델이 슬롯 매핑을 놓쳐 누락한 ref 는 첫 쿼리에 append(lexical 앵커
-    유실 방지 — advisor #4). 각 쿼리의 references 도 채운다."""
+    """안전망 (1): 각 explicit_reference 가 ≥1 쿼리의 query_text 에 verbatim 으로
+    들어가게 보장 — **단, 어느 쿼리에서 filter 스코프로 실현된 ref 는 제외**(이미 모집단이
+    그 문서로 좁혀져 문서명이 불필요하고 dense 유사도를 밋밋하게 만든다 — 사용자 결정,
+    rule 3 scope). 미스코프 ref 만 누락 시 첫 쿼리에 append(lexical 앵커 유실 방지). 각
+    쿼리의 references 도 채운다."""
     qlist = list(queries)
     if not qlist:
         return queries
     for ref in refs:
         if not ref:
+            continue
+        # 어느 쿼리든 이 ref 를 filter 스코프로 실현했으면 lexical 앵커가 불필요 — 강제
+        # 주입 안 함(이미 query_text 에 있더라도 뒤의 _strip_scoped_references 가 떼낸다).
+        if any(_reference_is_scoped(ref, q) for q in qlist):
             continue
         present = any(ref.lower() in q.query_text.lower() for q in qlist)
         if not present:
@@ -495,6 +530,51 @@ def _attach_targets(
         out.append(FormulatedQuery(
             slot_name=q.slot_name, query_text=q.query_text,
             target=target, filters=q.filters, references=q.references,
+            scope_audit=q.scope_audit,
+        ))
+    return tuple(out)
+
+
+# reference verbatim 토큰을 query_text 에서 떼어낼 때 쓰는 매칭 — 공백 변형(연속 공백)을
+# 흡수하고 토큰 경계를 존중한다(대소문자 무시). "10 CFR 50.61" 이 query_text 에 "10 cfr
+# 50.61" 로 들어가도 잡고, "50.461" 같은 부분일치는 \b 경계로 배제한다.
+def _ref_pattern(ref: str) -> "re.Pattern[str]":
+    parts = [re.escape(tok) for tok in ref.split()]
+    body = r"\s+".join(parts)
+    return re.compile(r"\b" + body + r"\b", re.IGNORECASE)
+
+
+def _strip_scoped_references(
+    queries: tuple[FormulatedQuery, ...], refs: tuple[str, ...]
+) -> tuple[FormulatedQuery, ...]:
+    """안전망 (4): filter 스코프로 실현된 reference 의 *문서명*을 query_text 에서 제거한다
+    (사용자 결정 — rule 3 scope). 이미 collection/canonical_id filter 가 모집단을 그 문서로
+    좁혔으므로 query_text 의 문서명은 검색 신호가 아니라 dense 유사도를 밋밋하게 만드는
+    noise 다. 제거 후 query_text 가 *비면*(전부 문서명이었던 경우) 원본을 보존한다(빈 쿼리
+    방지 — recall 안전). boost-only/미스코프 ref 는 _reference_is_scoped=False 라 유지된다.
+
+    references(감사 필드)는 query_text 에 *남아 있는* ref 만 반영하도록 재계산한다 —
+    스코프로 떼어낸 ref 는 더 이상 lexical 앵커가 아니므로 references 에서도 빠진다."""
+    if not refs:
+        return queries
+    out: list[FormulatedQuery] = []
+    for q in queries:
+        scoped = [r for r in refs if r and _reference_is_scoped(r, q)]
+        text = q.query_text
+        if scoped:
+            for ref in scoped:
+                text = _ref_pattern(ref).sub(" ", text)
+            text = re.sub(r"\s+", " ", text).strip()
+            # 전부 문서명이라 비었으면 원본 유지(빈 쿼리는 0건/오검색 위험).
+            if not text:
+                text = q.query_text
+        # references 는 최종 query_text 에 실제 남은 ref 만(스코프로 제거된 ref 는 제외).
+        present_refs = tuple(
+            r for r in refs if r and r.lower() in text.lower()
+        )
+        out.append(FormulatedQuery(
+            slot_name=q.slot_name, query_text=text,
+            target=q.target, filters=q.filters, references=present_refs,
             scope_audit=q.scope_audit,
         ))
     return tuple(out)
