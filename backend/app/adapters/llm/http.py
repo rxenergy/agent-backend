@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, AsyncIterator, Literal
 
@@ -28,12 +29,35 @@ from app.ports.llm import (
 
 __all__ = ["HttpLLM", "LLMUnavailableError"]
 
-Provider = Literal["openai_compat", "anthropic"]
+Provider = Literal["openai_compat", "anthropic", "bedrock"]
+
+# Bedrock runtime carries the Anthropic version in the request *body* (not a
+# header) under this fixed token; the request is either SigV4-signed (AWS creds)
+# or sent with an `Authorization: Bearer` short-term Bedrock API key.
+_BEDROCK_ANTHROPIC_VERSION = "bedrock-2023-05-31"
+_BEDROCK_SERVICE = "bedrock"
+# Env var each Anthropic/AWS SDK auto-detects for the Bedrock short-term API key
+# (a `bedrock-api-key-...` bearer token). Used as the fallback when a bedrock pool
+# entry sets no explicit api_key_env.
+_BEDROCK_BEARER_TOKEN_ENV = "AWS_BEARER_TOKEN_BEDROCK"
 
 
 class HttpLLM(LLMPort):
     """OpenAI /v1/chat/completions compatible client (vLLM, OpenAI, LM Studio, Ollama)
-    plus Anthropic /v1/messages. Single adapter, provider-switched at construction time.
+    plus Anthropic /v1/messages and Amazon Bedrock. Single adapter, provider-switched
+    at construction time.
+
+    `provider="bedrock"` reuses the entire Anthropic Messages wire format (system
+    promotion, tools, streaming SSE) but targets `bedrock-runtime.{region}`. The
+    `model` is a Bedrock model id / inference-profile id placed in the URL path,
+    and `anthropic_version` moves into the body. Two auth modes:
+
+    - **Bearer token** (short-term Bedrock API key): if `api_key` is set or the
+      `AWS_BEARER_TOKEN_BEDROCK` env var is present, the request carries
+      `Authorization: Bearer <token>` and is **not** SigV4-signed — no AWS
+      access key/secret or IAM role needed.
+    - **SigV4** (fallback): no bearer token → sign with the standard AWS
+      credential chain (env keys, shared profile, or IAM role) via botocore.
     """
 
     def __init__(
@@ -46,16 +70,83 @@ class HttpLLM(LLMPort):
         timeout_s: float = 30.0,
         max_attempts: int = 2,
         anthropic_version: str = "2023-06-01",
+        region: str | None = None,
     ) -> None:
-        if not endpoint:
-            raise ValueError("HttpLLM requires a non-empty endpoint")
+        # bedrock 은 region 에서 endpoint 를 유도하므로 endpoint 가 비어도 된다.
+        if provider == "bedrock":
+            if not region:
+                raise ValueError("HttpLLM bedrock provider requires a region")
+            self._region = region
+            self._endpoint = (
+                endpoint.rstrip("/")
+                or f"https://bedrock-runtime.{region}.amazonaws.com"
+            )
+            # 베어러 토큰(임시 API 키) 우선: pool entry 의 api_key_env → 없으면
+            # AWS_BEARER_TOKEN_BEDROCK env. 토큰이 있으면 SigV4 서명을 건너뛴다.
+            self._bedrock_bearer_token = api_key or os.getenv(_BEDROCK_BEARER_TOKEN_ENV)
+            self._signer = (
+                None if self._bedrock_bearer_token else _BedrockSigner(region)
+            )
+        else:
+            if not endpoint:
+                raise ValueError("HttpLLM requires a non-empty endpoint")
+            self._region = region or ""
+            self._endpoint = endpoint.rstrip("/")
+            self._bedrock_bearer_token = None
+            self._signer = None
         self._provider: Provider = provider
-        self._endpoint = endpoint.rstrip("/")
         self._model = model
         self._api_key = api_key
         self._timeout_s = timeout_s
         self._max_attempts = max_attempts
         self._anthropic_version = anthropic_version
+
+    # ── Anthropic/Bedrock wire helpers ───────────────────────────────────────
+    # The Anthropic-family call sites differ only in URL, headers, body-version
+    # field, and whether the request is SigV4-signed. Centralize that here so the
+    # four methods (generate / messages / tools / stream) stay provider-agnostic.
+
+    def _anthropic_url(self, *, stream: bool = False) -> str:
+        if self._provider == "bedrock":
+            verb = "invoke-with-response-stream" if stream else "invoke"
+            # model id may contain `/`, `:` (inference-profile ARN) — URL-quote it.
+            from urllib.parse import quote
+
+            return f"{self._endpoint}/model/{quote(self._model, safe='')}/{verb}"
+        return f"{self._endpoint}/messages"
+
+    def _anthropic_base_headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self._provider == "bedrock":
+            # version-in-body; no anthropic-version header. Bearer-token auth sets
+            # Authorization here; SigV4 mode adds its headers later in _post_anthropic.
+            headers["Accept"] = "application/json"
+            if self._bedrock_bearer_token:
+                headers["Authorization"] = f"Bearer {self._bedrock_bearer_token}"
+            return headers
+        headers["anthropic-version"] = self._anthropic_version
+        if self._api_key:
+            headers["x-api-key"] = self._api_key
+        return headers
+
+    def _finalize_anthropic_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Bedrock invoke takes the model id in the URL, not the body, and needs
+        `anthropic_version` in the body. Mutates/returns a body shaped per provider."""
+        if self._provider == "bedrock":
+            payload = dict(payload)
+            payload.pop("model", None)
+            payload["anthropic_version"] = _BEDROCK_ANTHROPIC_VERSION
+        return payload
+
+    async def _post_anthropic(
+        self, url: str, payload: dict[str, Any], headers: dict[str, str]
+    ) -> httpx.Response:
+        """Single non-streaming POST, SigV4-signed when provider=bedrock."""
+        body = json.dumps(payload).encode("utf-8")
+        if self._signer is not None:
+            headers = {**headers, **self._signer.sign(url, body)}
+        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
+            return await client.post(url, content=body, headers=headers)
 
     @property
     def model_id(self) -> str:
@@ -283,13 +374,8 @@ class HttpLLM(LLMPort):
         temperature: float,
         parallel_tool_calls: bool,
     ) -> LLMToolResult:
-        url = f"{self._endpoint}/messages"
-        headers = {
-            "Content-Type": "application/json",
-            "anthropic-version": self._anthropic_version,
-        }
-        if self._api_key:
-            headers["x-api-key"] = self._api_key
+        url = self._anthropic_url()
+        headers = self._anthropic_base_headers()
 
         # system 메시지는 messages 배열이 아니라 top-level `system` 필드로 승격한다.
         system_text = "\n\n".join(
@@ -312,8 +398,9 @@ class HttpLLM(LLMPort):
         if not _rejects_sampling_params(self._model):
             payload["temperature"] = temperature
 
-        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+        resp = await self._post_anthropic(
+            url, self._finalize_anthropic_payload(payload), headers
+        )
         _raise_for_status(resp)
         data = resp.json()
         restore = _restore_map(tools)
@@ -396,13 +483,8 @@ class HttpLLM(LLMPort):
         """도구 없는 멀티메시지 경로의 Anthropic 변형. system 은 top-level 필드로
         승격한다(`_call_anthropic_tools` 와 동형). grammar(guided decoding)는
         Anthropic 미지원이라 무시된다 — 시그니처상 받지 않는다."""
-        url = f"{self._endpoint}/messages"
-        headers = {
-            "Content-Type": "application/json",
-            "anthropic-version": self._anthropic_version,
-        }
-        if self._api_key:
-            headers["x-api-key"] = self._api_key
+        url = self._anthropic_url()
+        headers = self._anthropic_base_headers()
         system_text = "\n\n".join(
             m.content for m in messages if m.role == "system" and m.content
         )
@@ -418,8 +500,9 @@ class HttpLLM(LLMPort):
             payload["system"] = system_text
         if not _rejects_sampling_params(self._model):
             payload["temperature"] = temperature
-        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+        resp = await self._post_anthropic(
+            url, self._finalize_anthropic_payload(payload), headers
+        )
         _raise_for_status(resp)
         data = resp.json()
         text_parts: list[str] = []
@@ -528,23 +611,22 @@ class HttpLLM(LLMPort):
     async def _stream_anthropic(
         self, prompt: str, max_tokens: int, temperature: float
     ) -> AsyncIterator[LLMTokenDelta]:
-        url = f"{self._endpoint}/messages"
-        headers = {
-            "Content-Type": "application/json",
-            "anthropic-version": self._anthropic_version,
-        }
-        if self._api_key:
-            headers["x-api-key"] = self._api_key
+        url = self._anthropic_url(stream=True)
+        headers = self._anthropic_base_headers()
 
         payload: dict[str, Any] = {
             "model": self._model,
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
-            "stream": True,
         }
-        # Opus 4.7 rejects temperature/top_p/top_k with 400; suppress them
-        # when targeting 4.7. For other models pass the configured value.
-        if not _is_opus_4_7(self._model):
+        # Bedrock streams over the AWS event-stream protocol and signals
+        # streaming via the `/invoke-with-response-stream` path, not a `stream`
+        # body field — sending `stream:true` to Bedrock is rejected.
+        if self._provider != "bedrock":
+            payload["stream"] = True
+        # Opus 4.7/4.8 reject temperature/top_p/top_k with 400; suppress them
+        # there. For other models pass the configured value.
+        if not _rejects_sampling_params(self._model):
             payload["temperature"] = temperature
         # Auto-enable adaptive thinking with visible summary on models that
         # support it. The runner forwards `thinking_delta` text into the
@@ -555,6 +637,10 @@ class HttpLLM(LLMPort):
                 "type": "adaptive",
                 "display": "summarized",
             }
+        payload = self._finalize_anthropic_payload(payload)
+        body = json.dumps(payload).encode("utf-8")
+        if self._signer is not None:
+            headers = {**headers, **self._signer.sign(url, body)}
 
         # Track per-content-block type so deltas route correctly.
         # Anthropic sends content_block_start with type="thinking" or "text"
@@ -570,31 +656,27 @@ class HttpLLM(LLMPort):
         model_id_seen: str | None = None
 
         async with httpx.AsyncClient(timeout=self._timeout_s) as client:
-            async with client.stream("POST", url, json=payload, headers=headers) as resp:
+            async with client.stream(
+                "POST", url, content=body, headers=headers
+            ) as resp:
                 if 500 <= resp.status_code < 600:
-                    body = await resp.aread()
-                    raise _Retry5xx(f"upstream {resp.status_code}: {body[:256]!r}")
+                    err_body = await resp.aread()
+                    raise _Retry5xx(f"upstream {resp.status_code}: {err_body[:256]!r}")
                 if resp.status_code >= 400:
-                    body = await resp.aread()
+                    err_body = await resp.aread()
                     raise LLMUnavailableError(
-                        f"upstream {resp.status_code}: {body[:256]!r}"
+                        f"upstream {resp.status_code}: {err_body[:256]!r}"
                     )
 
-                async for line in resp.aiter_lines():
-                    if not line or line.startswith(":") or line.startswith("event:"):
-                        # Anthropic also sends `event:` lines — we route on
-                        # `data.type`, so skip them. Blank lines separate
-                        # SSE frames.
-                        continue
-                    if not line.startswith("data:"):
-                        continue
-                    data_str = line[5:].strip()
-                    if not data_str:
-                        continue
-                    try:
-                        evt = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
+                # Bedrock wraps each Anthropic SSE chunk in an AWS event-stream
+                # binary frame; first-party Anthropic emits plain `data:` SSE.
+                # Both decode to the same chunk-event dicts, routed identically.
+                if self._provider == "bedrock":
+                    events = _iter_bedrock_event_stream(resp)
+                else:
+                    events = _iter_anthropic_sse(resp)
+
+                async for evt in events:
                     etype = evt.get("type")
 
                     if etype == "message_start":
@@ -662,21 +744,18 @@ class HttpLLM(LLMPort):
     async def _call_anthropic(
         self, prompt: str, max_tokens: int, temperature: float
     ) -> LLMResult:
-        url = f"{self._endpoint}/messages"
-        headers = {
-            "Content-Type": "application/json",
-            "anthropic-version": self._anthropic_version,
-        }
-        if self._api_key:
-            headers["x-api-key"] = self._api_key
-        payload = {
+        url = self._anthropic_url()
+        headers = self._anthropic_base_headers()
+        payload: dict[str, Any] = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "temperature": temperature,
             "messages": [{"role": "user", "content": prompt}],
         }
-        async with httpx.AsyncClient(timeout=self._timeout_s) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+        if not _rejects_sampling_params(self._model):
+            payload["temperature"] = temperature
+        resp = await self._post_anthropic(
+            url, self._finalize_anthropic_payload(payload), headers
+        )
         _raise_for_status(resp)
         data = resp.json()
         parts = data.get("content") or []
@@ -697,19 +776,33 @@ class HttpLLM(LLMPort):
 _ADAPTIVE_THINKING_MODELS = ("claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6")
 
 
+def _canonical_model_id(model_id: str) -> str:
+    """Strip Bedrock provider/region prefixes so capability checks match the
+    same `claude-*` family names on both first-party and Bedrock model ids.
+
+    Bedrock ids carry an `anthropic.` prefix (`anthropic.claude-opus-4-8`) and
+    inference-profile ids add a region prefix (`apac.anthropic.claude-…`,
+    `us.anthropic.claude-…`). The capability table keys off the bare
+    `claude-…` name, so drop everything up to and including `anthropic.`."""
+    marker = "anthropic."
+    idx = model_id.rfind(marker)
+    return model_id[idx + len(marker):] if idx != -1 else model_id
+
+
 def _supports_adaptive_thinking(model_id: str) -> bool:
     """Adaptive thinking is GA on Opus 4.6/4.7 and Sonnet 4.6. Haiku and
     older snapshots either don't support it or use the legacy `enabled +
     budget_tokens` form, so we don't auto-attach. Match on prefix to absorb
     date-suffix snapshots (e.g. `claude-opus-4-7-20260301`)."""
-    return any(model_id.startswith(m) for m in _ADAPTIVE_THINKING_MODELS)
+    canonical = _canonical_model_id(model_id)
+    return any(canonical.startswith(m) for m in _ADAPTIVE_THINKING_MODELS)
 
 
 def _is_opus_4_7(model_id: str) -> bool:
     """Opus 4.7 returns 400 if `temperature` / `top_p` / `top_k` are present —
     the sampling parameters were removed there. Match on prefix to absorb
     future date-suffix snapshots."""
-    return model_id.startswith("claude-opus-4-7")
+    return _canonical_model_id(model_id).startswith("claude-opus-4-7")
 
 
 def _rejects_sampling_params(model_id: str) -> bool:
@@ -717,7 +810,9 @@ def _rejects_sampling_params(model_id: str) -> bool:
     tool-calling path generalizes the 4.7-only `_is_opus_4_7` guard to both so
     the same call works against either snapshot. Match on prefix to absorb
     date-suffix snapshots (e.g. `claude-opus-4-8-20260301`). vLLM unaffected."""
-    return model_id.startswith(("claude-opus-4-7", "claude-opus-4-8"))
+    return _canonical_model_id(model_id).startswith(
+        ("claude-opus-4-7", "claude-opus-4-8")
+    )
 
 
 # ── 도구 호출 직렬화/파싱(중립 ↔ provider 와이어, 설계 §4) ──────────────────
@@ -923,3 +1018,118 @@ def _raise_for_status(resp: httpx.Response) -> None:
     if resp.status_code >= 400:
         # 4xx is a permanent failure (bad request / auth) — surface as unavailable.
         raise LLMUnavailableError(f"upstream {resp.status_code}: {resp.text[:256]}")
+
+
+# ── streaming frame decoders (Anthropic SSE vs Bedrock event-stream) ──────────
+
+
+async def _iter_anthropic_sse(resp: httpx.Response) -> AsyncIterator[dict[str, Any]]:
+    """First-party Anthropic streaming: plain SSE. Yield each chunk-event dict
+    from `data:` lines (skip `event:`/comment/blank framing — we route on
+    `data.type`)."""
+    async for line in resp.aiter_lines():
+        if not line or line.startswith(":") or line.startswith("event:"):
+            continue
+        if not line.startswith("data:"):
+            continue
+        data_str = line[5:].strip()
+        if not data_str:
+            continue
+        try:
+            yield json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+
+
+async def _iter_bedrock_event_stream(
+    resp: httpx.Response,
+) -> AsyncIterator[dict[str, Any]]:
+    """Bedrock `invoke-with-response-stream`: each AWS event-stream binary frame
+    carries a `chunk` event whose payload is JSON `{"bytes": "<base64>"}`, and
+    the base64 decodes to one Anthropic SSE chunk-event JSON. Decode the binary
+    framing with botocore's EventStreamBuffer, then unwrap to the chunk dict.
+
+    botocore exception frames (modelStreamErrorException, throttlingException,
+    …) surface as a synthetic `{"type": "error", ...}` so the caller's existing
+    error branch handles them."""
+    import base64
+
+    from botocore.eventstream import EventStreamBuffer
+
+    buffer = EventStreamBuffer()
+    async for raw in resp.aiter_bytes():
+        if not raw:
+            continue
+        buffer.add_data(raw)
+        for event in buffer:
+            headers = event.headers
+            message_type = headers.get(":message-type")
+            event_type = headers.get(":event-type")
+            payload = event.payload or b""
+            if message_type in ("exception", "error"):
+                try:
+                    detail = json.loads(payload.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    detail = {}
+                yield {
+                    "type": "error",
+                    "error": {
+                        "type": str(
+                            headers.get(":exception-type") or event_type or "error"
+                        ),
+                        "message": str(detail.get("message") or payload[:256]),
+                    },
+                }
+                continue
+            if not payload:
+                continue
+            try:
+                frame = json.loads(payload.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            inner = frame.get("bytes")
+            if not inner:
+                continue
+            try:
+                yield json.loads(base64.b64decode(inner).decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                continue
+
+
+# ── Bedrock SigV4 signer ──────────────────────────────────────────────────────
+
+
+class _BedrockSigner:
+    """SigV4 signer for `bedrock-runtime` POST requests, backed by botocore's
+    credential resolution (env `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/
+    `AWS_SESSION_TOKEN`, shared profile, or IAM role) and SigV4Auth. Resolves
+    credentials once at construction; returns the signed headers to merge onto
+    the httpx request."""
+
+    def __init__(self, region: str) -> None:
+        from botocore.auth import SigV4Auth
+        from botocore.session import Session
+
+        session = Session()
+        credentials = session.get_credentials()
+        if credentials is None:
+            raise LLMUnavailableError(
+                "bedrock: no AWS credentials resolved (set AWS_ACCESS_KEY_ID/"
+                "AWS_SECRET_ACCESS_KEY or attach an IAM role)"
+            )
+        self._region = region
+        self._auth = SigV4Auth(credentials, _BEDROCK_SERVICE, region)
+
+    def sign(self, url: str, body: bytes) -> dict[str, str]:
+        from botocore.awsrequest import AWSRequest
+
+        request = AWSRequest(
+            method="POST",
+            url=url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        self._auth.add_auth(request)
+        # SigV4Auth mutates request.headers in place with Authorization +
+        # X-Amz-Date (+ X-Amz-Security-Token when using temporary creds).
+        return dict(request.headers)

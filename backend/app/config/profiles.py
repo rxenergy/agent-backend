@@ -91,7 +91,7 @@ class AppContainer:
     pg_pool: asyncpg.Pool | None = None
 
 
-def _build_http_llm(entry: LLMPoolEntry) -> HttpLLM:
+def _build_http_llm(entry: LLMPoolEntry, *, default_region: str) -> HttpLLM:
     api_key = os.getenv(entry.api_key_env) if entry.api_key_env else None
     return HttpLLM(
         provider=entry.provider,
@@ -100,6 +100,9 @@ def _build_http_llm(entry: LLMPoolEntry) -> HttpLLM:
         api_key=api_key,
         timeout_s=entry.timeout_s,
         max_attempts=entry.max_attempts,
+        # bedrock 은 region 에서 endpoint 를 유도한다. entry.region 우선, 미설정 시
+        # 프로파일의 aws_region 폴백(aws-mvp EC2 IAM role 시나리오와 일치).
+        region=entry.region or default_region,
     )
 
 
@@ -109,7 +112,7 @@ def _build_llm_pool(settings: Settings) -> dict[str, LLMPort]:
     for entry in settings.llm_pool:
         if entry.id in pool:
             raise ValueError(f"duplicate llm_pool id: {entry.id!r}")
-        pool[entry.id] = _build_http_llm(entry)
+        pool[entry.id] = _build_http_llm(entry, default_region=settings.aws_region)
     return pool
 
 

@@ -11,13 +11,29 @@ class LLMPoolEntry(BaseModel):
 
     `api_key_env` is the **name** of the env var that holds the key — the value
     itself stays out of settings so secrets aren't logged when settings are dumped.
+
+    `provider="bedrock"` routes the Anthropic Messages wire format through Amazon
+    Bedrock's `bedrock-runtime` endpoint. `endpoint` is unused (derived from the
+    region — `region` here, else `aws_region`). `model` must be a Bedrock-prefixed
+    model id or inference-profile id/ARN (e.g. `anthropic.claude-opus-4-8`,
+    `apac.anthropic.claude-sonnet-4-6`). Two auth modes, no IAM key required for
+    the first:
+      - **Bearer token (임시 API 키)**: set `api_key_env` to an env var holding a
+        `bedrock-api-key-...` token, or leave it unset to fall back to
+        `AWS_BEARER_TOKEN_BEDROCK`. Sent as `Authorization: Bearer`, no SigV4.
+      - **SigV4**: no bearer token → signed with the standard AWS chain (env
+        `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`, shared
+        profile, or IAM role).
     """
 
     id: str
-    provider: Literal["openai_compat", "anthropic"]
-    endpoint: str
+    provider: Literal["openai_compat", "anthropic", "bedrock"]
+    # bedrock 은 endpoint 를 region 에서 유도하므로 기본 ""(미사용) 허용.
+    endpoint: str = ""
     model: str
     api_key_env: str | None = None
+    # bedrock 전용 — region override. 미설정 시 Settings.aws_region 를 쓴다.
+    region: str | None = None
     timeout_s: float = 30.0
     max_attempts: int = 2
 
