@@ -1,0 +1,71 @@
+# 서브 노드 전용 vLLM 서빙 compose (onprem 2번째 노드).
+#
+# 메인 노드 스택(compose.yml + compose.onprem.yml)과 **완전히 독립된 standalone 파일**이다.
+# 서브 노드에는 postgres/opensearch/minio/관측 스택이 없고 vLLM 만 띄우므로 base compose.yml 을
+# 끌어오지 않는다. 서브 설정을 바꿔도 메인에 영향 없고, 그 반대도 마찬가지다.
+# 모델/양자화/컨텍스트 등 모든 값은 ../env/onprem.sub.env 로 주입한다.
+#
+# 실행 (메인에서 `make up-onprem-sub` 가 Docker Context 로 서브 *원격 데몬* 에 실행):
+#   docker -c onprem-sub compose \
+#     -f infra/compose/compose.onprem.sub.yml --env-file infra/env/onprem.sub.env up -d
+#   파일/env 는 메인에서 읽고(클라이언트), 컨테이너 실행만 서브 데몬에서 일어난다.
+#   ⚠ bind-mount(모델 볼륨)는 원격 데몬 기준이라 host 경로는 서브 노드 절대경로여야 한다
+#     → onprem.sub.env 의 VLLM_MODELS_HOST_DIR.
+#
+# 메인 agent-api 는 이 노드의 vLLM 에 컨테이너 DNS 가 아니라 LAN 호스트 IP:포트
+# (http://<SUB_IP>:8001/v1) 로 닿는다. onprem.env 의 LLM_POOL `gemma-4-26b-sub` 엔트리 참고.
+# 노드 간 통신은 HTTP(OpenAI 호환 API)만 사용한다 — 단일 노드 서빙이라 NCCL/RDMA/Ray 불필요.
+#
+# 사전 준비:
+#   1) compressed-tensors(gemma4) 지원 vLLM 이미지를 서브 노드 docker 데몬에 적재(또는 VLLM_IMAGE).
+#   2) 가중치를 서브 노드 절대경로에 적재하고 VLLM_MODELS_HOST_DIR 로 지정(교체 시 onprem.sub.env 수정).
+services:
+  # 메인의 compose.onprem.yml `vllm:` 블록과 동일한 런타임 파라미터를 사용하되,
+  # standalone 으로 동작시키고 컨테이너명만 분리해 메인 vLLM 과 구분한다.
+  vllm:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    container_name: agent-backend-vllm-sub
+    restart: unless-stopped
+    ipc: host
+    shm_size: "16gb"
+    ports:
+      # 메인 vLLM 과 동일하게 호스트 8001 로 노출. 메인 agent-api 가 LAN 으로 닿는 포트.
+      - "8001:8000"
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      # ⚠ 이 compose 는 Docker Context(ssh://)로 서브 *원격 데몬* 에서 실행되므로,
+      #   bind-mount 의 host 경로는 서브 노드의 절대경로여야 한다(메인 기준 상대경로 금지).
+      #   onprem.sub.env 의 VLLM_MODELS_HOST_DIR 로 서브 노드 모델 디렉토리를 지정한다.
+      - ${VLLM_MODELS_HOST_DIR:-/home/rx/rx/agent-backend/models}:/workspace/models:ro
+    command:
+      # vllm/vllm-openai 이미지는 내부 엔트리포인트가 잡혀있어 모델 경로부터 적는다.
+      - ${VLLM_MODEL_DIR:-/workspace/models/gemma4-awq}
+      - --host=0.0.0.0
+      - --port=8000
+      - --served-model-name=${VLLM_SERVED_MODEL_NAME:-gemma-4-26b-a4b-it}
+      # compressed-tensors(AWQ pack-quantized). 다른 모델로 교체 시 onprem.sub.env 의
+      # VLLM_QUANTIZATION 을 비우면(빈 값) 이 라인이 빈 인자로 들어가므로 주의 — 비양자화
+      # 모델이면 아래 라인을 주석 처리하거나 적절한 값으로 둔다.
+      - --quantization=${VLLM_QUANTIZATION:-compressed-tensors}
+      - --max-model-len=${VLLM_MAX_MODEL_LEN:-262144}
+      - --kv-cache-dtype=${VLLM_KV_CACHE_DTYPE:-fp8}
+      # 동시성/배칭 (test 서브 노드 벤치 B설정: verify 동시 30요청 합산 244→739 tok/s, 약 3배).
+      - --max-num-seqs=${VLLM_MAX_NUM_SEQS:-64}
+      - --max-num-batched-tokens=${VLLM_MAX_NUM_BATCHED_TOKENS:-8192}
+      - --gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.70}
+      - --load-format=${VLLM_LOAD_FORMAT:-safetensors}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/models >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 180s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

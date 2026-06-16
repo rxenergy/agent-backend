@@ -102,13 +102,15 @@ services:
       - --served-model-name=${VLLM_SERVED_MODEL_NAME:-gemma-4-26b-a4b-it}
       # compressed-tensors(AWQ pack-quantized) — config.json 자동감지되지만 명시.
       - --quantization=compressed-tensors
-      # 컨텍스트는 모델 상한(max_position_embeddings=262144, 256K)까지 끌어올린다.
-      # ⚠ KV cache 부족으로 256K 전체가 안 올라가면 vLLM 이 가능한 최대치를 에러로
+      # 컨텍스트는 모델 상한(max_position_embeddings=131072, 128)까지 끌어올린다.
+      # ⚠ KV cache 부족으로 128K 전체가 안 올라가면 vLLM 이 가능한 최대치를 에러로
       #   알려준다 → VLLM_MAX_MODEL_LEN/VLLM_MAX_NUM_BATCHED_TOKENS 를 그 값으로
       #   낮춰 재기동(필요 시 VLLM_GPU_MEMORY_UTILIZATION 0.70→0.80~0.90 상향).
-      - --max-model-len=${VLLM_MAX_MODEL_LEN:-262144}
+      - --max-model-len=${VLLM_MAX_MODEL_LEN:-131072}
       - --kv-cache-dtype=${VLLM_KV_CACHE_DTYPE:-fp8}
-      - --max-num-batched-tokens=${VLLM_MAX_NUM_BATCHED_TOKENS:-4098}
+      # 동시성/배칭 (test 메인 노드 .env.main 기준: max-num-seqs=64, batched-tokens=8192).
+      - --max-num-seqs=${VLLM_MAX_NUM_SEQS:-64}
+      - --max-num-batched-tokens=${VLLM_MAX_NUM_BATCHED_TOKENS:-8192}
       - --gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION:-0.70}
       - --load-format=safetensors
     healthcheck:
