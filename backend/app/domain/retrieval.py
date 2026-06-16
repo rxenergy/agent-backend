@@ -46,6 +46,12 @@ class RetrievedChunk(BaseModel):
     # ContextBuilder 가 생성 프롬프트 렌더 시 마커를 caption+markdown 으로 인라인
     # 치환한다(spec_driven_table_inline_expansion).
     tables: list[dict[str, Any]] | None = None
+    # 검색 스코프 표준 메타(spec_driven_search_scope_metadata) — 회수 결과의 현행성/설계/
+    # 버전 묶음을 인용·감사에 노출. doc_metadata.std_* 원본을 그대로 싣는다(없으면 None —
+    # 규제 문서는 std_design 빈값, NuScale 은 std_status 빈값이라 한쪽은 항상 None).
+    std_status: str | None = None  # current | history | draft | withdrawn | ... (RG/SRP/DSRS)
+    std_design: str | None = None  # US_460 | US_600 (nuscale_*)
+    std_canonical_id: str | None = None  # 버전 묶음 키(예: RG-1.206) — Rev 미포함
 
 
 class RetrieverSearchInput(BaseModel):

@@ -96,13 +96,17 @@ class FormulatedQuery:
     """N2 Query Formulation Node 산출 — 슬롯 1개에 대한 구체 검색쿼리(per-slot, 설계 §3.2).
 
     `query_text` 는 BM25 lexical 앵커(슬롯 keywords 리터럴 + 관련 explicit_reference
-    토큰 verbatim). `target` 는 boost-scope(collection 가산만 — recall-safe). `filters` 는
-    hard-scope(모델이 `collection_mode=filter` 를 골랐을 때 — 모집단을 좁힘). 한 쿼리는
-    실무상 둘 중 하나만 collection 을 싣는다(모델이 mode 를 택하므로). `references` 는 이
-    쿼리에 합류된 명시적 참조(감사용). dict-of-list 라 `dataclasses.asdict()` 재귀 호환."""
+    토큰 verbatim). `target` 는 boost-scope(collection/status/design/canonical_id 가산 —
+    recall-safe). `filters` 는 hard-scope(모델이 `*_mode=filter` 를 골랐을 때 — 모집단을
+    좁힘). status↔규제 / design↔NuScale 배타성에 어긋나거나 canonical_id 게이트를 통과
+    못해 *무시된* 채널은 `scope_audit` 에 남긴다(silent drop 금지 — 원칙 6). `references`
+    는 이 쿼리에 합류된 명시적 참조(감사용). dict-of-list 라 `dataclasses.asdict()` 재귀 호환."""
 
     slot_name: str
     query_text: str
-    target: dict[str, list[str]] = field(default_factory=dict)  # boost {"collection": [...]}
-    filters: dict[str, Any] = field(default_factory=dict)  # hard-scope {"collection": [...]}
+    target: dict[str, list[str]] = field(default_factory=dict)  # boost scope 필드들
+    filters: dict[str, Any] = field(default_factory=dict)  # hard-scope 필드들
     references: tuple[str, ...] = ()
+    # 배타성 위반/게이트 기각으로 무시된 채널 기록(재현 핀 입력). 빈 dict 기본 → net-neutral.
+    # 예: {"status_dropped": True, "design_dropped": False, "canonical_id_rejected": True}.
+    scope_audit: dict[str, Any] = field(default_factory=dict)

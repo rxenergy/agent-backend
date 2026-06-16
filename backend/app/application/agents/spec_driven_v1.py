@@ -73,6 +73,34 @@ def _topic_signature(spec: AnswerSpec) -> str | None:
     return _sha16(basis) if refs or spec.governing_normative_class else None
 
 
+def _scope_summary(q: FormulatedQuery) -> dict[str, Any]:
+    """N2 쿼리의 스코프 채널별 (값, mode) 요약 + 무시/기각 감사(재현 핀 입력 — §6.5).
+    각 채널은 boost(target) 또는 filter(filters) 중 한 곳에만 실린다. scope_audit 의
+    status_dropped/design_dropped/canonical_id_rejected 를 그대로 노출한다(silent 금지)."""
+    from app.application.intake.spec_driven_query import (
+        _CANONICAL_FIELD,
+        _DESIGN_FIELD,
+        _STATUS_FIELD,
+    )
+
+    def _ch(field: str) -> dict[str, Any]:
+        if field in q.filters:
+            return {"value": q.filters[field], "mode": "filter"}
+        if field in q.target:
+            return {"value": q.target[field], "mode": "boost"}
+        return {"value": None, "mode": "none"}
+
+    out: dict[str, Any] = {
+        "collection": _ch("collection"),
+        "status": _ch(_STATUS_FIELD),
+        "design": _ch(_DESIGN_FIELD),
+        "canonical_id": _ch(_CANONICAL_FIELD),
+    }
+    # 감사 플래그는 값이 있을 때만 실어 핀을 군더더기 없이 유지(원칙 6 — 동작은 가시).
+    out.update(q.scope_audit)
+    return out
+
+
 def _source_ids_of(chunks: list[RetrievedChunk],
                    fq_list: list[dict[str, Any]]) -> list[str]:
     """N5 retrieval_history 용 source_id 집합. 최종 청크의 document_id + follow-up
@@ -606,7 +634,11 @@ class SpecDrivenRunner:
                              # mode 는 collection 이 어느 채널에 실렸는지에서 파생한다
                              # (별도 저장 없이 단일 진실원천 — 재현 핀이 자기서술적).
                              "mode": "filter" if q.filters.get("collection")
-                             else ("boost" if q.target.get("collection") else "none")}
+                             else ("boost" if q.target.get("collection") else "none"),
+                             # 스코프 채널별 (값, mode) 요약 + 무시/기각 감사(원칙 5·6 —
+                             # silent 동작 금지). status↔규제 / design↔NuScale 배타성
+                             # 위반·canonical_id 게이트 기각이 _dropped/_rejected 로 가시화.
+                             "scope": _scope_summary(q)}
                             for q in queries
                         ],
                     },

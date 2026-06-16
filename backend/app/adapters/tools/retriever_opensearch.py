@@ -262,6 +262,11 @@ class OpenSearchRetrieverTool:
             effective_on=effective_on,
             token_count=src.get("token_count"),
             section_path=list(section_path) if section_path else None,
+            # 검색 스코프 표준 메타(doc_metadata.std_*) — 회수 결과의 현행성/설계/버전
+            # 묶음을 인용·감사에 노출(spec_driven_search_scope_metadata §6.6). 없으면 None.
+            std_status=meta.get("std_status") or None,
+            std_design=meta.get("std_design") or None,
+            std_canonical_id=meta.get("std_canonical_id") or None,
         )
 
 

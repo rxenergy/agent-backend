@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "spec_driven_query_formulation_v1",
-  "description": "spec_driven_v1 N2 Query Formulation output. queries = one search query per slot. query_text = BM25 lexical anchors (literal keywords + explicit_reference tokens verbatim). collection = corpus collection (one of 17, or null); collection_mode = 'boost' (additive, recall-safe; default) or 'filter' (hard-restricts the search population to that collection — only when confident the answer lives only there).",
+  "description": "spec_driven_v1 N2 Query Formulation output. queries = one search query per slot. query_text = BM25 lexical anchors (literal keywords + explicit_reference tokens verbatim). Each query carries scope channels, every one with a value + a {boost|filter} mode: collection (corpus document family), status (regulatory currency — RG/SRP/DSRS only), design (NuScale design family — nuscale_* only), canonical_id (a normalized document id for exact version targeting). status applies ONLY to regulatory collections and design ONLY to NuScale collections — the two are mutually exclusive (the code drops a channel set on the wrong collection).",
   "type": "object",
   "additionalProperties": false,
   "required": ["reasoning", "queries"],
@@ -26,6 +26,38 @@
             "enum": ["boost", "filter"],
             "default": "boost",
             "description": "How to apply collection: 'boost' = additive in-scope boost, excludes nothing (recall-safe, default); 'filter' = hard-restrict the search population to that collection (narrows recall — only when confident the answer lives only there)."
+          },
+          "status": {
+            "type": ["string", "null"],
+            "enum": ["current", "history", "draft", "withdrawn", "AdditionalInformation", null],
+            "description": "Regulatory currency of the document. Applies ONLY to RG/SRP/DSRS collections (10CFR/FR and NuScale documents have no status — leave null there). Default to 'current' unless the query explicitly asks for revision history / a past edition / a draft / a withdrawn version."
+          },
+          "status_mode": {
+            "type": "string",
+            "enum": ["boost", "filter"],
+            "default": "boost",
+            "description": "How to apply status: 'boost' (default, additive) or 'filter' (hard-restrict to that status — use when confident, e.g. 'the current requirement')."
+          },
+          "design": {
+            "type": ["string", "null"],
+            "enum": ["US_460", "US_600", null],
+            "description": "NuScale design family. Applies ONLY to nuscale_* collections (regulatory documents have no design — leave null there). US_600 = the original Design Certification Application (DCA, ~50 MWe/module); US_460 = the later Standard Design Approval Application (SDAA, uprated ~77 MWe/module). Default to 'US_460' (the latest design) unless the query explicitly names US_600 / DCA / Docket 05200048."
+          },
+          "design_mode": {
+            "type": "string",
+            "enum": ["boost", "filter"],
+            "default": "boost",
+            "description": "How to apply design: 'boost' (default, additive — does not exclude the other design) or 'filter' (hard-restrict to one design — use when the query is clearly about a single design family)."
+          },
+          "canonical_id": {
+            "type": ["string", "null"],
+            "description": "A normalized document id for exact version targeting, derived from an explicit reference ONLY when its form is normalizable: RG-{division}.{num} (RG-1.206), SRP-{ch}.{sec} (SRP-15.6.5), DSRS-{sec} (DSRS-10.3), 10CFR-Part{range} (10CFR-Part1-50). Revision is NOT included (it groups all revisions of one document). Do NOT invent one for title-keyword documents (Letter/Meeting/Email). null when no normalizable explicit reference. The code re-validates the form and the collection match, dropping it on failure."
+          },
+          "canonical_id_mode": {
+            "type": "string",
+            "enum": ["boost", "filter"],
+            "default": "boost",
+            "description": "How to apply canonical_id: 'boost' (default, additive) or 'filter' (hard-restrict to that exact document grouping — use when the query unambiguously names that one document)."
           }
         }
       }

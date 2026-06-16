@@ -24,10 +24,14 @@ from app.application.agents.spec_driven_v1 import (
 )
 from app.application.context.pack import ContextBuilder
 from app.application.intake.spec_driven_query import (
+    _CANONICAL_FIELD,
+    _DESIGN_FIELD,
+    _STATUS_FIELD,
     _attach_targets,
     _dedup_queries,
     _ensure_references,
     _parse,
+    _validate_canonical_id,
 )
 from app.application.events.recorder import EventRecorder
 from app.application.prompting.spec_driven_source import (
@@ -473,6 +477,109 @@ def test_dedup_queries_keeps_distinct_text_and_distinct_scope() -> None:
     )
     out = _dedup_queries(qs)
     assert len(out) == 3
+
+
+# === 검색 스코프 메타데이터 (status / design / canonical_id) =====================
+# 설계: docs/plans/spec_driven_search_scope_metadata.design.v1.md.
+
+
+def test_parse_status_only_on_regulatory_collections() -> None:
+    # status 는 RG/SRP/DSRS 에만 합성된다(§4.3). 비규제 collection 의 status 는 무시되고
+    # scope_audit.status_dropped 로 기록된다(silent drop 금지 — 원칙 6).
+    qs = _parse(json.dumps({"queries": [
+        {"slot_name": "rg", "query_text": "RG 1.206", "collection": "RG",
+         "status": "current", "status_mode": "filter"},
+        {"slot_name": "cfr", "query_text": "10 CFR 50.46", "collection": "10CFR",
+         "status": "current"},  # 10CFR 엔 status 없음 → 무시 + dropped
+        {"slot_name": "nu", "query_text": "FSAR ECCS", "collection": "nuscale_FSAR",
+         "status": "current"},  # NuScale 엔 status 없음 → 무시 + dropped
+    ]}))
+    by = {q.slot_name: q for q in qs}
+    assert by["rg"].filters[_STATUS_FIELD] == ["current"]
+    assert _STATUS_FIELD not in by["cfr"].filters and _STATUS_FIELD not in by["cfr"].target
+    assert by["cfr"].scope_audit.get("status_dropped") is True
+    assert by["nu"].scope_audit.get("status_dropped") is True
+
+
+def test_parse_design_only_on_nuscale_collections() -> None:
+    # design 은 nuscale_* 에만 합성된다(§5.3). 규제 collection 의 design 은 무시 + dropped.
+    qs = _parse(json.dumps({"queries": [
+        {"slot_name": "nu", "query_text": "FSAR ECCS", "collection": "nuscale_FSAR",
+         "design": "US_600", "design_mode": "filter"},
+        {"slot_name": "rg", "query_text": "RG 1.206", "collection": "RG",
+         "design": "US_460"},  # 규제 collection → 무시 + dropped
+        {"slot_name": "bad", "query_text": "FSAR", "collection": "nuscale_FSAR",
+         "design": "US_999"},  # enum 외 → 미설정(값 자체가 무효라 audit 도 안 함)
+    ]}))
+    by = {q.slot_name: q for q in qs}
+    assert by["nu"].filters[_DESIGN_FIELD] == ["US_600"]
+    assert _DESIGN_FIELD not in by["rg"].filters and _DESIGN_FIELD not in by["rg"].target
+    assert by["rg"].scope_audit.get("design_dropped") is True
+    assert _DESIGN_FIELD not in by["bad"].target and _DESIGN_FIELD not in by["bad"].filters
+    assert "design_dropped" not in by["bad"].scope_audit  # 무효값은 drop 이 아님
+
+
+def test_parse_canonical_id_gate_pass_and_reject() -> None:
+    # canonical_id 게이트(§5b.2): 정규식 + collection prefix 정합 통과 시 승격, 실패 시
+    # 버림 + canonical_id_rejected.
+    qs = _parse(json.dumps({"queries": [
+        {"slot_name": "ok", "query_text": "RG 1.206", "collection": "RG",
+         "canonical_id": "RG-1.206", "canonical_id_mode": "filter"},
+        {"slot_name": "mismatch", "query_text": "RG 1.206", "collection": "SRP",
+         "canonical_id": "RG-1.206"},  # prefix RG ↔ collection SRP 불일치 → 기각
+        {"slot_name": "malformed", "query_text": "x", "collection": "RG",
+         "canonical_id": "Regulatory Guide 1.206"},  # 정규식 불일치 → 기각
+    ]}))
+    by = {q.slot_name: q for q in qs}
+    assert by["ok"].filters[_CANONICAL_FIELD] == ["RG-1.206"]
+    assert _CANONICAL_FIELD not in by["mismatch"].filters
+    assert by["mismatch"].scope_audit.get("canonical_id_rejected") is True
+    assert by["malformed"].scope_audit.get("canonical_id_rejected") is True
+
+
+def test_validate_canonical_id_forms() -> None:
+    assert _validate_canonical_id("RG-1.206", "RG") == "RG-1.206"
+    assert _validate_canonical_id("SRP-15.6.5", "SRP") == "SRP-15.6.5"
+    assert _validate_canonical_id("DSRS-10.3", "DSRS") == "DSRS-10.3"
+    assert _validate_canonical_id("10CFR-Part1-50", "10CFR") == "10CFR-Part1-50"
+    # collection 미지정이면 prefix 자체가 collection 을 함의 → 통과.
+    assert _validate_canonical_id("RG-1.206", None) == "RG-1.206"
+    # prefix 불일치 / 비정형 → None.
+    assert _validate_canonical_id("RG-1.206", "10CFR") is None
+    assert _validate_canonical_id("RG 1.206", "RG") is None
+    assert _validate_canonical_id("Letter-PreApp", "nuscale_Letter") is None
+
+
+def test_parse_boost_mode_routes_scope_to_target() -> None:
+    # boost 모드(기본)는 채널을 target 에 싣는다(recall-safe 가산).
+    (q,) = _parse(json.dumps({"queries": [
+        {"slot_name": "s", "query_text": "RG 1.97", "collection": "RG",
+         "collection_mode": "boost", "status": "current", "status_mode": "boost"},
+    ]}))
+    assert q.target["collection"] == ["RG"]
+    assert q.target[_STATUS_FIELD] == ["current"]
+    assert q.filters == {}
+
+
+def test_dedup_distinguishes_status_scope() -> None:
+    # 같은 query_text·collection 이라도 status 가 다르면 별개 검색이라 접지 않는다.
+    qs = (
+        FormulatedQuery(slot_name="cur", query_text="RG 1.206",
+                        filters={"collection": ["RG"], _STATUS_FIELD: ["current"]}),
+        FormulatedQuery(slot_name="hist", query_text="RG 1.206",
+                        filters={"collection": ["RG"], _STATUS_FIELD: ["history"]}),
+    )
+    assert len(_dedup_queries(qs)) == 2
+
+
+def test_attach_targets_preserves_canonical_boost_when_deriving_collection() -> None:
+    # collection 없이 boost 모드 canonical_id 만 있는 쿼리에 collection 을 유도할 때,
+    # 기존 canonical boost 채널을 파괴하지 않는다(merge — §_attach_targets).
+    q = FormulatedQuery(slot_name="s", query_text="RG 1.206 scope",
+                        target={_CANONICAL_FIELD: ["RG-1.206"]})
+    (out,) = _attach_targets((q,))
+    assert out.target[_CANONICAL_FIELD] == ["RG-1.206"]  # 보존
+    assert out.target["collection"] == ["RG"]  # query_text 에서 유도 추가
 
 
 @pytest.mark.asyncio

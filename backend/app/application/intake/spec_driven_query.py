@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from app.application.agents.events import LazyReasoning, current_emitter
@@ -58,6 +59,52 @@ def _derive_collection(text: str) -> str | None:
     for needle, coll in _COLLECTION_PATTERNS:
         if needle in low:
             return coll
+    return None
+
+
+# === 검색 스코프 메타데이터 채널 (설계 spec_driven_search_scope_metadata.design.v1) ===
+# collection 외 status/design/canonical_id 를 N3 retrieval.search 의 filters/target 에
+# *인덱스 필드 경로* 키로 싣는다. _opensearch_hybrid 가 임의 필드명을 term/terms 로
+# 변환하므로 DSL 빌더 수정 없이 동작한다. status↔규제 / design↔NuScale 배타성(§0-C)을
+# 코드가 강제한다: 부적합 collection 슬롯에 실린 채널은 *무시*(빈값 필터 → 0건 방지).
+_STATUS_FIELD = "doc_metadata.std_status.keyword"
+_DESIGN_FIELD = "doc_metadata.std_design.keyword"
+_CANONICAL_FIELD = "doc_metadata.std_canonical_id.keyword"
+
+# std_status 는 RG/SRP/DSRS 만 보유(10CFR/FR/nuscale_* 빈값).
+_STATUS_VALUES = frozenset({
+    "current", "history", "draft", "withdrawn", "AdditionalInformation",
+})
+_STATUS_COLLECTIONS = frozenset({"RG", "SRP", "DSRS"})
+
+# std_design 은 nuscale_* 만 보유. 값 표기는 인덱스 적재 표기(언더스코어, 확정).
+_DESIGN_VALUES = frozenset({"US_460", "US_600"})
+_DESIGN_COLLECTION_PREFIX = "nuscale_"
+
+# canonical_id 정규화 가능 형식(NRC_MANUAL 한정 — 데이터 설명 "canonical ID 규칙").
+# doc_type prefix → (정규식, collection). 검증 통과 시에만 스코프로 승격.
+_CANONICAL_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("RG", re.compile(r"^RG-\d+\.\d+$")),
+    ("SRP", re.compile(r"^SRP-\d+([.\-].+)?$")),
+    ("DSRS", re.compile(r"^DSRS-\d+(\.\d+)*$")),
+    ("10CFR", re.compile(r"^10CFR-Part[\w\-]+$")),
+)
+
+
+def _validate_canonical_id(cid: str, collection: str | None) -> str | None:
+    """canonical_id 게이트(결정론) — 정규식 매칭 + doc_type prefix ↔ collection 정합.
+    통과 시 cid 반환, 실패 시 None(버림 → lexical-only). collection 미지정이면 prefix 가
+    매칭 정규식의 doc_type 과 같다고 보고 통과(모델이 collection 을 비웠어도 id 형식이
+    규칙에 맞으면 승격 — prefix 자체가 collection 을 함의)."""
+    if not cid:
+        return None
+    cid = cid.strip()
+    for doc_type, pat in _CANONICAL_PATTERNS:
+        if pat.match(cid):
+            # prefix 정합: collection 이 주어졌으면 doc_type 과 일치해야 한다.
+            if collection and collection != doc_type:
+                return None
+            return cid
     return None
 
 
@@ -197,19 +244,57 @@ def _parse(text: str) -> tuple[FormulatedQuery, ...]:
         if not qt:
             continue
         slot = str(q.get("slot_name") or "").strip() or "query"
-        coll = q.get("collection")
-        mode = str(q.get("collection_mode") or "boost").strip().lower()
         target: dict[str, list[str]] = {}
         filters: dict[str, Any] = {}
-        if isinstance(coll, str) and coll.strip() in _COLLECTIONS:
-            scope = {"collection": [coll.strip()]}
-            # 모델이 filter 모드를 고른 경우만 hard-scope, 그 외(boost/누락)는 가산 boost.
-            if mode == "filter":
-                filters = scope
+
+        def _put(field: str, value: str, mode: str) -> None:
+            # mode=filter → hard-scope(filters), 그 외(boost/누락) → 가산 boost(target).
+            (filters if mode == "filter" else target)[field] = [value]
+
+        # (1) collection — 기존 채널. 역할 구분의 1차 신호.
+        coll_raw = q.get("collection")
+        collection = coll_raw.strip() if isinstance(coll_raw, str) else None
+        if collection in _COLLECTIONS:
+            _put("collection", collection,
+                 str(q.get("collection_mode") or "boost").strip().lower())
+        else:
+            collection = None  # enum 외/누락은 미설정으로 정규화(아래 정합 게이트 입력).
+
+        # 무시된 채널 감사 — 모델이 *값을 냈는데* 배타성/게이트로 버려진 경우만 기록한다
+        # (silent drop 금지 — 원칙 6). 모델이 애초에 안 낸 채널은 drop 이 아니므로 미기록.
+        audit: dict[str, Any] = {}
+
+        # (2) status — 규제 collection(RG/SRP/DSRS)에만 합성(§4.3 배타성 강제).
+        status = q.get("status")
+        if isinstance(status, str) and status in _STATUS_VALUES:
+            if collection in _STATUS_COLLECTIONS:
+                _put(_STATUS_FIELD, status,
+                     str(q.get("status_mode") or "boost").strip().lower())
             else:
-                target = scope
+                audit["status_dropped"] = True  # 비규제 collection 에 status → 무시.
+
+        # (3) design — nuscale_* collection 에만 합성(§5.3 배타성 강제).
+        design = q.get("design")
+        if isinstance(design, str) and design in _DESIGN_VALUES:
+            if collection and collection.startswith(_DESIGN_COLLECTION_PREFIX):
+                _put(_DESIGN_FIELD, design,
+                     str(q.get("design_mode") or "boost").strip().lower())
+            else:
+                audit["design_dropped"] = True  # 규제/미지정 collection 에 design → 무시.
+
+        # (4) canonical_id — 게이트(정규식 + collection prefix 정합) 통과 시만 승격(§5b.2).
+        cid = q.get("canonical_id")
+        if isinstance(cid, str) and cid.strip():
+            valid = _validate_canonical_id(cid, collection)
+            if valid:
+                _put(_CANONICAL_FIELD, valid,
+                     str(q.get("canonical_id_mode") or "boost").strip().lower())
+            else:
+                audit["canonical_id_rejected"] = True  # 정규식/prefix 불일치 → 버림.
+
         out.append(FormulatedQuery(slot_name=slot, query_text=qt,
-                                   target=target, filters=filters))
+                                   target=target, filters=filters,
+                                   scope_audit=audit))
     return tuple(out)
 
 
@@ -251,6 +336,7 @@ def _ensure_references(
                 target=first.target,
                 filters=first.filters,
                 references=first.references,
+                scope_audit=first.scope_audit,
             )
     # 각 쿼리에 실제 포함된 refs 기록(감사용).
     rebuilt: list[FormulatedQuery] = []
@@ -259,6 +345,7 @@ def _ensure_references(
         rebuilt.append(FormulatedQuery(
             slot_name=q.slot_name, query_text=q.query_text,
             target=q.target, filters=q.filters, references=present_refs,
+            scope_audit=q.scope_audit,
         ))
     return tuple(rebuilt)
 
@@ -278,9 +365,16 @@ def _dedup_queries(
     seen: set[tuple[str, str]] = set()
     out: list[FormulatedQuery] = []
     for q in queries:
-        coll = q.target.get("collection") or q.filters.get("collection") or []
-        scope_key = ("filter" if q.filters.get("collection") else "boost") + \
-            "|" + ",".join(sorted(coll))
+        # scope_key 는 *모든* 채널(collection·status·design·canonical_id)을 mode 와 함께
+        # 포함한다. 동일 query_text 라도 스코프가 다르면 별개 검색이므로 접지 않는다
+        # (예: collection RG + status current vs history 는 다른 모집단).
+        parts: list[str] = []
+        for field in ("collection", _STATUS_FIELD, _DESIGN_FIELD, _CANONICAL_FIELD):
+            if field in q.filters:
+                parts.append(f"filter:{field}={','.join(sorted(q.filters[field]))}")
+            elif field in q.target:
+                parts.append(f"boost:{field}={','.join(sorted(q.target[field]))}")
+        scope_key = "|".join(parts)
         key = (" ".join(q.query_text.lower().split()), scope_key)
         if key in seen:
             continue
@@ -298,14 +392,15 @@ def _attach_targets(
     줬으면(둘 중 하나에 'collection' 키가 있으면) 그대로 두고 유도하지 않는다."""
     out: list[FormulatedQuery] = []
     for q in queries:
-        target = dict(q.target)
+        target = dict(q.target)  # 기존 boost 채널(status/design/canonical 포함) 보존.
         has_collection = "collection" in target or "collection" in q.filters
         if not has_collection:
             coll = _derive_collection(q.query_text)
             if coll:
-                target = {"collection": [coll]}
+                target["collection"] = [coll]  # collection 만 *추가*(다른 채널 비파괴).
         out.append(FormulatedQuery(
             slot_name=q.slot_name, query_text=q.query_text,
             target=target, filters=q.filters, references=q.references,
+            scope_audit=q.scope_audit,
         ))
     return tuple(out)

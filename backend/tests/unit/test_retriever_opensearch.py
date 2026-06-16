@@ -98,6 +98,9 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
                                     "AccessionNumber": "ML15355A364",
                                     "DocumentTitle": "NuScale DSRS 3.5.1.3 Turbine Missiles",
                                     "DocumentDate": "2016-07-22",
+                                    # 검색 스코프 표준 메타(search_scope_metadata §6.6).
+                                    "std_status": "current",
+                                    "std_canonical_id": "DSRS-3.5.1.3",
                                 },
                             },
                         },
@@ -169,6 +172,13 @@ async def test_retriever_maps_hits_to_chunks(monkeypatch):
     assert chunks[0]["tables"] == [{"tag": "tb_0001", "caption": "Tbl",
                                     "markdown": "| 항목 | 값 |", "html": ""}]
     assert chunks[1]["tables"] is None
+
+    # 검색 스코프 표준 메타(doc_metadata.std_*) — hit 1 보유, hit 2 부재 → None.
+    assert chunks[0]["std_status"] == "current"
+    assert chunks[0]["std_canonical_id"] == "DSRS-3.5.1.3"
+    assert chunks[0]["std_design"] is None  # DSRS 는 규제라 design 빈값
+    assert chunks[1]["std_status"] is None
+    assert chunks[1]["std_canonical_id"] is None
 
     assert "/nrc-all-v1/_search" in captured["url"]
     assert "search_pipeline=nrc-hybrid-search" in captured["url"]
