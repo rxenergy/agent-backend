@@ -6,8 +6,17 @@ COMPOSE := docker compose --env-file infra/env/local.env --profile local \
 COMPOSE_ONPREM := docker compose --env-file infra/env/onprem.env --profile onprem \
   -f infra/compose/compose.yml -f infra/compose/compose.onprem.yml
 
+# 서브 노드(2번째 vLLM) — standalone compose. 메인 스택과 독립.
+# Docker Compose 는 단일 호스트만 제어하므로 서브 노드 작업은 SSH 로 원격 실행한다.
+# 접속 정보는 변수로 오버라이드 가능: `make up-onprem SUB_SSH=rx@10.0.0.9`
+SUB_SSH ?= rx@192.168.100.11
+SUB_DIR ?= /home/rx/rx-git/agent-backend
+COMPOSE_ONPREM_SUB := docker compose -f infra/compose/compose.onprem.sub.yml \
+  --env-file infra/env/onprem.sub.env
+
 .PHONY: help build up-local down logs ps test test-integration smoke smoke-stream seed seed-encode opensearch-init os-snapshot os-restore os-snapshots verify-w1 fmt clean migrate psql prompts-validate \
-  build-onprem up-onprem down-onprem logs-onprem ps-onprem clean-onprem export-onprem _guard-local-only \
+  build-onprem up-onprem up-onprem-main up-onprem-sub down-onprem down-onprem-main down-onprem-sub \
+  logs-onprem logs-onprem-sub ps-onprem ps-onprem-sub clean-onprem export-onprem deploy-onprem-sub _guard-local-only \
   aws-ecr-login aws-build aws-push aws-deploy aws-setup aws-destroy aws-ssh aws-logs aws-status aws-secrets-put
 
 help:
@@ -23,14 +32,21 @@ help:
 	@echo "  fmt        Run ruff format on backend"
 	@echo "  clean      Tear down stack and remove volumes"
 	@echo ""
-	@echo "On-premise (air-gapped + local vLLM):"
-	@echo "  build-onprem  Build agent-api/open-webui images for onprem profile"
-	@echo "  up-onprem     Bring up onprem stack (requires vLLM image + ./models/gemma4-awq)"
-	@echo "  down-onprem   Tear down onprem stack (keeps volumes)"
-	@echo "  logs-onprem   Tail agent-api logs (onprem)"
-	@echo "  ps-onprem     Show onprem stack status"
-	@echo "  clean-onprem  Tear down onprem stack and remove volumes"
-	@echo "  export-onprem Collect run data (events/traces/memory) → analysis dataset"
+	@echo "On-premise (air-gapped + local vLLM, 2 nodes):"
+	@echo "  build-onprem     Build agent-api/open-webui images for onprem profile (main node)"
+	@echo "  up-onprem        Bring up BOTH nodes (main stack local + sub vLLM via SSH)"
+	@echo "  up-onprem-main   Bring up main node stack only"
+	@echo "  up-onprem-sub    Bring up sub node vLLM only (SSH → \$$(SUB_SSH))"
+	@echo "  down-onprem      Tear down BOTH nodes (keeps volumes)"
+	@echo "  down-onprem-main Tear down main node stack only"
+	@echo "  down-onprem-sub  Tear down sub node vLLM only (SSH)"
+	@echo "  logs-onprem      Tail agent-api logs (main node)"
+	@echo "  logs-onprem-sub  Tail sub node vLLM logs (SSH)"
+	@echo "  ps-onprem        Show main node stack status"
+	@echo "  ps-onprem-sub    Show sub node vLLM status (SSH)"
+	@echo "  deploy-onprem-sub Rsync repo + models to sub node (SUB_SSH:SUB_DIR)"
+	@echo "  clean-onprem     Tear down main node stack and remove volumes"
+	@echo "  export-onprem    Collect run data (events/traces/memory) → analysis dataset"
 
 build:
 	$(COMPOSE) build agent-api open-webui
@@ -148,25 +164,61 @@ migrate:
 psql:
 	$(COMPOSE) exec postgres psql -U agent -d agent_state
 
-# ── On-premise targets ────────────────────────────────────────────────────
+# ── On-premise targets (2 nodes) ──────────────────────────────────────────
+# 메인 노드에서 `make <target>` 으로 양 노드(메인 전체 스택 + 서브 vLLM)를 제어한다.
+# Docker Compose 는 단일 호스트만 제어하므로, 서브 노드 작업은 SSH(SUB_SSH)로 원격 실행한다.
+#
 # 사전 준비:
-#   1) compressed-tensors(gemma4) 지원 vLLM 이미지를 호스트 docker 데몬에 적재
-#   2) ./models/gemma4-awq 에 gemma-4-26B-A4B-it-AWQ-4bit 양자화 가중치 사전 적재
-#   3) (선택) hf_cache 볼륨에 임베더(e5/fermi) 사전 동기화 (HF_HUB_OFFLINE=1)
+#   [메인] 1) compressed-tensors(gemma4) 지원 vLLM 이미지를 호스트 docker 데몬에 적재
+#          2) ./models/gemma4-awq 에 gemma-4-26B-A4B-it-AWQ-4bit 양자화 가중치 사전 적재
+#          3) (선택) hf_cache 볼륨에 임베더(e5/fermi) 사전 동기화 (HF_HUB_OFFLINE=1)
+#   [서브] 1) `make deploy-onprem-sub` 로 레포+모델을 서브 노드(SUB_DIR)에 동기화
+#          2) 서브 노드 docker 데몬에 vLLM 이미지 + NVIDIA Container Toolkit
+#          3) 메인→서브 SSH 키 기반 무인 접속(BatchMode) 가능
 build-onprem:
 	$(COMPOSE_ONPREM) build agent-api open-webui
 
-up-onprem:
+# 양 노드 동시 기동 (메인 로컬 + 서브 SSH). 서브 vLLM 은 LLM_POOL `gemma-4-26b-sub` 가 가리킨다.
+up-onprem: up-onprem-main up-onprem-sub
+	@echo ""
+	@echo "기동 명령 전송 완료. vLLM 모델 로딩은 수 분 걸립니다 → make ps-onprem / make ps-onprem-sub"
+
+up-onprem-main:
+	@echo "==> [메인] onprem 스택 기동"
 	$(COMPOSE_ONPREM) up -d
 
-down-onprem:
+up-onprem-sub:
+	@echo "==> [서브] vLLM 기동 ($(SUB_SSH))"
+	ssh -o BatchMode=yes $(SUB_SSH) "cd '$(SUB_DIR)' && $(COMPOSE_ONPREM_SUB) up -d"
+
+# 양 노드 동시 종료.
+down-onprem: down-onprem-main down-onprem-sub
+
+down-onprem-main:
 	$(COMPOSE_ONPREM) down
+
+down-onprem-sub:
+	ssh -o BatchMode=yes $(SUB_SSH) "cd '$(SUB_DIR)' && $(COMPOSE_ONPREM_SUB) down"
 
 logs-onprem:
 	$(COMPOSE_ONPREM) logs -f agent-api
 
+logs-onprem-sub:
+	ssh -t $(SUB_SSH) "cd '$(SUB_DIR)' && $(COMPOSE_ONPREM_SUB) logs -f"
+
 ps-onprem:
 	$(COMPOSE_ONPREM) ps
+
+ps-onprem-sub:
+	ssh -o BatchMode=yes $(SUB_SSH) "cd '$(SUB_DIR)' && $(COMPOSE_ONPREM_SUB) ps"
+
+# 레포(compose/env) + 모델을 서브 노드로 rsync. .git/.venv 등 무거운/불필요 항목은 제외.
+# 서브는 vLLM 만 띄우므로 백엔드 빌드는 불필요하나, compose/env/models 동기화는 필요하다.
+deploy-onprem-sub:
+	rsync -a --info=progress2 \
+	  --exclude '.git/' --exclude '.venv/' --exclude '__pycache__/' \
+	  --exclude 'export/' \
+	  ./ $(SUB_SSH):$(SUB_DIR)/
 
 clean-onprem:
 	$(COMPOSE_ONPREM) down -v
