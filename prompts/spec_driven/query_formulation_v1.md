@@ -97,6 +97,26 @@ The form that satisfies all three is a **compact English regulatory noun phrase 
 
 11. **Canonical id — exact document version targeting (normalizable explicit references ONLY).** When a slot is anchored on an `explicit_reference` whose form is **normalizable**, emit a `canonical_id` (and `canonical_id_mode`, `boost` default or `filter`). Normalize to the rule form: `RG 1.206` → `RG-1.206`; `SRP 15.6.5` → `SRP-15.6.5`; `DSRS 10.3` → `DSRS-10.3`; `10 CFR 50.46` → `10CFR-Part1-50` **only if you are sure of the Part-range volume (else leave it null)**. The revision is never included (a canonical_id groups all revisions of one document). **Do NOT invent a canonical_id for title-keyword documents** (Letter / Meeting / Email — they have no stable id). Use `filter` when the query unambiguously names that one document, `boost` otherwise. The deterministic backstop re-validates the form and that the id's type prefix matches the query's `collection`, dropping it on mismatch — so a malformed id costs nothing (the verbatim reference still anchors the query_text via rule 3).
 
+11b. **FSAR canonical id — narrow a NuScale FSAR slot to a Part / Chapter (`nuscale_FSAR` ONLY).** A NuScale FSAR is one large document; you can scope a `nuscale_FSAR` slot to the relevant **chapter** (or non-technical Part) via `canonical_id`. The model's job is to map the query's *topic* to the right chapter number using the map below — the code converts a chapter to the right index pattern and validates the range.
+    - **Part 2 = the technical FSAR (Tier 2), Chapters 1–21.** Emit `canonical_id` = `FSAR-Part02-Ch{N}` (e.g. `FSAR-Part02-Ch06`). Pick the chapter whose subject matches the slot's topic:
+
+      | Ch | Subject | Ch | Subject |
+      |----|---------|----|---------|
+      | 1 | Introduction / general plant description | 12 | Radiation Protection |
+      | 2 | Site Characteristics | 13 | Conduct of Operations |
+      | 3 | Design of Structures, Systems, Components | 14 | Initial Test Program / V&V |
+      | 4 | Reactor (core, fuel, neutronics) | 15 | **Transient and Accident Analyses** (LOCA, AOO, DBA) |
+      | 5 | Reactor Coolant System & connected systems | 16 | Technical Specifications |
+      | 6 | **Engineered Safety Features** (ECCS, containment, DHRS) | 17 | Quality Assurance |
+      | 7 | Instrumentation and Controls (I&C) | 18 | Human Factors Engineering |
+      | 8 | Electric Power | 19 | Probabilistic Risk Assessment / severe accident |
+      | 9 | Auxiliary Systems | 20 | Mitigation of Beyond-Design-Basis Events |
+      | 10 | Steam and Power Conversion System | 21 | Multi-Module Design Considerations |
+      | 11 | Radioactive Waste Management | | |
+
+    - **Non-technical Parts (no chapter, no Tier):** `FSAR-Part01` General/Financial · `FSAR-Part07` Exemptions · `FSAR-Part08` License Conditions/ITAAC · `FSAR-Part09` Withheld Information · `FSAR-Part10` Quality Assurance Program. Emit `canonical_id` = `FSAR-Part07` etc. only when the query is about that administrative topic (e.g. "what exemptions did NuScale request" → `FSAR-Part07`).
+    - Use `filter` when the chapter/part clearly bounds the answer, `boost` when the topic may span chapters. Combine with `design` (US600/US460) when the query names a design. If you cannot confidently map the topic to one chapter, leave `canonical_id` null (the `nuscale_FSAR` collection filter alone still searches the whole FSAR). The code maps the chapter to a pattern covering all of that chapter's sections and rejects an out-of-range chapter — so an uncertain guess is wasted, not harmful.
+
 ## Output
 
 Emit a single JSON only (no prose, no code fences). `reasoning` is the first field; each query has `slot_name`, `query_text`, and optional scope fields: `collection` (one of the 17, or null) + `collection_mode`; `status` (RG/SRP/DSRS only) + `status_mode`; `design` (`US600`/`US460`/`PreApp`, nuscale_* only) + `design_mode`; `canonical_id` (normalized id, or null) + `canonical_id_mode`. All modes are `boost` | `filter`, default `boost`.
@@ -113,8 +133,8 @@ Example C — I&C guidance slot with abbreviation disambiguation. `RG 1.97` pins
 Example D — "RG 1.206이 뭐야?" (current-edition body query for a normalizable RG). Collection RG, default status=current (filter — body query wants the in-force edition), and a normalizable canonical_id RG-1.206 (filter — the query names exactly that one document):
 {"reasoning":"RG 1.206 본문 질의. collection RG/filter, status 미명시라 기본 current/filter(현행본만). RG 1.206 은 정규화 가능 → canonical_id RG-1.206/filter 로 그 문서 버전 묶음에 정확 한정.","queries":[{"slot_name":"rg_1206_scope","query_text":"RG 1.206 combined license application content format guidance","collection":"RG","collection_mode":"filter","status":"current","status_mode":"filter","canonical_id":"RG-1.206","canonical_id_mode":"filter"}]}
 
-Example E — "US460 SDAA의 ECCS 설계는?" (a NuScale applicant query naming the later design — overriding the US600 default). Collection nuscale_FSAR (design_claim facet), design=US460 (filter — the query names US460/SDAA), no status (NuScale has none), no canonical_id (FSAR is not a normalizable NRC_MANUAL id):
-{"reasoning":"US460 SDAA 의 ECCS 설계 주장 질의 — 신청자 문서라 collection nuscale_FSAR/filter, design_claim facet 어휘 verbatim(passive ECCS). 질의가 US460(SDAA) 명시 → 기본값 US600 을 덮고 design US460/filter. NuScale 문서라 status 없음, FSAR 는 정규화 id 아님 → canonical_id 없음.","queries":[{"slot_name":"eccs_design","query_text":"NuScale US460 ECCS passive emergency core cooling reactor vent valves design","collection":"nuscale_FSAR","collection_mode":"filter","design":"US460","design_mode":"filter"}]}
+Example E — "US460 SDAA의 ECCS 설계는?" (a NuScale applicant query naming the later design — overriding the US600 default). Collection nuscale_FSAR (design_claim facet), design=US460 (filter — names US460/SDAA), no status (NuScale has none), and an FSAR chapter canonical: ECCS lives in the Engineered Safety Features chapter → `FSAR-Part02-Ch06` (filter — bounds the slot to that chapter; rule 11b):
+{"reasoning":"US460 SDAA 의 ECCS 설계 주장 질의 — 신청자 문서라 collection nuscale_FSAR/filter, design_claim facet 어휘 verbatim(passive ECCS). 질의가 US460(SDAA) 명시 → 기본값 US600 을 덮고 design US460/filter. NuScale 문서라 status 없음. ECCS 는 FSAR 6장(Engineered Safety Features) → canonical_id FSAR-Part02-Ch06/filter 로 그 챕터에 한정(코드가 wildcard 패턴으로 변환).","queries":[{"slot_name":"eccs_design","query_text":"NuScale US460 ECCS passive emergency core cooling reactor vent valves design","collection":"nuscale_FSAR","collection_mode":"filter","design":"US460","design_mode":"filter","canonical_id":"FSAR-Part02-Ch06","canonical_id_mode":"filter"}]}
 
 원질의(원어): {query}
 

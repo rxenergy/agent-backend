@@ -249,6 +249,38 @@ async def test_retriever_scope_filters_and_noise_floor_in_dsl(monkeypatch):
     )
 
 
+async def test_retriever_wildcard_filter_for_fsar_canonical(monkeypatch):
+    """spec_driven FSAR canonical: 값에 `*` 가 있으면 term/terms 가 아니라 wildcard
+    절로 변환된다(FSAR-Part02*Ch06 → -T2- 유무·하위 Section 흡수). exact 값은 종전대로
+    term/terms 유지."""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.read().decode("utf-8"))
+        return httpx.Response(200, json={"hits": {"hits": []}})
+
+    _patch_client(monkeypatch, "app.adapters.tools.retriever_opensearch", handler)
+    tool = _retriever()
+    await tool.invoke(
+        {
+            "query_text": "ECCS passive emergency core cooling",
+            "top_k": 5,
+            "filters": {
+                "noise": False,
+                "collection": ["nuscale_FSAR"],
+                "doc_metadata.std_canonical_id.keyword": ["FSAR-Part02*Ch06"],
+            },
+        },
+        _ctx(),
+    )
+    fclauses = captured["body"]["query"]["hybrid"]["filter"]["bool"]["filter"]
+    # wildcard 값 → wildcard 절.
+    assert {"wildcard": {"doc_metadata.std_canonical_id.keyword": "FSAR-Part02*Ch06"}} in fclauses
+    # exact 값(collection)은 종전대로 terms.
+    assert {"terms": {"collection": ["nuscale_FSAR"]}} in fclauses
+    assert {"term": {"noise": False}} in fclauses
+
+
 async def test_retriever_no_scope_keeps_dsl_unchanged(monkeypatch):
     """빈 scope → filter 절 미생성(기존 동작 보존, sequential_v2 무영향)."""
     captured: dict = {}

@@ -16,9 +16,9 @@ from app.domain.interaction import AgentResponse, Citation
 
 
 def _cite(cid: str, *, document_id=None, formatted=None, page=None,
-          source_url=None) -> Citation:
+          source_url=None, tables=None) -> Citation:
     return Citation(citation_id=cid, document_id=document_id, formatted=formatted,
-                    page=page, source_url=source_url)
+                    page=page, source_url=source_url, tables=tables)
 
 
 def _resp(

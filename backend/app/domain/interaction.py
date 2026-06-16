@@ -48,6 +48,11 @@ class Citation:
     # 원문 다운로드 URL(인덱스 doc_metadata 1차 소스) — References 딥링크용. 없으면
     # answer_renderer 가 adams_url(ML번호 재구성) → 평문 순으로 강등한다.
     source_url: str | None = None
+    # 본문에서 분리된 표(chunk.tables 원본 — {tag,caption,markdown,html}). answer_renderer
+    # 가 References 란에 실제 표(markdown/HTML)를 렌더하는 데 쓴다
+    # (spec_driven_table_citation_references). eq/hash 제외(compare=False) — list[dict]
+    # 는 unhashable, 표는 동등성 축이 아니다.
+    tables: list[dict[str, Any]] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

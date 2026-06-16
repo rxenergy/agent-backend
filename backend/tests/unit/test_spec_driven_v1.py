@@ -32,6 +32,7 @@ from app.application.intake.spec_driven_query import (
     _ensure_references,
     _parse,
     _validate_canonical_id,
+    _validate_fsar_canonical,
 )
 from app.application.events.recorder import EventRecorder
 from app.application.prompting.spec_driven_source import (
@@ -552,6 +553,59 @@ def test_validate_canonical_id_forms() -> None:
     assert _validate_canonical_id("RG-1.206", "10CFR") is None
     assert _validate_canonical_id("RG 1.206", "RG") is None
     assert _validate_canonical_id("Letter-PreApp", "nuscale_Letter") is None
+
+
+# === FSAR canonical_id (NuScale 챕터 wildcard) =================================
+
+
+def test_validate_fsar_chapter_to_wildcard() -> None:
+    # Part2 챕터형(다양한 입력 표기)은 모두 wildcard `FSAR-Part02*Ch{NN}` 로 정규화
+    # (zero-pad) — 인덱스의 -T2- 유무·하위 Section 분기를 한 패턴이 흡수.
+    f = _validate_fsar_canonical
+    assert f("FSAR-Part02-Ch06", "nuscale_FSAR") == "FSAR-Part02*Ch06"
+    assert f("FSAR-Part2-Ch6", "nuscale_FSAR") == "FSAR-Part02*Ch06"
+    assert f("FSAR-Part02-T2-Ch15", "nuscale_FSAR") == "FSAR-Part02*Ch15"
+    assert f("FSAR-Ch5", "nuscale_FSAR") == "FSAR-Part02*Ch05"
+
+
+def test_validate_fsar_chapter_range_and_part() -> None:
+    f = _validate_fsar_canonical
+    # 범위 밖 챕터(>21) → 기각.
+    assert f("FSAR-Part02-Ch99", "nuscale_FSAR") is None
+    assert f("FSAR-Part02-Ch00", "nuscale_FSAR") is None
+    # 비기술 Part(1/7/8/9/10) → exact(Tier 없음).
+    assert f("FSAR-Part07", "nuscale_FSAR") == "FSAR-Part07"
+    assert f("FSAR-Part1", "nuscale_FSAR") == "FSAR-Part01"
+    # Part2 단독(챕터 없음) → 기각(collection 이 이미 전체 FSAR — 채널 의미 없음).
+    assert f("FSAR-Part02", "nuscale_FSAR") is None
+    # 미지 Part(존재하지 않는 비기술 Part) → 기각.
+    assert f("FSAR-Part03", "nuscale_FSAR") is None
+    # collection 배타성: nuscale_FSAR 아닌 곳엔 FSAR canonical 금지.
+    assert f("FSAR-Part02-Ch06", "RG") is None
+    assert f("FSAR-Part02-Ch06", "nuscale_RAI") is None
+
+
+def test_parse_fsar_chapter_canonical_filter() -> None:
+    # _parse 가 FSAR 형 canonical 을 FSAR 검증기로 라우팅해 wildcard 를 filters 에 싣는다.
+    (q,) = _parse(json.dumps({"queries": [
+        {"slot_name": "eccs", "query_text": "ECCS", "collection": "nuscale_FSAR",
+         "collection_mode": "filter",
+         "design": "US460", "design_mode": "filter",
+         "canonical_id": "FSAR-Part02-Ch06", "canonical_id_mode": "filter"},
+    ]}))
+    assert q.filters[_CANONICAL_FIELD] == ["FSAR-Part02*Ch06"]
+    assert q.filters[_DESIGN_FIELD] == ["US460"]
+    assert q.filters["collection"] == ["nuscale_FSAR"]
+
+
+def test_parse_fsar_canonical_rejected_out_of_range() -> None:
+    # 범위 밖 FSAR 챕터는 기각 + canonical_id_rejected(silent drop 금지).
+    (q,) = _parse(json.dumps({"queries": [
+        {"slot_name": "x", "query_text": "y", "collection": "nuscale_FSAR",
+         "canonical_id": "FSAR-Part02-Ch99"},
+    ]}))
+    assert _CANONICAL_FIELD not in q.filters and _CANONICAL_FIELD not in q.target
+    assert q.scope_audit.get("canonical_id_rejected") is True
 
 
 def test_parse_boost_mode_routes_scope_to_target() -> None:

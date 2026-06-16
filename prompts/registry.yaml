@@ -111,92 +111,6 @@ classification_prompts:
     output_schema: {path: classification/schemas/classifier_output_v1.json, version: v1, sha256: "3d2507293f83d3285c8ebfd69fbc98333d67952ffa8c5e586224e9a59d609b1d"}
     model_options: {temperature: 0.0, max_tokens: 200}
 
-# Node 3 정보 요구(information need) 프롬프트 (information_need_driven_retrieval.plan.v1).
-#   분류 프롬프트와 동일 registry 에서 sha 핀·버전 관리한다. 코드 인라인 금지 —
-#   `InformationNeedPromptSource`(backend/app/application/prompting/information_need_source.py)
-#   가 boot 시 fragment 바이트를 재해시해 declared sha 와 대조(무단 편집 차단,
-#   classification_prompts 와 동일 fail-fast 불변식). 산출물의 `policy_hash` 는
-#   이 prompt fragment 의 sha 로 InteractionEvent 에 기록된다(원칙 5). output_schema
-#   는 guided-decoding(json_schema grammar)에 쓰이며 model_options 도 외부화.
-query_understanding_prompts:
-  information_need_v1:
-    profile_version: v1
-    prompt:        {path: query_understanding/information_need_v1.md,            version: v1, sha256: "2cd9992528f424e81e874c28d35938047925cc9f4b12f335d865be3e45638f8f"}
-    output_schema: {path: query_understanding/schemas/information_need_v1.json,  version: v1, sha256: "86c0788c2edd4bdcd01621cbb56ed2e1e80c702f9163b804c7ded7c13713b93d"}
-    model_options: {temperature: 0.0, max_tokens: 400}
-
-# agentic_finder N0 query_translate(질의 번역) 프롬프트 (agentic_finder_workflow.v1).
-#   워크플로우 내부(분류·answer_spec·Finder 검색)는 영어 코퍼스를 대상으로 하므로
-#   사용자 질의를 검색용 영어(query_en)로 번역하고 원 언어(source_language)를 식별한다.
-#   분류/answer_spec 과 동일 registry sha 핀·fail-fast — `QueryTranslatePromptSource`
-#   (backend/app/application/prompting/query_translate_source.py)가 boot 시 fragment
-#   바이트를 재해시해 대조한다(무단 편집 차단, 원칙 5). policy_hash(번역 정책 핀)는
-#   이 prompt fragment 의 sha. output_schema 는 guided-decoding(json_schema)에 쓰인다.
-query_translate_prompts:
-  query_translate_v1:
-    profile_version: v1
-    prompt:        {path: query_translate/query_translate_v1.md,            version: v1, sha256: "5f11a9c6053e31dc9232c22ad78b32ad270802892656cdd191d0453bd69cf4b4"}
-    output_schema: {path: query_translate/schemas/query_translate_v1.json,  version: v1, sha256: "738290b9bc805dd6c562406d2fe82ff65cc4c5f252e7a891f25cf0f668205829"}
-    model_options: {temperature: 0.0, max_tokens: 400}
-
-# agentic_finder N2 answer_spec(답변 사양) 프롬프트 (agentic_finder_workflow.v1).
-#   분류/정보요구 프롬프트와 동일 registry 에서 sha 핀·버전 관리한다. 코드 인라인
-#   금지 — `AnswerSpecPromptSource`(backend/app/application/prompting/answer_spec_source.py)
-#   가 boot 시 fragment 바이트를 재해시해 declared sha 와 대조(무단 편집 차단, 동일
-#   fail-fast 불변식). 산출물의 `policy_hash`(= InteractionEvent answer_spec_hash 핀)
-#   는 이 prompt fragment 의 sha. output_schema 는 guided-decoding(json_schema)에 쓰인다.
-answer_spec_prompts:
-  answer_spec_v1:
-    profile_version: v1
-    prompt:        {path: answer_spec/answer_spec_v2.md,            version: v2, sha256: "d9cc623a7a8db1d59b1927cfe7a27736f3e7187e3dd6679b4b096cd9a807defa"}
-    output_schema: {path: answer_spec/schemas/answer_spec_v1.json,  version: v1, sha256: "d1ec8050a8d5375ca9f70f45e09b396a1c185f805d3bc43e8626238a1b33f059"}
-    model_options: {temperature: 0.0, max_tokens: 400}
-
-# agentic_finder N3 Finder Agent 시스템 프롬프트 (agentic_finder_workflow.v1 §3).
-#   tool-calling 멀티턴 루프의 *정적* 시스템 지시(도구 사용 규약·종료 규칙). 동적
-#   답변 사양/질의는 런타임에 덧붙는다. `FinderPromptSource` 가 boot 시 sha 검증
-#   (동일 fail-fast). `finder_policy_hash`(= InteractionEvent 핀)는 이 본문 sha.
-#   output_schema 없음 — 구조는 도구 호출(submit_verdict)이 강제한다(structured-by-construction).
-finder_prompts:
-  finder_v1:
-    profile_version: v1
-    prompt:        {path: finder/finder_v1.md, version: v1, sha256: "cf2bc04362e3ab85195daff4e830053381eac5ef38df7b7d97d52ee160c7628f"}
-    model_options: {temperature: 0.0, max_tokens: 600}
-
-# react_minimal_v1 N1 Retrieval(ReAct 루프) 시스템 프롬프트 (react_minimal_workflow.v1).
-#   분류기·query_translate·answer_spec 없이 모델 추론이 도구 사용을 주도하는 최소 ReAct
-#   variant 의 *정적* 시스템 지시(도메인 오리엔테이션 + Thought→Action→Observation 규약
-#   + scope/거부 자기판정 + 언어 규칙). 동적 질의는 런타임 user 메시지. `ReactRetrievalPromptSource`
-#   가 boot 시 sha 검증(finder 와 동일 fail-fast). policy_hash = 본문 sha → InteractionEvent
-#   query_understanding.react_retrieval.policy_hash 핀. output_schema 없음 — 구조는 도구
-#   호출(submit_response)이 강제.
-react_retrieval_prompts:
-  react_retrieval_v1:
-    profile_version: v1
-    prompt:        {path: react/react_retrieval_v1.md, version: v1, sha256: "d91dd8f4fc5609d887ac93e03e3d62e583a49b1d8bc7dafe6166429654257630"}
-    model_options: {temperature: 0.0, max_tokens: 600}
-  # react_echo_v1 N1 — 도구-최소(retrieval.search + submit_response) 키워드-보존형 프롬프트.
-  #   confidence.scope·terminology.*·retrieval.scope 도구 부재를 전제로 검색 질의 작성을
-  #   모델 추론에 맡기되 도메인 키워드(노형명·규제 ID·RAI 번호·기술 약어) 보존을 1급 규율로
-  #   삼는다. `ReactRetrievalPromptSource(profile_id="react_retrieval_echo_v1")` 가 boot 시
-  #   sha 검증(react_retrieval_v1 과 동일 fail-fast). policy_hash = 본문 sha → echo variant
-  #   전용 query_understanding.react_retrieval.policy_hash 핀.
-  react_retrieval_echo_v1:
-    profile_version: v1
-    prompt:        {path: react/react_retrieval_echo_v1.md, version: v1, sha256: "e2c09619783ddc98612129184731e2451bba2df5a25251462cfc3dcaea58f219"}
-    model_options: {temperature: 0.0, max_tokens: 600}
-
-# react_minimal_v1 N2 Generation(근거 답변) 프롬프트 (react_minimal_workflow.v1).
-#   O×D PromptResolver 를 쓰지 않는다(분류기 없음 → scenario_object/depth 없음). 단일
-#   생성 프롬프트가 답변 철학·규범무게 사다리·인용 계약·언어 미러링을 inline 으로 담는다
-#   (system_v6 distill). `ReactGenerationPromptSource` 가 boot 시 sha 검증. policy_hash =
-#   본문 sha → InteractionEvent prompt_composition_hash 핀.
-react_generation_prompts:
-  react_generation_v1:
-    profile_version: v1
-    prompt:        {path: react/react_generation_v1.md, version: v1, sha256: "752a248efccd9ba85739165c4109333c199658f17bd835b2c222d6f7aabed665"}
-    model_options: {temperature: 0.1, max_tokens: 2000}
-
 # spec_driven_v1 — 검색 앞단 두 모델 노드(N1 Define Spec / N2 Query Formulation) +
 # N4 Generation 프롬프트. 설계: docs/plans/spec_driven_agent.design.v1.md. N1/N2 는
 # guided decoding(json_schema)용 output_schema 동반, N4 는 자유 텍스트(free-text)라
@@ -229,8 +143,8 @@ spec_driven_answer_spec_prompts:
 spec_driven_query_prompts:
   spec_driven_query_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "e3a7a1e8303fd15f235a415d854d2adc7a169523e188423bcc82bd3cc623e55f"}
-    output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "78d5e1960b17d6a1122ec1a18d435dc6c91468078a942b211cee74fc3cfc6921"}
+    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "49610728f3178f19248f46e68e3db660714754c725e8688ab188c3593b682ba8"}
+    output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "a33c68059af2c5e60a0e26e99239ff9cc9da42679419feaaf4fe5dac71b3ecc0"}
     # max_tokens — 슬롯당 1쿼리 최대 10개 + 스코프 4채널(status/design/canonical_id +
     # 각 mode)이 쿼리당 추가되어 JSON 이 길어짐 → 상향(1100→1400, search_scope_metadata).
     model_options: {temperature: 0.0, max_tokens: 1400}

@@ -362,6 +362,11 @@ def _smr_agent_metadata(
                 # 출처를 직접 링크할 수 있게 노출(원칙 8). content 의 References 가
                 # 이미 마크다운 링크를 싣지만, 구조화 소비자(eval/감사)도 URL 을 본다.
                 "source_url": c.source_url,
+                # 본문에서 분리된 표(원본 list — {tag,caption,markdown,html}). content
+                # 의 References 가 이미 표를 마크다운/HTML 로 렌더하지만(OpenWebUI 가시),
+                # 구조화 소비자(eval/감사)는 이 원본을 파싱한다(원칙 8 — silent 금지,
+                # spec_driven_table_citation_references D7).
+                "tables": c.tables,
             }
             for c in response.citations
         ],

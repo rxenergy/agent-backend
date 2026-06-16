@@ -81,6 +81,12 @@ class CitationCandidate:
     # 강등하고, clause_id(10CFR50.46)로 "10 CFR §50.46" 라벨을 만든다.
     source_url: str | None = None
     clause_id: str | None = None
+    # 본문에서 분리된 표(chunk.tables 원본 list[dict] — {tag,caption,markdown,html}).
+    # References 란에 실제 표(markdown/HTML)를 렌더하기 위해 chunk 에서 전파한다
+    # (spec_driven_table_citation_references). frozen dataclass 의 eq/hash 대상에서
+    # 제외(compare=False) — list[dict] 는 unhashable 이라 자동 __hash__ 가 깨질 수 있고,
+    # 표 데이터는 동등성 판정 축이 아니다(citation_id/chunk_id 가 식별).
+    tables: list[dict[str, Any]] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -158,6 +164,7 @@ class ContextBuilder:
                     formatted=format_citation(c, cid),
                     source_url=c.source_url,
                     clause_id=c.clause_id,
+                    tables=c.tables,
                 )
             )
         candidates = tuple(candidates_list)

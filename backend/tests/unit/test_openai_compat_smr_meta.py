@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.api.openai_compat import _smr_agent_metadata
-from app.domain.interaction import AgentResponse
+from app.domain.interaction import AgentResponse, Citation
 
 
 def _resp(**kw) -> AgentResponse:
@@ -38,3 +38,20 @@ def test_regulatory_grounding_defaults_na_for_other_variants():
         resolved_llm="x", response=_resp(),
     )
     assert meta["regulatory_grounding"] == "n_a"
+
+
+def test_citations_expose_source_url_and_tables():
+    # 구조화 소비자(eval/감사)용 — citation 의 source_url·tables 원본이 smr_agent 에
+    # 노출된다(원칙 8, spec_driven_table_citation_references D7). OpenWebUI 는 무시하나
+    # content 의 References 가 사람용 렌더를 담당.
+    tables = [{"tag": "t", "caption": "C", "markdown": "| a |", "html": ""}]
+    cite = Citation(citation_id="cite-0", document_id="ML18002A422",
+                    source_url="https://www.nrc.gov/docs/ML1800/ML18002A422.pdf",
+                    tables=tables)
+    meta = _smr_agent_metadata(
+        interaction_id="i1", runner_variant="spec_driven_v1",
+        resolved_llm="x", response=_resp(citations=(cite,)),
+    )
+    c0 = meta["citations"][0]
+    assert c0["source_url"] == "https://www.nrc.gov/docs/ML1800/ML18002A422.pdf"
+    assert c0["tables"] == tables

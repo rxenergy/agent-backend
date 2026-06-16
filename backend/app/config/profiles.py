@@ -47,14 +47,6 @@ from app.application.memory.summarizer import ConversationSummarizer
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
 from app.application.prompting.classification_source import ClassificationPromptSource
-from app.application.prompting.information_need_source import InformationNeedPromptSource
-from app.application.prompting.answer_spec_source import AnswerSpecPromptSource
-from app.application.prompting.query_translate_source import QueryTranslatePromptSource
-from app.application.prompting.finder_source import FinderPromptSource
-from app.application.prompting.react_source import (
-    ReactGenerationPromptSource,
-    ReactRetrievalPromptSource,
-)
 from app.application.prompting.spec_driven_source import (
     SpecDrivenAnswerSpecSource,
     SpecDrivenGeneralSource,
@@ -262,8 +254,8 @@ async def build_container(settings: Settings) -> AppContainer:
 
     # Heavy deps (postgres pool / tool executor / prompt resolver / classifier /
     # summarizer) are constructed only when at least one enabled variant
-    # declares non-empty `required_tools` (YAML). This keeps `fake_echo_v0`-only
-    # boots free of postgres / opensearch dependencies.
+    # declares non-empty `required_tools` (YAML). This keeps tool-less boots
+    # free of postgres / opensearch dependencies.
     needs_tool_stack = any(
         spec.required_tools for spec in variant_specs.values()
     )
@@ -275,19 +267,12 @@ async def build_container(settings: Settings) -> AppContainer:
     context_builder: ContextBuilder | None = None
     classifier: Any = None
     classification_prompt_source: Any = None
-    query_translate_prompt_source: Any = None
-    answer_spec_prompt_source: Any = None
-    finder_prompt_source: Any = None
-    react_retrieval_prompt_source: Any = None
-    react_generation_prompt_source: Any = None
-    react_echo_retrieval_prompt_source: Any = None
     spec_driven_answer_spec_source: Any = None
     spec_driven_query_source: Any = None
     spec_driven_generation_source: Any = None
+    spec_driven_triage_source: Any = None
+    spec_driven_general_source: Any = None
     summarizer: ConversationSummarizer | None = None
-    retrieval_planner: Any = None
-    retrieval_evaluator: Any = None
-    retrieval_recoverer: Any = None
     corpus_map: Any = None
 
     if needs_tool_stack:
@@ -300,31 +285,8 @@ async def build_container(settings: Settings) -> AppContainer:
 
         registry = ToolRegistry.from_yaml(settings.tool_registry_path)
 
-        # v3.1 Node 4 planner — `retrieval_strategies.yaml` (tools/ sibling of
-        # the tool registry). 없으면 단일 hybrid 폴백(변형이 default() 사용).
-        from app.application.retrieval.planner import RetrievalPlanner
-
-        _strategies_path = Path(settings.tool_registry_path).parent / "retrieval_strategies.yaml"
-        if _strategies_path.is_file():
-            retrieval_planner = RetrievalPlanner.from_yaml(_strategies_path)
-
-        # v3.1 Node 6 evaluator — `evaluator_policy.yaml` (tools/ sibling).
-        from app.application.retrieval.evaluator import RetrievalEvaluator
-
-        _policy_path = Path(settings.tool_registry_path).parent / "evaluator_policy.yaml"
-        if _policy_path.is_file():
-            retrieval_evaluator = RetrievalEvaluator.from_yaml(_policy_path)
-
-        # v3.1 Node 7 recover — data/synonyms/ (repo 루트). 없으면 빈 사전 폴백.
-        from app.application.retrieval.recovery import RetrievalRecoverer
-
-        _syn_dir = Path(settings.tool_registry_path).parent.parent / "data" / "synonyms"
-        retrieval_recoverer = RetrievalRecoverer.from_yaml_dir(
-            _syn_dir, max_rounds=settings.retrieval_max_recover_rounds
-        )
-
-        # v3.1 Layer 1 범위 한정 — `corpus_map.yaml` (tools/ sibling). 없으면
-        # 빈 맵(scope off, noise floor 0) 폴백.
+        # 검색 범위 한정(corpus_map) — `corpus_map.yaml` (tools/ sibling). retrieval.scope
+        # 도구(결정론 scope 보강)가 소비한다. 없으면 빈 맵(scope off, noise floor 0) 폴백.
         from app.application.retrieval.corpus_map import CorpusMap
 
         _corpus_path = Path(settings.tool_registry_path).parent / "corpus_map.yaml"
@@ -334,9 +296,8 @@ async def build_container(settings: Settings) -> AppContainer:
             else CorpusMap.default()
         )
 
-        # agentic_finder 용어집 — `terminology/vocab.yaml` (tools/ sibling, ISO 25964).
-        # 없으면 빈 어휘(canonicalize=passthrough) 폴백. N1.5 terminology.canonicalize
-        # (conductor-invoked)가 소비한다. 설계: terminology_normalization_strategy.v1.md.
+        # 용어집 — `terminology/vocab.yaml` (tools/ sibling, ISO 25964). 없으면 빈 어휘
+        # (canonicalize=passthrough) 폴백. terminology.canonicalize/expand 도구가 소비한다.
         from app.application.terminology.vocab import TerminologyVocab
 
         _vocab_path = (
@@ -355,23 +316,11 @@ async def build_container(settings: Settings) -> AppContainer:
             active_search_pipeline = _resolve_hybrid_pipeline(
                 settings.retriever_top_k, settings.opensearch_search_pipeline or None
             )
-            # v3.1: the G3 evaluator reads regulatory-meta fields. These exist
-            # only in the v2 schema — the active v1 data has not been
-            # re-ingested with them. The judgment of "is v2 usable" is the
-            # *declared* `opensearch_schema_version` flag (single source of
-            # truth), NOT the index name — the name is arbitrary and tells
-            # nothing about populated data. Require the fields only when BOTH
-            # the hierarchical_corrective variant is enabled AND the deployment
-            # declares schema v2; on v1 we ask for nothing so boot is
-            # unaffected. See infra/opensearch/mappings/README.md.
+            # spec_driven_v1 reads no regulatory-meta preflight fields — the
+            # active variant works off authority_tier(collection)/clause_id
+            # exact-match at query time, not a boot-time schema gate. Require no
+            # fields so boot is schema-version agnostic.
             required_fields: tuple[str, ...] = ()
-            if (
-                "hierarchical_corrective_v3_1" in settings.agent_variants_enabled
-                and settings.opensearch_schema_version == "v2"
-            ):
-                required_fields = (
-                    "clause_id", "authority_tier", "jurisdiction", "effective_on",
-                )
             preflight_checks: list[PreflightCheck] = [
                 OpenSearchPreflight(
                     endpoint=settings.opensearch_endpoint,
@@ -511,26 +460,21 @@ async def build_container(settings: Settings) -> AppContainer:
                     hint="utility_llm is openai_compat but tool init failed; graceful degrade",
                 )
 
-        # agentic_finder Finder 도구(설계 finder §3). retrieval.search = 내부 retriever
-        # 재사용 + Reranker 정렬(실 cross-encoder 는 배포 시 주입, dev/test 는 identity
-        # 폴백 — seam 보존). scope=CorpusMap 결정론, submit_verdict=no-op.
-        # 용어 정규화는 N1.5 terminology.canonicalize(conductor-invoked, 용어집 lookup)로
-        # 상향(retrieval.normalize 대체). 검색범위 확장(terminology.expand)은 P3.
+        # 검색·범위·용어 도구. retrieval.search = 내부 retriever 재사용 + Reranker 정렬
+        # (실 cross-encoder 는 배포 시 주입, dev/test 는 identity 폴백 — seam 보존).
+        # scope=CorpusMap 결정론. 용어 정규화/확장은 용어집(ISO 25964 lookup).
         from app.adapters.reranker.identity import IdentityReranker
         from app.adapters.tools.retrieval_search import RetrievalSearchTool
         from app.adapters.tools.retrieval_scope import RetrievalScopeTool
         from app.adapters.tools.terminology_canonicalize import TerminologyCanonicalizeTool
         from app.adapters.tools.terminology_expand import TerminologyExpandTool
-        from app.adapters.tools.submit_verdict import SubmitVerdictTool
-        from app.adapters.tools.submit_response import SubmitResponseTool
-        from app.adapters.tools.confidence_scope import ConfidenceScopeTool
 
         tools = {
             "retriever.search": retriever_tool,
             "retrieval.search": RetrievalSearchTool(
                 retriever=retriever_tool, reranker=IdentityReranker(),
                 # 후보 풀 깊이를 최종 top_k 와 분리 — reranker 가 깊은 풀에서 상위
-                # top_k 를 고르게 한다(v3.1 dispatcher 와 같은 retrieval_fetch_k).
+                # top_k 를 고르게 한다(retrieval_fetch_k).
                 fetch_k=settings.retrieval_fetch_k,
             ),
             "retrieval.scope": RetrievalScopeTool(
@@ -541,16 +485,7 @@ async def build_container(settings: Settings) -> AppContainer:
             ),
             "terminology.canonicalize": TerminologyCanonicalizeTool(vocab=terminology_vocab),
             "terminology.expand": TerminologyExpandTool(vocab=terminology_vocab),
-            "submit_verdict": SubmitVerdictTool(),
-            # react_minimal_v1 — 모델 주도 scope 자기진단(노출 전용) + ReAct 종료 신호.
-            "confidence.scope": ConfidenceScopeTool(
-                corpus_map=corpus_map,
-                vocab=terminology_vocab,
-                tau_high=settings.retrieval_scope_tau_high,
-                tau_low=settings.retrieval_scope_tau_low,
-            ),
-            "submit_response": SubmitResponseTool(),
-            # v3.1 Node 5 reranker — RRF 대체. opensearch 경로는 SPLADE sparse 모델 기반
+            # 검색 후 reranker — opensearch 경로는 SPLADE sparse 모델 기반
             # (query×doc 희소 벡터 내적), local 경로는 결정론 lexical fake. 둘 다 동일
             # retriever.rerank 도구 계약이라 dispatcher 무변경.
             "retriever.rerank": reranker_tool,
@@ -569,42 +504,9 @@ async def build_container(settings: Settings) -> AppContainer:
         tool_executor = ToolExecutor(registry=registry, tools=tools, event_sink=event_sink)
 
         # 분류 프롬프트 source(registry 호스팅) — boot 시 fragment sha 검증(fail-fast).
-        # llm/hybrid backend 와 v3.1 전용 바인딩이 공유한다(인라인 _PROMPT 대체).
+        # llm/hybrid classifier backend 가 공유한다(인라인 _PROMPT 대체).
         classification_prompt_source = ClassificationPromptSource(
             Path(settings.prompt_local_dir)
-        )
-        # Node 3 정보 요구 프롬프트 source(registry 호스팅) — 분류와 동일 fail-fast
-        # sha 검증. 프롬프트는 코드 인라인이 아니라 registry 에서 관리된다.
-        information_need_prompt_source = InformationNeedPromptSource(
-            Path(settings.prompt_local_dir)
-        )
-        # agentic_finder N0 질의 번역 프롬프트 source(registry 호스팅) — 동일 fail-fast
-        # sha 검증. 워크플로우 내부는 영어(query_en), 최종 출력만 사용자 언어.
-        query_translate_prompt_source = QueryTranslatePromptSource(
-            Path(settings.prompt_local_dir)
-        )
-        # agentic_finder N2 답변 사양 프롬프트 source(registry 호스팅) — 분류/정보요구와
-        # 동일 fail-fast sha 검증. 프롬프트는 코드 인라인이 아니라 registry 에서 관리.
-        answer_spec_prompt_source = AnswerSpecPromptSource(
-            Path(settings.prompt_local_dir)
-        )
-        # agentic_finder N3 Finder 시스템 프롬프트 source(registry 호스팅) — 동일
-        # fail-fast sha 검증. finder_policy_hash 핀의 출처.
-        finder_prompt_source = FinderPromptSource(Path(settings.prompt_local_dir))
-        # react_minimal_v1 N1/N2 프롬프트 source(registry 호스팅) — 동일 fail-fast
-        # sha 검증. policy_hash 핀(query_understanding.react_retrieval / prompt
-        # _composition_hash)의 출처.
-        react_retrieval_prompt_source = ReactRetrievalPromptSource(
-            Path(settings.prompt_local_dir)
-        )
-        react_generation_prompt_source = ReactGenerationPromptSource(
-            Path(settings.prompt_local_dir)
-        )
-        # react_echo_v1 N1 — 도구-최소 키워드-보존 프롬프트(react_retrieval_v1 과 별개
-        # profile). 동일 ReactRetrievalPromptSource 로더, profile_id 만 다르다(N2 Generation
-        # 은 react_generation_prompt_source 공유).
-        react_echo_retrieval_prompt_source = ReactRetrievalPromptSource(
-            Path(settings.prompt_local_dir), profile_id="react_retrieval_echo_v1"
         )
         # spec_driven_v1 N1/N2/N4 프롬프트 source(registry 호스팅) — 동일 fail-fast sha
         # 검증. N1/N2 는 json_schema guided(output_schema 동반), N4 는 자유 텍스트.
@@ -658,23 +560,12 @@ async def build_container(settings: Settings) -> AppContainer:
         context_builder=context_builder,
         classifier=classifier,
         classification_prompt_source=classification_prompt_source,
-        information_need_prompt_source=information_need_prompt_source,
-        query_translate_prompt_source=query_translate_prompt_source,
-        answer_spec_prompt_source=answer_spec_prompt_source,
-        finder_prompt_source=finder_prompt_source,
-        react_retrieval_prompt_source=react_retrieval_prompt_source,
-        react_generation_prompt_source=react_generation_prompt_source,
-        react_echo_retrieval_prompt_source=react_echo_retrieval_prompt_source,
         spec_driven_answer_spec_source=spec_driven_answer_spec_source,
         spec_driven_query_source=spec_driven_query_source,
         spec_driven_generation_source=spec_driven_generation_source,
         spec_driven_triage_source=spec_driven_triage_source,
         spec_driven_general_source=spec_driven_general_source,
         summarizer=summarizer,
-        retrieval_planner=retrieval_planner,
-        retrieval_evaluator=retrieval_evaluator,
-        retrieval_recoverer=retrieval_recoverer,
-        corpus_map=corpus_map,
         tunables={
             "classification_threshold": settings.classification_threshold,
             "verification_citation_threshold": settings.verification_citation_threshold,
@@ -695,24 +586,15 @@ async def build_container(settings: Settings) -> AppContainer:
             "section_merge_max_chunks": settings.section_merge_max_chunks,
             "context_token_budget": settings.context_token_budget,
             "active_cells_mode": settings.active_cells_mode,
-            # react_minimal_v1 — ReAct 루프 턴 backstop(submit_response 미발동 시 종료).
-            "react_max_turns": settings.react_max_turns,
             # spec_driven_v1 — N2 per-slot 멀티쿼리 상한 + N3 1차 floor 정렬 budget.
             # 명시 필드(settings.py)라 SPEC_DRIVEN_* env 가 동작한다(getattr 폴백 제거).
             "spec_driven_max_queries": settings.spec_driven_max_queries,
             "spec_driven_max_context_chunks": settings.spec_driven_max_context_chunks,
             # N4 생성 컨텍스트 토큰 예산(0=무제한). 1차 전량 보존 + 2차 score 순 채움 캡.
             "spec_driven_context_token_budget": settings.spec_driven_context_token_budget,
-            # v3.1 (hierarchical_corrective). Ignored by other variants.
-            "llm_call_budget": getattr(settings, "llm_call_budget", 8),
+            # spec_driven_v1 N4 — 인용 계약(파일 호스팅 → rendered_prompt_hash 에 반영).
             "citation_contract_path": str(
                 Path(settings.prompt_local_dir) / "system" / "citation_contract_v1.md"
-            ),
-            # agentic_finder N0/N7 — 워크플로우 내부는 영어, 최종 답변만 사용자 언어.
-            # 출력-언어 지시문({language} 치환)을 citation contract 와 동일 seam 으로
-            # 생성 프롬프트에 prepend 한다(파일 호스팅 → rendered_prompt_hash 에 반영).
-            "output_language_contract_path": str(
-                Path(settings.prompt_local_dir) / "system" / "output_language_v1.md"
             ),
         },
     )

@@ -1381,7 +1381,8 @@ def _to_citations(candidates) -> tuple[Citation, ...]:
             citation_id=c.citation_id, chunk_id=c.chunk_id, document_id=c.document_id,
             page=c.page, score=c.score, doc_type=c.doc_type, section=c.section,
             revision=c.revision, response_date=c.response_date, formatted=c.formatted,
-            source_url=c.source_url,
+            source_url=c.source_url, tables=c.tables,
+            kind=c.kind, table_tag=c.table_tag,
         )
         for c in candidates
     )

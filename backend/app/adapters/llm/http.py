@@ -821,7 +821,7 @@ def _rejects_sampling_params(model_id: str) -> bool:
 # 시 400). 우리 registry 이름은 점 네임스페이스(예: `retrieval.search`)라 와이어에서만
 # `.` → `_` 로 치환해 보내고(아래 _wire_tool_name), 응답의 tool_call 이름은 요청에 실은
 # `tools` 목록으로 만든 역매핑으로 원래 점 이름으로 복원한다(_restore_map). 중립 타입은
-# 점 이름을 유지(원칙 #4) — finder_loop 의 registry 호출/이름 매칭은 불변.
+# 점 이름을 유지(원칙 #4) — ToolExecutor 의 registry 호출/이름 매칭은 불변.
 _DISALLOWED_TOOL_NAME = re.compile(r"[^a-zA-Z0-9_-]")
 
 

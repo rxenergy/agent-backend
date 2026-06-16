@@ -123,5 +123,5 @@ def tool_context():
         interaction_id="itest-inter",
         trace_id="itest-trace",
         app_profile="local",
-        agent_variant="agentic_finder_v4",
+        agent_variant="spec_driven_v1",
     )

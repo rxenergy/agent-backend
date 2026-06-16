@@ -6,7 +6,8 @@ from app.domain.memory import SessionState
 
 
 class InMemorySessionStateStore:
-    """Used by unit tests and the fake_echo_v0 variant."""
+    """In-memory session-state store — used by unit tests and the
+    `memory_store=in_memory` profile (non-postgres boots)."""
 
     def __init__(self) -> None:
         self._store: dict[str, SessionState] = {}

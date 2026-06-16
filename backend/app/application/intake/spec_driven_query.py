@@ -109,6 +109,92 @@ def _validate_canonical_id(cid: str, collection: str | None) -> str | None:
     return None
 
 
+# === FSAR canonical_id (NuScale 신청자 문서 — design 스코프와 결합) ===================
+# 설계 spec_driven_search_scope_metadata §5b/§9 + FSAR 챕터 검색.
+#
+# 인덱스 실측 표기(std_canonical_id.keyword):
+#   FSAR-Part02-Ch{NN}  /  FSAR-Part02-T2-Ch{NN}     (같은 챕터가 두 표기로 갈림)
+#   FSAR-Part02-T2-Sec{N.NN}[-App{N}A]               (섹션/부록 수준 — 일부)
+#   FSAR-Part{01,07,08,09,10}                         (Part 2 외 — Tier 없음, Part 만)
+#
+# 핵심: Part 2 챕터는 exact term 으로 잡히지 않는다(-T2- 유무·하위 Section 분기). 그래서
+# 챕터 단위 스코프는 **wildcard** `FSAR-Part02*Ch{NN}` 로 두 표기·하위섹션을 한 번에
+# 흡수한다(인덱스 실측 확인). DSL 빌더가 값의 `*` 를 보고 wildcard 절로 변환한다.
+#
+# FSAR 챕터 의미 맵(코퍼스 DocumentTitle ground-truth — NUREG-0800/RG1.206 구조 +
+# NuScale 특화 Ch20/21). 모델 프롬프트와 코드가 *같은 맵*을 공유한다(단일 진실원천):
+# 프롬프트는 모델이 "ECCS→Ch06" 의미를 알게 하고, 코드는 모델이 낸 챕터 번호를 이 맵으로
+# 검증(범위 밖이면 기각). 표현=모델(챕터 선택), 결정=코드(범위 검증·wildcard 조립).
+_FSAR_CHAPTERS: dict[int, str] = {
+    1: "Introduction and General Description of the Plant",
+    2: "Site Characteristics",
+    3: "Design of Structures, Systems, Components, and Equipment",
+    4: "Reactor",
+    5: "Reactor Coolant System and Connecting Systems",
+    6: "Engineered Safety Features",
+    7: "Instrumentation and Controls",
+    8: "Electric Power",
+    9: "Auxiliary Systems",
+    10: "Steam and Power Conversion System",
+    11: "Radioactive Waste Management",
+    12: "Radiation Protection",
+    13: "Conduct of Operations",
+    14: "Initial Test Program / Verification and Validation",
+    15: "Transient and Accident Analyses",
+    16: "Technical Specifications",
+    17: "Quality Assurance",
+    18: "Human Factors Engineering",
+    19: "Probabilistic Risk Assessment and Severe Accident Evaluation",
+    20: "Mitigation of Beyond-Design-Basis Events",
+    21: "Multi-Module Design Considerations",
+}
+
+# Part 2 외 FSAR Part 의미(코퍼스 DocumentTitle ground-truth). Tier 없음, Part 만.
+_FSAR_PARTS_NON_TIER: dict[int, str] = {
+    1: "General and Financial Information",
+    7: "Exemptions",
+    8: "License Conditions; ITAAC",
+    9: "Withheld Information",
+    10: "Quality Assurance Program Description",
+}
+
+# 모델이 낼 수 있는 FSAR canonical 입력형(관대 수용 후 코드가 정규화):
+#   FSAR-Part02-Ch6 / FSAR-Part02-Ch06 / FSAR-Part2-Ch6 / FSAR-Ch6  → 챕터 wildcard
+#   FSAR-Part1 / FSAR-Part07 …                                       → Part-only exact
+_FSAR_CH_RE = re.compile(r"^FSAR-(?:Part0?2-)?(?:T2-)?Ch0?(\d{1,2})$", re.IGNORECASE)
+_FSAR_PART_RE = re.compile(r"^FSAR-Part0?(\d{1,2})$", re.IGNORECASE)
+
+
+def _validate_fsar_canonical(cid: str, collection: str | None) -> str | None:
+    """FSAR canonical → 인덱스 검색 패턴(결정론). nuscale_FSAR 슬롯에서만 승격.
+
+    - 챕터형(FSAR-...Ch{N}) → **wildcard** `FSAR-Part02*Ch{NN}`(zero-pad). 번호가
+      _FSAR_CHAPTERS(1~21) 밖이면 기각(None). -T2- 유무·하위 Section 을 흡수.
+    - Part-only(FSAR-Part{N}, N≠2) → exact `FSAR-Part{NN}`. _FSAR_PARTS_NON_TIER 에
+      있는 Part 만(1/7/8/9/10). Part2 단독(챕터 없음)은 collection=nuscale_FSAR 가
+      이미 전체 FSAR 라 중복 → 기각(채널 의미 없음).
+    실패 시 None(버림 → lexical-only, recall 안전)."""
+    if not cid:
+        return None
+    cid = cid.strip()
+    # FSAR 는 nuscale_FSAR collection 에서만 의미가 있다(배타 — design 과 같은 군).
+    if collection and collection != "nuscale_FSAR":
+        return None
+    m = _FSAR_CH_RE.match(cid)
+    if m:
+        ch = int(m.group(1))
+        if ch in _FSAR_CHAPTERS:
+            return f"FSAR-Part02*Ch{ch:02d}"  # wildcard — DSL 빌더가 wildcard 절로.
+        return None  # 범위 밖 챕터 → 기각
+    m = _FSAR_PART_RE.match(cid)
+    if m:
+        part = int(m.group(1))
+        if part in _FSAR_PARTS_NON_TIER:
+            return f"FSAR-Part{part:02d}"  # exact(Tier 없음)
+        return None  # Part2(챕터 없음) 또는 미지 Part → 기각
+    return None
+
+
 class QueryFormulator:
     """N2 — Query Formulation. 프롬프트·스키마는 registry 에서 주입(SpecDrivenQuerySource)."""
 
@@ -283,15 +369,22 @@ def _parse(text: str) -> tuple[FormulatedQuery, ...]:
             else:
                 audit["design_dropped"] = True  # 규제/미지정 collection 에 design → 무시.
 
-        # (4) canonical_id — 게이트(정규식 + collection prefix 정합) 통과 시만 승격(§5b.2).
+        # (4) canonical_id — 게이트 통과 시만 승격. FSAR(NuScale, wildcard) 와
+        # NRC_MANUAL(RG/SRP/DSRS/10CFR, exact) 두 검증기를 순차로 시도한다(§5b.2/§9).
+        # FSAR 형(FSAR-... 접두)은 _validate_fsar_canonical 가 챕터→wildcard·범위 검증·
+        # Part 검증을 한다. 그 외는 _validate_canonical_id(정규식+prefix 정합).
         cid = q.get("canonical_id")
         if isinstance(cid, str) and cid.strip():
-            valid = _validate_canonical_id(cid, collection)
+            cid_s = cid.strip()
+            if cid_s.upper().startswith("FSAR-"):
+                valid = _validate_fsar_canonical(cid_s, collection)
+            else:
+                valid = _validate_canonical_id(cid_s, collection)
             if valid:
                 _put(_CANONICAL_FIELD, valid,
                      str(q.get("canonical_id_mode") or "boost").strip().lower())
             else:
-                audit["canonical_id_rejected"] = True  # 정규식/prefix 불일치 → 버림.
+                audit["canonical_id_rejected"] = True  # 정규식/범위/prefix 불일치 → 버림.
 
         out.append(FormulatedQuery(slot_name=slot, query_text=qt,
                                    target=target, filters=filters,

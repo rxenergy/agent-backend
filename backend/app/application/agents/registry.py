@@ -42,29 +42,6 @@ class AgentDeps:
     # 와 무관하게 이 source 로 LLM 분류기를 강제 구성한다(variant 격리, 원칙 1).
     # None 이면 변형이 deps.classifier(settings 기반) 폴백.
     classification_prompt_source: Any = None
-    # v3.1 Node 3 정보 요구 인스턴스화 프롬프트 source(registry 호스팅, sha 핀).
-    # None 이면 변형이 Node 3 에서 부트 배선 오류로 처리(프롬프트는 코드 인라인 금지).
-    information_need_prompt_source: Any = None
-    # agentic_finder N0 질의 번역 프롬프트 source(registry 호스팅, sha 핀). 워크플로우
-    # 내부는 영어, 최종 출력만 사용자 언어. None 이면 변형이 N0 에서 부트 배선 오류로
-    # 처리(프롬프트는 코드 인라인 금지).
-    query_translate_prompt_source: Any = None
-    # agentic_finder N2 답변 사양 인스턴스화 프롬프트 source(registry 호스팅, sha 핀).
-    # None 이면 변형이 N2 에서 부트 배선 오류로 처리(프롬프트는 코드 인라인 금지).
-    answer_spec_prompt_source: Any = None
-    # agentic_finder N3 Finder 시스템 프롬프트 source(registry 호스팅, sha 핀).
-    # None 이면 변형이 N3 에서 부트 배선 오류로 처리(프롬프트는 코드 인라인 금지).
-    finder_prompt_source: Any = None
-    # react_minimal_v1 N1 Retrieval(ReAct 루프) 시스템 프롬프트 source(registry 호스팅).
-    # None 이면 변형이 N1 에서 부트 배선 오류로 처리(프롬프트는 코드 인라인 금지).
-    react_retrieval_prompt_source: Any = None
-    # react_minimal_v1 N2 Generation 프롬프트 source(registry 호스팅, sha 핀).
-    # None 이면 변형이 N2 에서 부트 배선 오류로 처리.
-    react_generation_prompt_source: Any = None
-    # react_echo_v1 N1 Retrieval 프롬프트 source(키워드-보존형, registry 호스팅 sha 핀).
-    # react_minimal 의 react_retrieval_v1 과 별개 profile(react_retrieval_echo_v1)이라
-    # echo variant 의 retrieval policy_hash 가 구별된다. None 이면 N1 부트 배선 오류.
-    react_echo_retrieval_prompt_source: Any = None
     # spec_driven_v1 — 검색 앞단 두 모델 노드 + 생성 프롬프트 source(registry 호스팅, sha
     # 핀). N1 Define Spec / N2 Query Formulation / N4 Generation. None 이면 변형이 run()
     # 에서 부트 배선 오류로 처리(프롬프트는 코드 인라인 금지).
@@ -78,16 +55,6 @@ class AgentDeps:
     spec_driven_triage_source: Any = None
     spec_driven_general_source: Any = None
     summarizer: "ConversationSummarizer | None" = None
-    # v3.1 (hierarchical_corrective) Node 4 룰 기반 plan 선택기. None 이면
-    # 변형이 단일 hybrid 폴백(RetrievalPlanner.default)을 쓴다.
-    retrieval_planner: Any = None
-    # v3.1 Node 6 5-신호 evaluator. None 이면 변형이 RetrievalEvaluator.default().
-    retrieval_evaluator: Any = None
-    # v3.1 Node 7 결정론 recover. None 이면 변형이 RetrievalRecoverer.default().
-    retrieval_recoverer: Any = None
-    # v3.1 Layer 1 범위 한정(corpus_map). None 이면 변형이 CorpusMap.default()
-    # (scope off, noise floor 0) 폴백.
-    corpus_map: Any = None
     # Pass-through tunables — runners read what they care about.
     tunables: dict[str, Any] = field(default_factory=dict)
 

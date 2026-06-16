@@ -49,16 +49,9 @@ class Settings(BaseSettings):
 
     # Agent variant pool + default selection
     agent_variants_enabled: list[str] = [
-        "agentic_finder_v4",
-        "hierarchical_corrective_v3_1",
-        "react_minimal_v1",
-        "react_echo_v1",
-        "fake_echo_v0",
+        "spec_driven_v1",
     ]
-    default_variant: str = "agentic_finder_v4"
-
-    # react_minimal_v1 — ReAct Retrieval 루프 턴 backstop(submit_response 미발동 시 종료).
-    react_max_turns: int = 8
+    default_variant: str = "spec_driven_v1"
 
     # spec_driven_v1 — N2 per-slot 멀티쿼리 상한 + N3 1차 floor 정렬 budget.
     # max_context_chunks 는 더 이상 최종 cap 이 아니다(최종 크기는 아래 token budget 이
