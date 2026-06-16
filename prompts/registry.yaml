@@ -135,15 +135,15 @@ spec_driven_general_prompts:
 spec_driven_answer_spec_prompts:
   spec_driven_answer_spec_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "c9ed7781fb8198edfc5daf81e98b77c378f8525ec6eb158a3408fcb7d6b65372"}
-    output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "cfa433336ccb7b4efd8f99c634c33e55636ed135b41c46f2ca1600a172863e7a"}
+    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "d3c7c91b1d7ef7a2774078aeb81a95e0aac52597a5d8fea1e9b4674d266ce1fb"}
+    output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "e06a7c78f4a4c90a658e8f5761b99167b733318c602bdbb5cbb0e76a656ce5e7"}
     # max_tokens — 슬롯 최대 10개(facet 세분)까지 spec JSON 이 들어가도록 상향(700→1100).
     model_options: {temperature: 0.0, max_tokens: 1100}
 
 spec_driven_query_prompts:
   spec_driven_query_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "e4178caa77889b809ff7083cee363e09ab043cd47ca040763815162422c05278"}
+    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "cb59a7e51412ce34449a8ec884c2fe7c00d05e7b592583cedbc0d46d8c0de6c6"}
     output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "a33c68059af2c5e60a0e26e99239ff9cc9da42679419feaaf4fe5dac71b3ecc0"}
     # max_tokens — 슬롯당 1쿼리 최대 10개 + 스코프 4채널(status/design/canonical_id +
     # 각 mode)이 쿼리당 추가되어 JSON 이 길어짐 → 상향(1100→1400, search_scope_metadata).
