@@ -7,16 +7,24 @@ COMPOSE_ONPREM := docker compose --env-file infra/env/onprem.env --profile onpre
   -f infra/compose/compose.yml -f infra/compose/compose.onprem.yml
 
 # 서브 노드(2번째 vLLM) — standalone compose. 메인 스택과 독립.
-# Docker Compose 는 단일 호스트만 제어하므로 서브 노드 작업은 SSH 로 원격 실행한다.
+#
+# Docker Compose 는 단일 호스트만 제어하므로, 서브 노드는 Docker Context(ssh://)로
+# 원격 제어한다 — 두 머신을 Docker 네이티브로 묶는 표준 방식. compose 파일/env 는
+# 메인에서 읽고(클라이언트), 컨테이너 실행만 서브 데몬에서 일어난다. 서브 노드에는
+# 어떤 파일도 두지 않는다(파일 전송 불필요).
+#
+# ⚠ bind-mount(모델 볼륨)는 *원격 데몬* 기준으로 해석되므로, compose 의 host 경로는
+#   서브 노드의 절대경로여야 한다 → onprem.sub.env 의 VLLM_MODELS_HOST_DIR 로 주입.
+#
 # 접속 정보는 변수로 오버라이드 가능: `make up-onprem SUB_SSH=rx@10.0.0.9`
 SUB_SSH ?= rx@192.168.100.11
-SUB_DIR ?= /home/rx/rx-git/agent-backend
-COMPOSE_ONPREM_SUB := docker compose -f infra/compose/compose.onprem.sub.yml \
-  --env-file infra/env/onprem.sub.env
+SUB_CTX ?= onprem-sub
+COMPOSE_ONPREM_SUB := docker -c $(SUB_CTX) compose \
+  -f infra/compose/compose.onprem.sub.yml --env-file infra/env/onprem.sub.env
 
 .PHONY: help build up-local down logs ps test test-integration smoke smoke-stream seed seed-encode opensearch-init os-snapshot os-restore os-snapshots verify-w1 fmt clean migrate psql prompts-validate \
   build-onprem up-onprem up-onprem-main up-onprem-sub down-onprem down-onprem-main down-onprem-sub \
-  logs-onprem logs-onprem-sub ps-onprem ps-onprem-sub clean-onprem export-onprem deploy-onprem-sub _guard-local-only \
+  logs-onprem logs-onprem-sub ps-onprem ps-onprem-sub clean-onprem export-onprem _onprem-sub-ctx _guard-local-only \
   aws-ecr-login aws-build aws-push aws-deploy aws-setup aws-destroy aws-ssh aws-logs aws-status aws-secrets-put
 
 help:
@@ -33,18 +41,18 @@ help:
 	@echo "  clean      Tear down stack and remove volumes"
 	@echo ""
 	@echo "On-premise (air-gapped + local vLLM, 2 nodes):"
+	@echo "  sub node 는 Docker Context(ssh://)로 원격 제어 — 파일은 메인에만 존재."
 	@echo "  build-onprem     Build agent-api/open-webui images for onprem profile (main node)"
-	@echo "  up-onprem        Bring up BOTH nodes (main stack local + sub vLLM via SSH)"
+	@echo "  up-onprem        Bring up BOTH nodes (main stack local + sub vLLM via docker context)"
 	@echo "  up-onprem-main   Bring up main node stack only"
-	@echo "  up-onprem-sub    Bring up sub node vLLM only (SSH → \$$(SUB_SSH))"
+	@echo "  up-onprem-sub    Bring up sub node vLLM only (docker -c \$$(SUB_CTX) → \$$(SUB_SSH))"
 	@echo "  down-onprem      Tear down BOTH nodes (keeps volumes)"
 	@echo "  down-onprem-main Tear down main node stack only"
-	@echo "  down-onprem-sub  Tear down sub node vLLM only (SSH)"
+	@echo "  down-onprem-sub  Tear down sub node vLLM only (remote)"
 	@echo "  logs-onprem      Tail agent-api logs (main node)"
-	@echo "  logs-onprem-sub  Tail sub node vLLM logs (SSH)"
+	@echo "  logs-onprem-sub  Tail sub node vLLM logs (remote)"
 	@echo "  ps-onprem        Show main node stack status"
-	@echo "  ps-onprem-sub    Show sub node vLLM status (SSH)"
-	@echo "  deploy-onprem-sub Rsync repo + models to sub node (SUB_SSH:SUB_DIR)"
+	@echo "  ps-onprem-sub    Show sub node vLLM status (remote)"
 	@echo "  clean-onprem     Tear down main node stack and remove volumes"
 	@echo "  export-onprem    Collect run data (events/traces/memory) → analysis dataset"
 
@@ -166,30 +174,40 @@ psql:
 
 # ── On-premise targets (2 nodes) ──────────────────────────────────────────
 # 메인 노드에서 `make <target>` 으로 양 노드(메인 전체 스택 + 서브 vLLM)를 제어한다.
-# Docker Compose 는 단일 호스트만 제어하므로, 서브 노드 작업은 SSH(SUB_SSH)로 원격 실행한다.
+# Docker Compose 는 단일 호스트만 제어하므로, 서브 노드는 Docker Context(ssh://)로
+# 원격 데몬을 제어한다 — compose 파일/env 는 메인에만 두고 실행만 서브에서 일어난다.
 #
 # 사전 준비:
 #   [메인] 1) compressed-tensors(gemma4) 지원 vLLM 이미지를 호스트 docker 데몬에 적재
 #          2) ./models/gemma4-awq 에 gemma-4-26B-A4B-it-AWQ-4bit 양자화 가중치 사전 적재
 #          3) (선택) hf_cache 볼륨에 임베더(e5/fermi) 사전 동기화 (HF_HUB_OFFLINE=1)
-#   [서브] 1) `make deploy-onprem-sub` 로 레포+모델을 서브 노드(SUB_DIR)에 동기화
-#          2) 서브 노드 docker 데몬에 vLLM 이미지 + NVIDIA Container Toolkit
-#          3) 메인→서브 SSH 키 기반 무인 접속(BatchMode) 가능
+#   [서브] 1) 서브 노드 docker 데몬에 vLLM 이미지 + NVIDIA Container Toolkit
+#          2) 메인→서브 SSH 키 기반 무인 접속(BatchMode) 가능 (docker context 가 재사용)
+#          3) 모델 가중치를 서브 노드 절대경로에 적재하고 onprem.sub.env 의
+#             VLLM_MODELS_HOST_DIR 로 그 경로를 지정(bind-mount 는 원격 데몬 기준 해석).
 build-onprem:
 	$(COMPOSE_ONPREM) build agent-api open-webui
 
-# 양 노드 동시 기동 (메인 로컬 + 서브 SSH). 서브 vLLM 은 LLM_POOL `gemma-4-26b-sub` 가 가리킨다.
+# 서브 노드 제어용 docker context 를 보장한다(없으면 생성, 엔드포인트 달라지면 갱신).
+# ssh:// 엔드포인트는 메인의 SSH 설정/키를 그대로 재사용한다(BatchMode 무인 접속 전제).
+_onprem-sub-ctx:
+	@docker context inspect $(SUB_CTX) >/dev/null 2>&1 \
+	  && docker context update $(SUB_CTX) --docker "host=ssh://$(SUB_SSH)" >/dev/null \
+	  || docker context create $(SUB_CTX) --docker "host=ssh://$(SUB_SSH)" >/dev/null
+	@echo "==> [서브] docker context '$(SUB_CTX)' → ssh://$(SUB_SSH)"
+
+# 양 노드 동시 기동 (메인 로컬 + 서브 원격 데몬). 서브 vLLM 은 LLM_POOL `gemma-4-26b-sub` 가 가리킨다.
 up-onprem: up-onprem-main up-onprem-sub
 	@echo ""
-	@echo "기동 명령 전송 완료. vLLM 모델 로딩은 수 분 걸립니다 → make ps-onprem / make ps-onprem-sub"
+	@echo "양 노드 기동 완료 (vLLM healthy 확인됨). 상태: make ps-onprem / make ps-onprem-sub"
 
 up-onprem-main:
 	@echo "==> [메인] onprem 스택 기동"
 	$(COMPOSE_ONPREM) up -d
 
-up-onprem-sub:
-	@echo "==> [서브] vLLM 기동 ($(SUB_SSH))"
-	ssh -o BatchMode=yes $(SUB_SSH) "cd '$(SUB_DIR)' && $(COMPOSE_ONPREM_SUB) up -d"
+up-onprem-sub: _onprem-sub-ctx
+	@echo "==> [서브] vLLM 기동 (remote daemon)"
+	$(COMPOSE_ONPREM_SUB) up -d --wait
 
 # 양 노드 동시 종료.
 down-onprem: down-onprem-main down-onprem-sub
@@ -197,28 +215,20 @@ down-onprem: down-onprem-main down-onprem-sub
 down-onprem-main:
 	$(COMPOSE_ONPREM) down
 
-down-onprem-sub:
-	ssh -o BatchMode=yes $(SUB_SSH) "cd '$(SUB_DIR)' && $(COMPOSE_ONPREM_SUB) down"
+down-onprem-sub: _onprem-sub-ctx
+	$(COMPOSE_ONPREM_SUB) down
 
 logs-onprem:
 	$(COMPOSE_ONPREM) logs -f agent-api
 
-logs-onprem-sub:
-	ssh -t $(SUB_SSH) "cd '$(SUB_DIR)' && $(COMPOSE_ONPREM_SUB) logs -f"
+logs-onprem-sub: _onprem-sub-ctx
+	$(COMPOSE_ONPREM_SUB) logs -f
 
 ps-onprem:
 	$(COMPOSE_ONPREM) ps
 
-ps-onprem-sub:
-	ssh -o BatchMode=yes $(SUB_SSH) "cd '$(SUB_DIR)' && $(COMPOSE_ONPREM_SUB) ps"
-
-# 레포(compose/env) + 모델을 서브 노드로 rsync. .git/.venv 등 무거운/불필요 항목은 제외.
-# 서브는 vLLM 만 띄우므로 백엔드 빌드는 불필요하나, compose/env/models 동기화는 필요하다.
-deploy-onprem-sub:
-	rsync -a --info=progress2 \
-	  --exclude '.git/' --exclude '.venv/' --exclude '__pycache__/' \
-	  --exclude 'export/' \
-	  ./ $(SUB_SSH):$(SUB_DIR)/
+ps-onprem-sub: _onprem-sub-ctx
+	$(COMPOSE_ONPREM_SUB) ps
 
 clean-onprem:
 	$(COMPOSE_ONPREM) down -v
