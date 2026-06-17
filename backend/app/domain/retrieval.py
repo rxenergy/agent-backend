@@ -121,6 +121,34 @@ class RerankOutput(BaseModel):
     scores: dict[str, float] = Field(default_factory=dict)  # chunk_id → rerank 점수
 
 
+class VerifySlotInput(BaseModel):
+    """retrieval.verify_slot 입력(spec_driven_v2 Node2 검증). 슬롯 1개의 1차 검색
+    결과를 "사용자 질문 + answer_spec + 검색 쿼리" 기준으로 판정한다."""
+
+    model_config = ConfigDict(frozen=True)
+
+    query_text: str               # 사용자 원질의
+    answer_spec: str              # 렌더된 답변 사양 블록(_render_spec_block 산출)
+    slot_name: str
+    slot_query: str               # 이 슬롯의 N2 검색 쿼리(query_text)
+    chunks: list[RetrievedChunk]  # 이 슬롯의 1차 검색 결과
+
+
+class VerifySlotResult(BaseModel):
+    """retrieval.verify_slot 출력. 출력은 청크 *식별자*다(address-not-content 불변 —
+    내용을 옮기지 않고 어떤 청크가 필요/멀티홉인지만 가리킨다). 두 집합 ⊆ 입력 chunk_id.
+
+    `method`("llm"|"fallback")로 silent degrade 방지 — fallback 은 모델 응답 파싱불가/
+    LLM 미가용 시 안전 기본값(necessary=전체, multihop=없음 → 전량 보존·재검색 안 함)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    necessary_chunk_ids: list[str] = Field(default_factory=list)  # 답변에 꼭 필요한 청크
+    multihop_chunk_ids: list[str] = Field(default_factory=list)   # 멀티홉(재검색) 필요 청크
+    rationale: str = ""
+    method: str = "llm"  # "llm" | "fallback"
+
+
 class FollowUpQueryItem(BaseModel):
     """개별 재검색 쿼리 — 참조된 외부 문서 내에서 원래 의도를 재검색하기 위한 쿼리."""
 
@@ -132,13 +160,20 @@ class FollowUpQueryItem(BaseModel):
 
 
 class FollowUpInput(BaseModel):
-    """retrieval.follow_up 도구 입력."""
+    """retrieval.follow_up 도구 입력.
+
+    `answer_spec`/`slot_query`/`necessity_only` 는 spec_driven_v2 N3.5 고도화용
+    (옵셔널 — 미지정 시 v1 동작 byte-identical). `necessity_only=True` 면 모든 외부
+    참조를 추출하지 않고 answer_spec+slot_query 기준 "답변에 꼭 필요한" 참조만 선별한다."""
 
     model_config = ConfigDict(frozen=True)
 
     query_text: str
     chunks: list[RetrievedChunk]
     min_score: float = 0.6
+    answer_spec: str | None = None   # 렌더된 답변 사양 블록(v2). None → v1 동작.
+    slot_query: str | None = None    # 이 슬롯의 N2 검색 쿼리(v2). None → v1 동작.
+    necessity_only: bool = False     # True → 필요-판정 선별(v2). False → 전체 추출(v1).
 
 
 class FollowUpResult(BaseModel):

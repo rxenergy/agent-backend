@@ -89,10 +89,16 @@ class _FakeRefExtractor:
 
     def __init__(self) -> None:
         self.seen_chunks: list[str] = []
+        self.seen_kwargs: list[dict] = []
 
     async def extract_follow_ups(self, query_text, chunk_text,
-                                 current_source_id=None, min_score=0.6):
+                                 current_source_id=None, min_score=0.6,
+                                 answer_spec=None, slot_query=None,
+                                 necessity_only=False):
         self.seen_chunks.append(chunk_text)
+        self.seen_kwargs.append({"answer_spec": answer_spec,
+                                 "slot_query": slot_query,
+                                 "necessity_only": necessity_only})
         # 두 청크가 같은 query_text 를 내도록 해 dedup 도 함께 검증.
         return [{"query_text": "shared-query",
                  "target_source_ids": [current_source_id or "s"],
@@ -122,3 +128,59 @@ async def test_follow_up_tool_awaits_async_extractor_and_dedupes() -> None:
     queries = result.output["follow_up_queries"]
     assert len(queries) == 1
     assert queries[0]["query_text"] == "shared-query"
+    # 하위호환 — 새 필드를 안 넘기면 추출기에 v1 기본값(None/None/False)이 전달된다.
+    assert extractor.seen_kwargs[0] == {
+        "answer_spec": None, "slot_query": None, "necessity_only": False
+    }
+
+
+@pytest.mark.asyncio
+async def test_follow_up_tool_passes_necessity_inputs_to_extractor() -> None:
+    # spec_driven_v2 — answer_spec/slot_query/necessity_only 가 추출기까지 전달되는지 검증.
+    extractor = _FakeRefExtractor()
+    tool = RetrievalFollowUpTool(ref_extractor=extractor, max_concurrency=2)
+    tool_input = FollowUpInput(
+        query_text="q",
+        chunks=[RetrievedChunk(chunk_id="c1", document_id="d", score=0.9,
+                               snippet="RG 1.68", source_id="s1")],
+        answer_spec="intent: compliance\nrequired_slots:\n- governing_clause",
+        slot_query="10 CFR 50.46 ECCS",
+        necessity_only=True,
+    )
+    result = await tool.invoke(tool_input, _CTX)
+    assert result.status == "success"
+    assert extractor.seen_kwargs[0] == {
+        "answer_spec": "intent: compliance\nrequired_slots:\n- governing_clause",
+        "slot_query": "10 CFR 50.46 ECCS",
+        "necessity_only": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_necessity_mode_uses_necessity_system_prompt() -> None:
+    # necessity_only=True 면 SYSTEM_PROMPT_NECESSITY + ANSWER SPEC/SLOT 블록을 싣고,
+    # 미지정 시 기존 SYSTEM_PROMPT_WITH_FOLLOW_UP 를 쓴다(하위호환).
+    from app.adapters.ref_postprocess.ref_extractor_rule import (
+        SYSTEM_PROMPT_NECESSITY,
+        SYSTEM_PROMPT_WITH_FOLLOW_UP,
+    )
+
+    llm = _SchemaEchoLLM({"references": [], "follow_up_queries": []})
+    await extract_refs_with_follow_up(
+        query_text="q", chunk_text="see RG 1.68",
+        settings=RefSettings.from_env(), llm=llm,
+        answer_spec="SPEC-BLOCK", slot_query="SLOT-Q", necessity_only=True,
+    )
+    sys_msg = llm.last_messages[0].content
+    user_msg = llm.last_messages[1].content
+    assert sys_msg == SYSTEM_PROMPT_NECESSITY
+    assert "ANSWER SPEC:" in user_msg and "SPEC-BLOCK" in user_msg
+    assert "SLOT SEARCH QUERY: SLOT-Q" in user_msg
+
+    llm2 = _SchemaEchoLLM({"references": [], "follow_up_queries": []})
+    await extract_refs_with_follow_up(
+        query_text="q", chunk_text="see RG 1.68",
+        settings=RefSettings.from_env(), llm=llm2,
+    )
+    assert llm2.last_messages[0].content == SYSTEM_PROMPT_WITH_FOLLOW_UP
+    assert "ORIGINAL USER QUERY:" in llm2.last_messages[1].content

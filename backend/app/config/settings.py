@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     spec_driven_max_queries: int = 10
     spec_driven_max_context_chunks: int = 10
 
+    # spec_driven_v2 — Node2 슬롯 검증 토글 + 동시 검증 슬롯 상한 + 청크별 동시 호출 상한.
+    # enabled=False 면 검증 도구 미배선 → 단일노드(v1식 전량 보존).
+    # verify_concurrency: 동시에 도는 슬롯 수 캡(러너 _verify_sem). 최대 슬롯 수(≤10)와 맞춤.
+    # verify_chunk_concurrency: 슬롯 fan-out 전체에 걸친 청크별 동시 호출 *전역* 캡
+    #   (SlotVerifierLlm 소유). Node2 전용 노드 max_num_seqs 여유 안에서 잡아 continuous
+    #   batching 을 살리되 큐 적체·타임아웃 캐스케이드를 막는다.
+    spec_driven_v2_verify_enabled: bool = True
+    spec_driven_v2_verify_concurrency: int = 10
+    spec_driven_v2_verify_chunk_concurrency: int = 48
+
     # Classifier (Node 1)
     classifier_backend: Literal["rule", "llm", "hybrid"] = "rule"
     classification_threshold: float = 0.35
@@ -91,6 +101,11 @@ class Settings(BaseSettings):
     llm_pool: list[LLMPoolEntry] = []
     default_llm: str = "fake-echo"
     utility_llm: str = ""
+    # spec_driven_v2 Node2 — 슬롯 검증을 도는 보조 LLM(SECONDARY_LLM, 예: gemma-4-26b-sub).
+    # 빈 값이면 default_llm 로 폴백(단일노드 graceful degrade — utility_llm 패턴과 동형).
+    # 설정됐으나 pool 에 없으면 boot fail-fast(오타 방지). openai_compat 엔트리일 때만
+    # 검증 도구 배선(guided_json 요구 — anthropic/fake 는 graceful skip).
+    secondary_llm: str = ""
     llm_timeout_s: float = 30.0
     llm_max_attempts: int = 2
 

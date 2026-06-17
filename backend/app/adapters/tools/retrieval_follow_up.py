@@ -34,12 +34,15 @@ class RetrievalFollowUpTool:
     name = "retrieval.follow_up"
     version = "v1"
 
-    # 동시 추출 청크 수 상한. DGX Spark 통합메모리(~121GB 점유)의 단일 vLLM 을
-    # 에이전트 본체(N0~N4 생성)와 공유하므로, 청크별 추출(max_tokens·guided_json)을
-    # 무제한 동시 발사하면 KV cache 경쟁으로 청크당 디코딩이 느려져 per-call 타임아웃
-    # → 재시도 캐스케이드를 부른다(실측 91s/8청크). 동시성을 낮추면 자원 추가 없이
-    # 청크당 빨라져 도구 예산(registry 100s) 안에 안정적으로 든다.
-    _MAX_CONCURRENCY = 3
+    # 동시 추출 청크 수 상한 — 슬롯 fan-out 전체에 걸친 *전역* 캡(도구가 싱글톤이라
+    # self._sem 을 모든 슬롯이 공유). 청크별 추출은 독립 HTTP 요청이므로 동시에 쏘면
+    # vLLM 의 continuous batching 이 한 GPU step 에 묶어 처리한다 — 이 batching 을
+    # 살리도록 캡을 vLLM max_num_seqs 여유 안에서 넉넉히 둔다(기본 8).
+    # 주의: utility vLLM 은 에이전트 본체(N0~N4 생성)와 통합메모리(DGX Spark)를 공유하므로,
+    # 캡을 너무 높이면 in-flight 요청 폭주 시 KV cache 경쟁으로 청크당 디코딩이 느려져
+    # per-call 타임아웃 → 재시도 캐스케이드가 날 수 있다(과거 무제한 발사 시 실측 91s/8청크).
+    # 환경별 최적값은 DOCUMENTS_REF_MAX_CONCURRENCY 로 조정한다(profiles.py).
+    _MAX_CONCURRENCY = 8
 
     def __init__(self, *, ref_extractor: RefExtractorPort,
                  max_concurrency: int | None = None):
@@ -77,6 +80,11 @@ class RetrievalFollowUpTool:
                     chunk_text=chunk_text,
                     current_source_id=chunk.source_id,
                     min_score=tool_input.min_score,
+                    # spec_driven_v2 N3.5 — answer_spec+slot_query 기준 필요-판정 선별
+                    # (옵셔널, 미지정 시 v1 전체 추출). 입력 필드 기본값이 v1 byte-identical.
+                    answer_spec=tool_input.answer_spec,
+                    slot_query=tool_input.slot_query,
+                    necessity_only=tool_input.necessity_only,
                 )
 
         results = await asyncio.gather(

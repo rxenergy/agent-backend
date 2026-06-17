@@ -53,6 +53,9 @@ class LlmRefExtractor:
         chunk_text: str,
         current_source_id: str | None = None,
         min_score: float = 0.6,
+        answer_spec: str | None = None,
+        slot_query: str | None = None,
+        necessity_only: bool = False,
     ) -> list[dict[str, Any]]:
         result = await resolve_text_with_follow_up(
             query_text=query_text,
@@ -62,6 +65,9 @@ class LlmRefExtractor:
             llm=self._llm,
             current_source_id=current_source_id,
             min_score=min_score,
+            answer_spec=answer_spec,
+            slot_query=slot_query,
+            necessity_only=necessity_only,
         )
         return [
             {
