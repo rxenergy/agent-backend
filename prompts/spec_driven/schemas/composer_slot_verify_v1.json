@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["supported", "partial", "unsupported"],
+      "description": "Whether the section draft's factual claims are entailed by CONTEXT."
+    },
+    "unsupported_claims": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Verbatim draft sentences CONTEXT does not support (may be empty)."
+    }
+  },
+  "required": ["verdict"],
+  "additionalProperties": false
+}

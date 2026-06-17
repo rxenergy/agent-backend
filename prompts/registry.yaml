@@ -162,6 +162,36 @@ spec_driven_generation_prompts:
     # 에서 입력 예산(200K)과 합쳐도 여유(200K+16K≪256K).
     model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 16384, seed: 7}
 
+# composer — spec_driven_v1 N0~N3.5 를 계승하고 N4 만 슬롯 단위로 대체한 variant 의 N4
+# 프롬프트(설계 docs/plans/spec_driven_slotwise_generation.design.v1.md).
+#   composer_slot      — 슬롯 1개 생성(generation_v1 의 4축을 슬롯 facet 범위로 좁힘 +
+#                        이전 슬롯 요지(PRIOR SECTIONS) 참조로 연속성·중복 회피). 자유 텍스트.
+#   composer_synthesize— 모든 슬롯 출력 후 "핵심 정리 + 다음 단계 제안" 닫음 블록(본문
+#                        재출력 금지 — 슬롯은 이미 조기 스트리밍됨). 자유 텍스트.
+#   composer_slot_verify— L1 groundedness 게이트(opt-in, json_schema). 슬롯 출력↔CONTEXT
+#                        entailment 판정만(생성 아님 — self-verification 금지).
+# 미배선이어도 composer 는 계승한 generation_v1 프롬프트로 graceful 동작(점진 도입).
+composer_slot_prompts:
+  composer_slot_v1:
+    profile_version: v1
+    prompt:        {path: spec_driven/composer_slot_v1.md, version: v1, sha256: "ce6c3586094ca499ffd53bd8333f3b555ab789a13f804bf00a7721079ab8b07a"}
+    # max_tokens — 슬롯 1구획이라 단일 N4(16384)보다 작게. 슬롯당 폭주 방지·지연 단축.
+    model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 3000, seed: 7}
+
+composer_synthesize_prompts:
+  composer_synthesize_v1:
+    profile_version: v1
+    prompt:        {path: spec_driven/composer_synthesize_v1.md, version: v1, sha256: "ccc23b1780572f7d11394965d79a1d679019c4b60d846f55902436656ed4e56f"}
+    # 닫음 블록(정리+다음액션)이라 짧다 — 본문 재출력 금지.
+    model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 1500, seed: 7}
+
+composer_slot_verify_prompts:
+  composer_slot_verify_v1:
+    profile_version: v1
+    prompt:        {path: spec_driven/composer_slot_verify_v1.md,            version: v1, sha256: "eb921608e28d1cbe6a88162db11aba62dc51a0aeb88f75e2b0b73b2ae378751e"}
+    output_schema: {path: spec_driven/schemas/composer_slot_verify_v1.json,  version: v1, sha256: "cd0245c1c62a37d13f2cead80cc38876daf9d1cf63f027fed9c8eb1ce6ea27c2"}
+    model_options: {temperature: 0.0, max_tokens: 500}
+
 prompt_profiles:
 
   # === O1 Vendor ===

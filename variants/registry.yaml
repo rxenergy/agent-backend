@@ -29,3 +29,15 @@ variants:
       - retrieval.search
     required_scenarios: []
     capability_tags: [spec_driven, retrieval, stateless, keyword_fidelity]
+
+  # composer — spec_driven_v1 의 N0~N3.5 를 계승하고 N4 Generation 만 슬롯 단위 파이프라인
+  # (슬롯별 순차 생성 + 슬롯 groundedness 게이트 + 최종 종합)으로 대체한 variant. 설계:
+  # docs/plans/spec_driven_slotwise_generation.design.v1.md. 검색·도구·세션·재현은 동일
+  # (retrieval.search). 슬롯 CONTEXT 서브셋으로 1024 local-window 한계를 완화하고, 외부
+  # 슬롯 병렬검색과 검색-생성 파이프라인으로 지연을 단축(후속 연동).
+  composer:
+    compatible_llms: ["*"]
+    required_tools:
+      - retrieval.search
+    required_scenarios: []
+    capability_tags: [spec_driven, retrieval, slotwise, composition, stateless]
