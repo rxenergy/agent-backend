@@ -111,8 +111,22 @@ def build_hybrid_query(
     def _has_glob(v: Any) -> bool:
         return isinstance(v, str) and ("*" in v or "?" in v)
 
+    # range dict 지원(spec_driven 10CFR Part→page) — filters 값이 dict 이고 gte/lte/gt/lt
+    # 키를 가지면 `range` 절로 변환한다. 10CFR canonical 의 볼륨 묶음(Part1-50, ~1000p)을
+    # Part 단위 페이지 구간으로 좁히는 데 쓴다(page_range 는 integer_range 타입 — relation
+    # intersects/within/contains 지원, 기본 intersects: Part 구간과 chunk span 이 겹치면 회수).
+    # term/terms/wildcard 분기와 배타 — net-neutral(기존 스칼라/리스트 값은 영향 없음).
+    _RANGE_KEYS = ("gte", "lte", "gt", "lt", "relation")
+
+    def _is_range(v: Any) -> bool:
+        return isinstance(v, dict) and any(k in v for k in ("gte", "lte", "gt", "lt"))
+
     for field_name, value in (ti.filters or {}).items():
         if value is None or value == [] or value == "":
+            continue
+        if _is_range(value):
+            clause = {k: v for k, v in value.items() if k in _RANGE_KEYS}
+            filter_clauses.append({"range": {field_name: clause}})
             continue
         if isinstance(value, (list, tuple, set)):
             vals = [v for v in value if v not in (None, "")]

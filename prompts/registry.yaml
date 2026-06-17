@@ -122,7 +122,7 @@ classification_prompts:
 spec_driven_triage_prompts:
   spec_driven_triage_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/triage_v1.md,            version: v1, sha256: "279b0ac135b41828240462080c8d94a5ef79318e5060f5ec8f06f1cee4a87820"}
+    prompt:        {path: spec_driven/triage_v1.md,            version: v1, sha256: "1c969d779d21a811bb09d63d9cd3bba9e2dcdd2aa1b843437e503675b3776b93"}
     output_schema: {path: spec_driven/schemas/triage_v1.json,  version: v1, sha256: "347c9af3b64434746b72098e8d0f7e465c3c82c691ac236d7d0c309695c995bd"}
     model_options: {temperature: 0.0, max_tokens: 300}
 
@@ -135,7 +135,7 @@ spec_driven_general_prompts:
 spec_driven_answer_spec_prompts:
   spec_driven_answer_spec_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "d3c7c91b1d7ef7a2774078aeb81a95e0aac52597a5d8fea1e9b4674d266ce1fb"}
+    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "76ffc6dc02438a41138ff571b1e0e7c3237b58865c7f9ee1ffc80fd587dd4c1f"}
     output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "e06a7c78f4a4c90a658e8f5761b99167b733318c602bdbb5cbb0e76a656ce5e7"}
     # max_tokens — 슬롯 최대 10개(facet 세분)까지 spec JSON 이 들어가도록 상향(700→1100).
     model_options: {temperature: 0.0, max_tokens: 1100}
@@ -143,8 +143,8 @@ spec_driven_answer_spec_prompts:
 spec_driven_query_prompts:
   spec_driven_query_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "cb59a7e51412ce34449a8ec884c2fe7c00d05e7b592583cedbc0d46d8c0de6c6"}
-    output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "a33c68059af2c5e60a0e26e99239ff9cc9da42679419feaaf4fe5dac71b3ecc0"}
+    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "c626505dc75012f6676e156c230424eab2856b815064d7c705302441bd72c28f"}
+    output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "6a93ef879516d1923328e47ef7ab9a1955238c94620bd70ca4526bd8e9462d29"}
     # max_tokens — 슬롯당 1쿼리 최대 10개 + 스코프 4채널(status/design/canonical_id +
     # 각 mode)이 쿼리당 추가되어 JSON 이 길어짐 → 상향(1100→1400, search_scope_metadata).
     model_options: {temperature: 0.0, max_tokens: 1400}
@@ -152,7 +152,7 @@ spec_driven_query_prompts:
 spec_driven_generation_prompts:
   spec_driven_generation_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "b3088ac960d3817e14f1ccf9414ef7b3028211712ad68905e926225766f34542"}
+    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "eb3e0153ea8ebfe4174f6a8c1d1aa84e7124d269b6218c16fd769f89b82acd69"}
     # top_p — 구조화된 규제 산문의 nucleus 를 좁혀 형식 일관성↑(샘플링 탐색폭↓).
     # seed — 재현성(원칙 5): 같은 프롬프트·옵션이면 OpenAI-compat/vLLM 이 동일 토큰열.
     # max_tokens — full 모드(chunk 전문+표)로 확장된 컨텍스트의 모든 facet(수치·한계값·

@@ -95,6 +95,23 @@ def test_hybrid_dsl_no_filter_when_scenario_object_unknown():
     assert "filter" not in hq.dsl["query"]["hybrid"]
 
 
+def test_hybrid_dsl_range_dict_filter_becomes_range_clause():
+    """filters 값이 range dict(gte/lte/relation)면 `range` 절로 변환(spec_driven 10CFR
+    Part→page). term/terms/wildcard 분기와 배타 — 스칼라/리스트 값은 영향 없음."""
+    hq = build_hybrid_query(
+        _input(filters={
+            "doc_metadata.std_canonical_id.keyword": ["10CFR-Part1-50"],
+            "page_range": {"gte": 853, "lte": 1123, "relation": "intersects"},
+        }),
+        dense_encoder=_FakeDense(),
+        sparse_encoder=_FakeSparse(),
+    )
+    clauses = hq.dsl["query"]["hybrid"]["filter"]["bool"]["filter"]
+    assert {"terms": {"doc_metadata.std_canonical_id.keyword": ["10CFR-Part1-50"]}} in clauses
+    assert {"range": {"page_range": {"gte": 853, "lte": 1123,
+                                     "relation": "intersects"}}} in clauses
+
+
 def test_hybrid_dsl_empty_sparse_falls_back_to_match_none():
     hq = build_hybrid_query(
         _input(),

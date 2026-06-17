@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from app.application.agents.events import LazyReasoning, current_emitter
@@ -70,6 +71,7 @@ def _derive_collection(text: str) -> str | None:
 _STATUS_FIELD = "doc_metadata.std_status.keyword"
 _DESIGN_FIELD = "doc_metadata.std_design.keyword"
 _CANONICAL_FIELD = "doc_metadata.std_canonical_id.keyword"
+_PAGE_RANGE_FIELD = "page_range"  # integer_range — 10CFR Part 페이지 구간 스코프(설계 §4).
 
 # std_status 는 RG/SRP/DSRS 만 보유(10CFR/FR/nuscale_* 빈값).
 _STATUS_VALUES = frozenset({
@@ -107,6 +109,65 @@ def _validate_canonical_id(cid: str, collection: str | None) -> str | None:
                 return None
             return cid
     return None
+
+
+# === 10CFR Part→Page 스코프 맵 (설계 spec_driven_10cfr_part_page_map.design.v1) ============
+# 문제: 10CFR std_canonical_id 는 govinfo 연차판 *볼륨* 단위(`10CFR-Part1-50` 등 ~1,000p
+# 묶음)라 Part 단위 스코프가 불가능하다(chunk 의 part_no 는 0.3%만 채워져 실측상 못 씀).
+# 해법: 원자력 관련 Part 의 (vol_base, page_start, page_end) 정적 맵(scripts/build_10cfr_
+# part_page_map.py 가 본문 PART 헤더 + §섹션 밀도로 추출)을 로드해, Part 식별 시 ① page_range
+# 범위 필터 + ② 볼륨 canonical 키를 합성한다(교집합 = Part 페이지 구간만). 맵 miss/예약 Part
+# 는 page_range 미합성 → 볼륨 canonical 또는 lexical-only 폴백(recall 안전).
+_PART_PAGES_PATH = Path(__file__).with_name("_10cfr_part_pages.json")
+
+
+def _load_part_pages() -> dict[str, dict[str, Any]]:
+    try:
+        data = json.loads(_PART_PAGES_PATH.read_text(encoding="utf-8"))
+        parts = data.get("parts")
+        return parts if isinstance(parts, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}  # 맵 부재/손상 → 폴백(net-neutral — 기존 볼륨 canonical 동작).
+
+
+_PART_PAGES: dict[str, dict[str, Any]] = _load_part_pages()
+
+# canonical_id 에서 10CFR Part 번호 추출: `10CFR-Part50` / `10CFR-Part1-50`(볼륨, from-to).
+_TENCFR_PART_RE = re.compile(r"^10CFR-Part0*(\d+)(?:-0*(\d+))?$", re.IGNORECASE)
+
+
+def _resolve_10cfr_part_pages(cid: str) -> dict[str, Any] | None:
+    """10CFR canonical 에서 *단일 Part* 를 식별해 맵 조회 결과를 반환(결정론).
+
+    반환: {part, vol_canonical, page_range|None, reserved, resolved} | None(10CFR Part 아님).
+    - 단일 Part(`10CFR-Part50`): 맵 hit 시 page_range + 그 Part 가 속한 볼륨 canonical.
+    - 볼륨형(`10CFR-Part1-50`, from≠to): 이미 볼륨 키이므로 page 미합성(그대로 둠 — resolved=False).
+    """
+    m = _TENCFR_PART_RE.match(cid.strip())
+    if not m:
+        return None
+    lo = int(m.group(1))
+    hi = int(m.group(2)) if m.group(2) else lo
+    if lo != hi:
+        # 볼륨형(범위) — 이미 묶음 키. Part 단위 페이지 좁힘 대상 아님(그대로 캐노니컬 유지).
+        return {"part": None, "vol_canonical": cid.strip(), "page_range": None,
+                "reserved": False, "resolved": False}
+    entry = _PART_PAGES.get(str(lo))
+    if not entry:
+        return {"part": lo, "vol_canonical": None, "page_range": None,
+                "reserved": False, "resolved": False}  # 맵 miss → 폴백.
+    if entry.get("reserved"):
+        return {"part": lo, "vol_canonical": None, "page_range": None,
+                "reserved": True, "resolved": False}  # 예약 Part(본문 없음, 예: Part 53).
+    ps, pe = entry.get("page_start"), entry.get("page_end")
+    vol_base = entry.get("vol_base")
+    # 볼륨 canonical 키: vol1 → 10CFR-Part1-50, vol2 → 10CFR-Part51-199(인덱스 실측 표기).
+    vol_canonical = {"title10-vol1": "10CFR-Part1-50",
+                     "title10-vol2": "10CFR-Part51-199"}.get(vol_base)
+    pr = ({"gte": int(ps), "lte": int(pe), "relation": "intersects"}
+          if ps is not None and pe is not None else None)
+    return {"part": lo, "vol_canonical": vol_canonical, "page_range": pr,
+            "reserved": False, "resolved": pr is not None}
 
 
 # === FSAR canonical_id (NuScale 신청자 문서 — design 스코프와 결합) ===================
@@ -381,13 +442,30 @@ def _parse(text: str) -> tuple[FormulatedQuery, ...]:
         cid = q.get("canonical_id")
         if isinstance(cid, str) and cid.strip():
             cid_s = cid.strip()
+            cid_mode = str(q.get("canonical_id_mode") or "boost").strip().lower()
             if cid_s.upper().startswith("FSAR-"):
                 valid = _validate_fsar_canonical(cid_s, collection)
             else:
                 valid = _validate_canonical_id(cid_s, collection)
             if valid:
-                _put(_CANONICAL_FIELD, valid,
-                     str(q.get("canonical_id_mode") or "boost").strip().lower())
+                # 10CFR 단일 Part → 볼륨 canonical 환산 + page_range 좁힘(설계 §3.3). page_range 는
+                # 의미상 hard-scope 라 mode=filter 일 때만 filters 에 싣는다(boost 면 페이지 범위
+                # 의미가 약해 생략 — 볼륨 boost 만). 맵 miss/예약/볼륨형은 page 미합성(폴백).
+                part_info = (_resolve_10cfr_part_pages(valid)
+                             if collection == "10CFR" or valid.upper().startswith("10CFR-")
+                             else None)
+                if part_info and part_info.get("vol_canonical"):
+                    _put(_CANONICAL_FIELD, part_info["vol_canonical"], cid_mode)
+                else:
+                    _put(_CANONICAL_FIELD, valid, cid_mode)
+                if part_info:
+                    audit["canonical_part"] = part_info.get("part")
+                    audit["page_range_resolved"] = bool(part_info.get("resolved"))
+                    if part_info.get("reserved"):
+                        audit["canonical_part_reserved"] = True
+                    pr = part_info.get("page_range")
+                    if pr and cid_mode == "filter":
+                        filters[_PAGE_RANGE_FIELD] = pr
             else:
                 audit["canonical_id_rejected"] = True  # 정규식/범위/prefix 불일치 → 버림.
 
@@ -503,6 +581,12 @@ def _dedup_queries(
                 parts.append(f"filter:{field}={','.join(sorted(q.filters[field]))}")
             elif field in q.target:
                 parts.append(f"boost:{field}={','.join(sorted(q.target[field]))}")
+        # page_range(10CFR Part 좁힘) 는 dict 값 — 정렬된 항목으로 직렬화. 동일 query_text 라도
+        # Part 페이지 구간이 다르면 별개 검색이므로 접지 않는다.
+        if _PAGE_RANGE_FIELD in q.filters:
+            pr = q.filters[_PAGE_RANGE_FIELD]
+            parts.append(f"filter:{_PAGE_RANGE_FIELD}="
+                         + ",".join(f"{k}={pr[k]}" for k in sorted(pr)))
         scope_key = "|".join(parts)
         key = (" ".join(q.query_text.lower().split()), scope_key)
         if key in seen:

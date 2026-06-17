@@ -20,6 +20,10 @@ needs to know *which edition* and *which design* the evidence comes from.
     Design Approval Application (SDAA)**, Docket 05200050. A *separate* design built on US600.
   - **PreApp** — pre-application-stage documents that predate the DCA.
   The designs' figures differ (power / thermal-hydraulic conditions); do not blend them.
+- **`10CFR` is bundled into annual-edition volumes spanning many Parts** (vol1 = Parts
+  1–50, vol2 = Parts 51–199). A citation like "10 CFR 50.46" is Part 50; the evidence was
+  scoped to that Part's page span within the volume, so you can state the basis as "10 CFR
+  Part 50 (Title 10 vol1 annual edition)" when it clarifies the source.
 
 **When the scope choice shapes the answer, state its basis briefly** — e.g. "design
 unspecified, so this draws on US600 (DCA); US460 (SDAA) is a separate later design", or

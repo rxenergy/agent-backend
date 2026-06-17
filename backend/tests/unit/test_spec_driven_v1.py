@@ -26,12 +26,14 @@ from app.application.context.pack import ContextBuilder
 from app.application.intake.spec_driven_query import (
     _CANONICAL_FIELD,
     _DESIGN_FIELD,
+    _PAGE_RANGE_FIELD,
     _STATUS_FIELD,
     _attach_targets,
     _dedup_queries,
     _ensure_references,
     _parse,
     _reference_is_scoped,
+    _resolve_10cfr_part_pages,
     _strip_scoped_references,
     _validate_canonical_id,
     _validate_fsar_canonical,
@@ -674,6 +676,98 @@ def test_parse_fsar_canonical_rejected_out_of_range() -> None:
     ]}))
     assert _CANONICAL_FIELD not in q.filters and _CANONICAL_FIELD not in q.target
     assert q.scope_audit.get("canonical_id_rejected") is True
+
+
+# === 10CFR Part→Page 스코프 맵 (canonical 볼륨 묶음 정밀화) =======================
+
+
+def test_resolve_10cfr_part_pages_single_part() -> None:
+    # 단일 Part(맵 적재 — Part 50)는 page_range + 볼륨 canonical 환산을 산출(resolved=True).
+    info = _resolve_10cfr_part_pages("10CFR-Part50")
+    assert info is not None
+    assert info["part"] == 50
+    assert info["resolved"] is True
+    assert info["vol_canonical"] == "10CFR-Part1-50"  # Part 50 ∈ vol1
+    pr = info["page_range"]
+    assert pr["gte"] >= 1 and pr["lte"] > pr["gte"]
+    assert pr["relation"] == "intersects"
+
+
+def test_resolve_10cfr_part_pages_reserved_part() -> None:
+    # 예약 Part(Part 53, 본문 없음)는 page 미산출 + reserved 플래그(폴백, recall 안전).
+    info = _resolve_10cfr_part_pages("10CFR-Part53")
+    assert info is not None
+    assert info["part"] == 53
+    assert info["reserved"] is True
+    assert info["resolved"] is False
+    assert info["page_range"] is None
+
+
+def test_resolve_10cfr_part_pages_unmapped_and_volume_and_non10cfr() -> None:
+    # 미적재 Part(원자력 무관, 예: Part 30) → 폴백(resolved=False, page 없음).
+    info = _resolve_10cfr_part_pages("10CFR-Part30")
+    assert info is not None and info["part"] == 30 and info["resolved"] is False
+    # 볼륨형(범위, from≠to)은 이미 묶음 키 — Part 좁힘 대상 아님(canonical 그대로).
+    vol = _resolve_10cfr_part_pages("10CFR-Part1-50")
+    assert vol is not None and vol["resolved"] is False
+    assert vol["vol_canonical"] == "10CFR-Part1-50" and vol["page_range"] is None
+    # 10CFR Part 형식이 아니면 None(다른 doc_type 은 영향 없음).
+    assert _resolve_10cfr_part_pages("RG-1.206") is None
+
+
+def test_parse_10cfr_part_filter_synthesizes_page_range() -> None:
+    # _parse: 10CFR 단일 Part(filter)는 ① 볼륨 canonical + ② page_range filter 를 합성하고
+    # canonical_part/page_range_resolved 를 audit 에 남긴다(원칙 6 — 좁힘 가시화).
+    (q,) = _parse(json.dumps({"queries": [
+        {"slot_name": "req", "query_text": "10 CFR 50.46 ECCS criteria",
+         "collection": "10CFR", "collection_mode": "filter",
+         "canonical_id": "10CFR-Part50", "canonical_id_mode": "filter"},
+    ]}))
+    assert q.filters[_CANONICAL_FIELD] == ["10CFR-Part1-50"]  # 볼륨 환산
+    pr = q.filters[_PAGE_RANGE_FIELD]
+    assert pr["relation"] == "intersects" and pr["lte"] > pr["gte"]
+    assert q.scope_audit.get("canonical_part") == 50
+    assert q.scope_audit.get("page_range_resolved") is True
+
+
+def test_parse_10cfr_part_boost_omits_page_range() -> None:
+    # boost 모드는 page_range 를 싣지 않는다(hard-scope 페이지 좁힘은 filter 일 때만). 볼륨
+    # canonical 은 boost(target)로 환산되어 실린다.
+    (q,) = _parse(json.dumps({"queries": [
+        {"slot_name": "s", "query_text": "10 CFR 50.46", "collection": "10CFR",
+         "collection_mode": "filter",
+         "canonical_id": "10CFR-Part50", "canonical_id_mode": "boost"},
+    ]}))
+    assert _PAGE_RANGE_FIELD not in q.filters
+    assert q.target[_CANONICAL_FIELD] == ["10CFR-Part1-50"]
+    assert q.scope_audit.get("canonical_part") == 50
+
+
+def test_parse_10cfr_reserved_part_filter_no_page_range() -> None:
+    # 예약 Part(53)는 filter 라도 page_range 미합성 → 볼륨 canonical 만(폴백, 0건 방지).
+    (q,) = _parse(json.dumps({"queries": [
+        {"slot_name": "s", "query_text": "10 CFR Part 53", "collection": "10CFR",
+         "collection_mode": "filter",
+         "canonical_id": "10CFR-Part53", "canonical_id_mode": "filter"},
+    ]}))
+    assert _PAGE_RANGE_FIELD not in q.filters
+    assert q.scope_audit.get("canonical_part") == 53
+    assert q.scope_audit.get("canonical_part_reserved") is True
+    assert q.scope_audit.get("page_range_resolved") is False
+
+
+def test_dedup_keeps_distinct_page_range() -> None:
+    # 동일 query_text 라도 page_range(다른 Part) 가 다르면 별개 검색(접지 않음).
+    qs = _parse(json.dumps({"queries": [
+        {"slot_name": "p50", "query_text": "ECCS", "collection": "10CFR",
+         "collection_mode": "filter", "canonical_id": "10CFR-Part50",
+         "canonical_id_mode": "filter"},
+        {"slot_name": "p100", "query_text": "ECCS", "collection": "10CFR",
+         "collection_mode": "filter", "canonical_id": "10CFR-Part100",
+         "canonical_id_mode": "filter"},
+    ]}))
+    deduped = _dedup_queries(qs)
+    assert len(deduped) == 2  # 페이지 구간이 달라 별개로 유지
 
 
 def test_parse_boost_mode_routes_scope_to_target() -> None:

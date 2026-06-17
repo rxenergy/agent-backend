@@ -80,6 +80,7 @@ def _scope_summary(q: FormulatedQuery) -> dict[str, Any]:
     from app.application.intake.spec_driven_query import (
         _CANONICAL_FIELD,
         _DESIGN_FIELD,
+        _PAGE_RANGE_FIELD,
         _STATUS_FIELD,
     )
 
@@ -95,6 +96,8 @@ def _scope_summary(q: FormulatedQuery) -> dict[str, Any]:
         "status": _ch(_STATUS_FIELD),
         "design": _ch(_DESIGN_FIELD),
         "canonical_id": _ch(_CANONICAL_FIELD),
+        # 10CFR Part→page 좁힘(설계 §4) — filter 일 때만 실린다(page_range 는 hard-scope).
+        "page_range": _ch(_PAGE_RANGE_FIELD),
     }
     # 감사 플래그는 값이 있을 때만 실어 핀을 군더더기 없이 유지(원칙 6 — 동작은 가시).
     out.update(q.scope_audit)

@@ -1,0 +1,138 @@
+{
+  "schema_version": "1",
+  "source": "nrc-all-v1 text PART headers + section density, Title 10 vol1/vol2, newest 2 editions",
+  "parts": {
+    "2": {
+      "vol_base": "title10-vol1",
+      "page_start": 32,
+      "page_end": 91,
+      "title": "Agency Rules of Practice and Procedure",
+      "extracted_by": "density"
+    },
+    "19": {
+      "vol_base": "title10-vol1",
+      "page_start": 346,
+      "page_end": 346,
+      "title": "Notices, Instructions and Reports to Workers: Inspection and Investigations",
+      "extracted_by": "density"
+    },
+    "20": {
+      "vol_base": "title10-vol1",
+      "page_start": 347,
+      "page_end": 459,
+      "title": "Standards for Protection Against Radiation",
+      "extracted_by": "density"
+    },
+    "21": {
+      "vol_base": "title10-vol1",
+      "page_start": 460,
+      "page_end": 467,
+      "title": "Reporting of Defects and Noncompliance",
+      "extracted_by": "density"
+    },
+    "26": {
+      "vol_base": "title10-vol1",
+      "page_start": 478,
+      "page_end": 578,
+      "title": "Fitness for Duty Programs",
+      "extracted_by": "header"
+    },
+    "40": {
+      "vol_base": "title10-vol1",
+      "page_start": 795,
+      "page_end": 852,
+      "title": "Domestic Licensing of Source Material",
+      "extracted_by": "density"
+    },
+    "50": {
+      "vol_base": "title10-vol1",
+      "page_start": 853,
+      "page_end": 1123,
+      "title": "Domestic Licensing of Production and Utilization Facilities",
+      "extracted_by": "header"
+    },
+    "51": {
+      "vol_base": "title10-vol2",
+      "page_start": 17,
+      "page_end": 78,
+      "title": "Environmental Protection Regulations for Domestic Licensing and Related Regulatory Functions",
+      "extracted_by": "density"
+    },
+    "52": {
+      "vol_base": "title10-vol2",
+      "page_start": 79,
+      "page_end": 178,
+      "title": "Licenses, Certifications, and Approvals for Nuclear Power Plants",
+      "extracted_by": "header"
+    },
+    "53": {
+      "vol_base": "title10-vol2",
+      "reserved": true,
+      "title": "Risk-Informed, Technology-Inclusive Regulatory Framework for Commercial Nuclear Plants"
+    },
+    "54": {
+      "vol_base": "title10-vol2",
+      "page_start": 179,
+      "page_end": 184,
+      "title": "Requirements for Renewal of Operating Licenses for Nuclear Power Plants",
+      "extracted_by": "density"
+    },
+    "55": {
+      "vol_base": "title10-vol2",
+      "page_start": 185,
+      "page_end": 200,
+      "title": "Operators' Licenses",
+      "extracted_by": "header"
+    },
+    "70": {
+      "vol_base": "title10-vol2",
+      "page_start": 318,
+      "page_end": 328,
+      "title": "Domestic Licensing of Special Nuclear Material",
+      "extracted_by": "density"
+    },
+    "71": {
+      "vol_base": "title10-vol2",
+      "page_start": 366,
+      "page_end": 372,
+      "title": "Packaging and Transportation of Radioactive Material",
+      "extracted_by": "header"
+    },
+    "72": {
+      "vol_base": "title10-vol2",
+      "page_start": 424,
+      "page_end": 644,
+      "title": "Licensing Requirements for the Independent Storage of Spent Nuclear Fuel, HLW, and Reactor-Related GTCC Waste",
+      "extracted_by": "density"
+    },
+    "73": {
+      "vol_base": "title10-vol2",
+      "page_start": 329,
+      "page_end": 365,
+      "title": "Physical Protection of Plants and Materials",
+      "extracted_by": "density"
+    },
+    "74": {
+      "vol_base": "title10-vol2",
+      "page_start": 645,
+      "page_end": 671,
+      "title": "Material Control and Accounting of Special Nuclear Material",
+      "extracted_by": "header"
+    },
+    "100": {
+      "vol_base": "title10-vol2",
+      "page_start": 739,
+      "page_end": 755,
+      "title": "Reactor Site Criteria",
+      "extracted_by": "header"
+    },
+    "140": {
+      "vol_base": "title10-vol2",
+      "page_start": 810,
+      "page_end": 885,
+      "title": "Financial Protection Requirements and Indemnity Agreements",
+      "extracted_by": "header"
+    }
+  },
+  "missing_parts": []
+}

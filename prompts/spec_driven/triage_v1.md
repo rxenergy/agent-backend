@@ -34,6 +34,12 @@ why lets you both scope retrieval correctly and *explain* that scoping.
 design only exists on NuScale documents. A status filter on a NuScale document, or a
 design filter on a regulatory document, matches an empty field and returns nothing.
 
+**`10CFR` is stored as govinfo annual-edition volumes that bundle many Parts** (vol1 =
+Parts 1–50, vol2 = Parts 51–199; vol3+ are DOE, not nuclear). A citation like "10 CFR
+50.46" is **Part 50** inside vol1; retrieval narrows to that Part's page span within the
+~1000-page volume rather than the whole bundle. Explain this when scope shapes the answer
+(e.g. "scoped to 10 CFR Part 50 within the Title 10 vol1 annual edition").
+
 **Defaults (apply unless the query says otherwise):** for a regulatory document the
 current edition (`status=current`); for a NuScale document the certified baseline
 design (`design=US600`, the DCA) — it is the established reference design, so absent
