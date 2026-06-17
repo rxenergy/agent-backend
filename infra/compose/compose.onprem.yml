@@ -69,6 +69,24 @@ services:
       WEBUI_URL: http://localhost:${OPEN_WEBUI_PORT:-3100}
 
   # ─────────────────────────────────────────────────────────────────────────
+  # Phoenix — onprem 에서만 Prompt Playground 가 내부망 vLLM 을 직접 호출하도록
+  # OpenAI-호환 base URL 을 덮어쓴다. base compose.yml 의 phoenix: 블록을 병합 확장.
+  #   - OPENAI_BASE_URL: 같은 compose default 네트워크의 vllm 컨테이너(vllm:8000/v1).
+  #   - OPENAI_API_KEY: vLLM 은 인증이 없으므로 placeholder 면 충분.
+  # ⚠ 폐쇄망 정책상 Playground 에서 OpenAI/Anthropic 등 외부 provider 는 선택 금지.
+  #   외부 호출 대상은 오직 내부망 vLLM(gemma-4-26b-a4b-it) 하나다.
+  # served-model 이름은 Playground model 필드에 VLLM_SERVED_MODEL_NAME 값과 동일하게 입력.
+  # ─────────────────────────────────────────────────────────────────────────
+  phoenix:
+    environment:
+      PHOENIX_WORKING_DIR: /data/phoenix
+      OPENAI_BASE_URL: ${PHOENIX_OPENAI_BASE_URL:-http://vllm:8000/v1}
+      OPENAI_API_KEY: ${PHOENIX_OPENAI_API_KEY:-dummy}
+    depends_on:
+      vllm:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────────────────────────────────────
   # vLLM — onprem profile only. docker/vllm/docker-compose.yml 과 동일한
   # 런타임 파라미터를 사용하되, compose 본체에 합류시켜 agent-api 와 같은
   # 네트워크/라이프사이클에서 동작시킨다.
