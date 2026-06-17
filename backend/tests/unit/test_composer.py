@@ -304,6 +304,15 @@ async def test_slot_llm_unavailable_refuses() -> None:
             return await super().generate(prompt, model_options=model_options,
                                           grammar=grammar)
 
+        async def generate_stream(self, prompt, *, model_options=None, grammar=None):
+            # 슬롯 본문은 이제 토큰 스트리밍(_slot_generate_stream)으로 생성된다 →
+            # N0·N1·N2(generate) 후 첫 슬롯 스트림에서 미가용을 던져야 거부 경로를 탄다.
+            if self._i >= 3:
+                raise LLMUnavailableError("down")
+            async for d in super().generate_stream(prompt, model_options=model_options,
+                                                   grammar=grammar):
+                yield d
+
     script = _SlotDown([_TRIAGE_RETRIEVAL, _SPEC_JSON, _QUERIES_JSON])
     with tempfile.TemporaryDirectory() as tmp:
         runner = _build(Path(tmp), script)

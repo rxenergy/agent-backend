@@ -517,10 +517,13 @@ class ComposerRunner(SpecDrivenRunner):
         await emit_step("slot_plan", "ok", num_slots=len(plan),
                         fallback_slots=[p["name"] for p in plan if p["fallback"]])
 
-        # === N4.1/N4.2 — 슬롯 순차 생성 + 검수 + *조기 스트리밍*(refine 누적) ======
-        # 모드 B(품질 안전) + 조기 스트리밍: 슬롯을 비스트리밍 generate→검수(통과분만)→
-        # 그 즉시 emit_token. 검수 전 노출이 아니므로 위반 슬롯이 사용자에게 흐르지 않으면서
-        # (H8), 첫 슬롯이 생성·검수되는 *즉시* 화면에 뜬다(TTFT 단축 — 사용자 요구).
+        # === N4.1/N4.2 — 슬롯 순차 *토큰 스트리밍* 생성 + 사후 검수(verdict 기록) ======
+        # 모드 A(라이브 스트리밍, 사용자 결정): 헤더 → 본문을 토큰 단위로 즉시 흘린다
+        # (_slot_generate_stream). 슬롯 순서가 곧 출력 순서다(순차 실행이 순서를 자동 보장
+        # — 병렬 아님). 검수(_verify_slot)는 *스트리밍 이후* verdict 기록 목적으로만 돈다:
+        # 토큰이 이미 화면에 떴으므로 cite-strip/regen 같은 사후 교정은 화면을 되돌릴 수
+        # 없다 — 화면에 흐른 원문이 answer_text 의 기록값이고, verdict 는 검수가 무엇을
+        # 지적했는지를 핀에 남긴다(streamed_before_verify 로 분기 명시 — 재현 가능성 보존).
         slot_outputs: list[dict[str, Any]] = []
         digest_lines: list[str] = []
         slot_pins: list[dict[str, Any]] = []
@@ -546,7 +549,12 @@ class ComposerRunner(SpecDrivenRunner):
                 slot_prompt_hash = _sha16(rendered)
                 ss.set_attribute("slot.rendered_prompt_hash", slot_prompt_hash)
                 try:
-                    result = await self._slot_generate(llm, rendered, span=ss)
+                    # 헤더를 본문 *앞*에 prefix 로 한 번 흘리고(answer_structure 기반),
+                    # 이후 본문 토큰을 라이브로 흘린다. 슬롯 사이 빈 줄은 헤더에 포함.
+                    result = await self._slot_generate_stream(
+                        llm, rendered, span=ss, prefix=p["header"],
+                        model_options_override=self._slot_model_options(),
+                    )
                 except LLMUnavailableError as exc:
                     ss.record_exception(exc)
                     ss.set_attribute("llm.upstream_error", str(exc)[:500])
@@ -563,15 +571,18 @@ class ComposerRunner(SpecDrivenRunner):
                         error_code="llm_unavailable", query_understanding=qu_pin,
                     )
 
-            text, verdict = await self._verify_slot(
-                llm, slot, result.text, allowed_cites, sub_chunks, pack,
+            # 화면에 흐른 원문이 기록값. 검수는 이후 verdict 기록용으로만 돈다(사후 교정은
+            # 화면을 되돌릴 수 없으므로 text 는 스트리밍된 원문 유지).
+            text = result.text.strip()
+            _, verdict = await self._verify_slot(
+                llm, slot, text, allowed_cites, sub_chunks, pack,
                 request, spec, prior_digest="\n".join(digest_lines),
             )
+            verdict["streamed_before_verify"] = True
 
-            # 조기 스트리밍 — 검수 통과 즉시 헤더(answer_structure 기반) + 본문을 emit.
-            # 슬롯 순서가 곧 출력 순서다(순차 실행이 순서를 자동 보장 — 병렬 아님).
-            section = f"{p['header']}{text.strip()}\n\n"
-            await emit_token(section)
+            # 헤더 + 본문은 이미 토큰 단위로 흘렀다 → answer_text 재구성용으로 합치기만.
+            section = f"{p['header']}{text}\n\n"
+            await emit_token("\n\n")  # 슬롯 사이 구분(다음 헤더 prefix 와 합쳐 빈 줄).
             streamed_parts.append(section)
 
             slot_outputs.append({"slot": slot, "header": p["header"], "text": text})

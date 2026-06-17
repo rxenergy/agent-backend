@@ -135,7 +135,7 @@ spec_driven_general_prompts:
 spec_driven_answer_spec_prompts:
   spec_driven_answer_spec_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "2d870b7bded8d1f69f9f29cdcacedf6bd0f65b314f03dea254272905694c8eb2"}
+    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "ac709c89e810585cb15b50974149eaa44aa0c40890ce74abb2b5a61bb9edcaa4"}
     output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "7b3d3dd66d3a2590bec977aa98fe10901293ae799259f8adf251b02730280777"}
     # max_tokens — 슬롯 *최대 6개*(schema maxItems:6, slot-budget 설계)까지 spec JSON 이
     # 들어가도록 상향(700→1100→3000). 슬롯이 6 으로 줄었어도 슬롯당 description 이
