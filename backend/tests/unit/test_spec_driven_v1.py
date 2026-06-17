@@ -31,6 +31,8 @@ from app.application.intake.spec_driven_query import (
     _dedup_queries,
     _ensure_references,
     _parse,
+    _reference_is_scoped,
+    _strip_scoped_references,
     _validate_canonical_id,
     _validate_fsar_canonical,
 )
@@ -446,6 +448,72 @@ def test_ensure_references_preserves_filters() -> None:
     (out,) = _ensure_references((q,), ("10 CFR 50.46",))
     assert "10 CFR 50.46" in out.query_text  # ref 합류
     assert out.filters == {"collection": ["nuscale_FSAR"]}  # filter 보존
+
+
+# === 안전망 (4): 스코프된 문서명 제거 (사용자 결정 — rule 3 scope) ================
+# 이미 collection/canonical_id filter 로 모집단을 그 문서로 좁힌 경우, query_text 의
+# 문서명(RG 1.156, 10 CFR 50.46 등)은 검색 신호가 아니라 dense 유사도를 밋밋하게 만드는
+# noise 다. filter 스코프된 ref 만 떼어내고(boost-only/미스코프는 유지), 쿼리는 찾아야
+# 하는 개념·근거에 집중하게 만든다.
+
+
+def test_reference_scoped_only_on_matching_filter() -> None:
+    # collection filter 가 ref 의 파생 collection 과 일치할 때만 스코프(=문서명 불필요).
+    q_match = FormulatedQuery(slot_name="s", query_text="10 CFR 50.46 ECCS",
+                              filters={"collection": ["10CFR"]})
+    assert _reference_is_scoped("10 CFR 50.46", q_match) is True
+    # 다른 문서로 filter 된 쿼리의 cross-reference 는 스코프 아님(앵커 유지).
+    q_cross = FormulatedQuery(slot_name="s", query_text="ECCS 10 CFR 50.46",
+                              filters={"collection": ["nuscale_FSAR"]})
+    assert _reference_is_scoped("10 CFR 50.46", q_cross) is False
+    # boost 모드(target)는 hard-narrow 가 아니라 스코프 아님(앵커 유지).
+    q_boost = FormulatedQuery(slot_name="s", query_text="RG 1.97 monitoring",
+                              target={"collection": ["RG"]})
+    assert _reference_is_scoped("RG 1.97", q_boost) is False
+    # canonical_id filter = exact 문서 타깃 → 그 문서 ref 는 스코프(collection 없어도).
+    q_canon = FormulatedQuery(slot_name="s", query_text="RG 1.206 content format",
+                              filters={_CANONICAL_FIELD: ["RG-1.206"]})
+    assert _reference_is_scoped("RG 1.206", q_canon) is True
+
+
+def test_strip_scoped_reference_removes_document_name_from_query_text() -> None:
+    # filter 스코프된 ref 의 문서명을 query_text 에서 제거 → 쿼리는 개념에 집중.
+    q = FormulatedQuery(slot_name="s", query_text="10 CFR 50.46 ECCS acceptance criteria",
+                        filters={"collection": ["10CFR"]})
+    (out,) = _strip_scoped_references((q,), ("10 CFR 50.46",))
+    assert out.query_text == "ECCS acceptance criteria"  # 문서명 제거, 개념만
+    assert out.filters == {"collection": ["10CFR"]}  # filter 보존
+    assert out.references == ()  # 떼어낸 ref 는 references 감사에서도 빠진다
+
+
+def test_strip_scoped_reference_keeps_unscoped_and_cross_reference() -> None:
+    # boost-only ref 와 다른 문서를 가리키는 cross-reference 는 앵커로 유지된다.
+    q_boost = FormulatedQuery(slot_name="s", query_text="RG 1.97 monitoring variables",
+                              target={"collection": ["RG"]})
+    (out_b,) = _strip_scoped_references((q_boost,), ("RG 1.97",))
+    assert "RG 1.97" in out_b.query_text  # boost 는 hard-narrow 아님 → 앵커 유지
+    # nuscale_FSAR 로 filter 된 쿼리의 10 CFR cross-reference 는 유지.
+    q_cross = FormulatedQuery(slot_name="s",
+                              query_text="passive ECCS design 10 CFR 50.46",
+                              filters={"collection": ["nuscale_FSAR"]})
+    (out_c,) = _strip_scoped_references((q_cross,), ("10 CFR 50.46",))
+    assert "10 CFR 50.46" in out_c.query_text  # 다른 문서 참조 → 앵커 유지
+
+
+def test_strip_scoped_reference_preserves_query_when_only_document_name() -> None:
+    # query_text 가 전부 문서명이면(개념 토큰 없음) 빈 쿼리 방지로 원본 보존.
+    q = FormulatedQuery(slot_name="s", query_text="RG 1.206",
+                        filters={_CANONICAL_FIELD: ["RG-1.206"]})
+    (out,) = _strip_scoped_references((q,), ("RG 1.206",))
+    assert out.query_text == "RG 1.206"  # 비면 원본 보존(recall 안전)
+
+
+def test_ensure_references_skips_filter_scoped_ref() -> None:
+    # 안전망 (1) 은 어느 쿼리든 filter 스코프된 ref 는 강제 주입하지 않는다(문서명 불필요).
+    q = FormulatedQuery(slot_name="s", query_text="ECCS acceptance criteria",
+                        filters={"collection": ["10CFR"]})
+    (out,) = _ensure_references((q,), ("10 CFR 50.46",))
+    assert "10 CFR 50.46" not in out.query_text  # 스코프됨 → 주입 안 함
 
 
 def test_dedup_queries_collapses_identical_query_text_across_slots() -> None:

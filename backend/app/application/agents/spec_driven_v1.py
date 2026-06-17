@@ -1281,8 +1281,8 @@ def _render_spec_block(spec: AnswerSpec) -> str:
     ]
     for s in spec.required_slots:
         # facet 라벨을 N4 에 노출 — 생성기가 슬롯별로 어떤 표현축(Axis 1~3)을 적용할지
-        # 안다(definition→정의 layer, quantitative_limit→값+기술근거, review_finding→
-        # 판단/조건 분리). 결정=코드(결정론 렌더), 표현=모델(답변 심도 §3.2/P3).
+        # 안다(definition→정의 layer, technical_basis→값+출처/보수성, review_finding↔
+        # applicant_design 주장/판단 분리). 결정=코드(결정론 렌더), 표현=모델(expert_grade §2/P3).
         tag = f" [{s.facet}]" if s.facet else ""
         flag = "" if s.required else " (supporting)"
         lines.append(f"- {s.name}{tag}{flag}: {s.description}".rstrip())
