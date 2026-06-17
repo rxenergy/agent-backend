@@ -361,17 +361,20 @@ def _render_spec(spec: AnswerSpec) -> str:
         "required_slots:",
     ]
     for s in spec.required_slots:
-        kw = ", ".join(s.keywords) or "(none)"
-        # facet/expected_authority 를 N2 에 노출 — 프롬프트 rule 9(facet→쿼리형태 표)가
-        # 슬롯별로 쿼리·collection 을 어떻게 빚을지의 신호로 쓴다(답변 심도 §4). 미지정이면
-        # 생략(net-neutral — 라벨 없는 슬롯은 기존과 동일하게 keywords 만으로 빚는다).
+        # 책임 재분배(split.design.v1): N1 은 *개념 수준* 검색 의도(scope_hint)만 주고,
+        # N2 가 그것을 검색 주소(collection·토큰·canonical_id)로 번역한다. scope_hint(v2)
+        # 우선, 비면 keywords(v1) 로 fallback(회귀 0). facet 은 N1 소유 라벨 — N2 가 rule 9
+        # (facet→collection 표)로 라우팅 신호에 쓴다.
+        intent_str = s.scope_hint or (", ".join(s.keywords) or "(none)")
         tags = []
         if s.facet:
             tags.append(f"facet={s.facet}")
-        if s.expected_authority:
+        # expected_authority 는 deprecated(facet 에서 N2 가 도출) — v1 슬롯에만 잔존 노출.
+        if s.expected_authority and not s.scope_hint:
             tags.append(f"authority={s.expected_authority}")
         tag = (" | " + " | ".join(tags)) if tags else ""
-        lines.append(f"- {s.name}: keywords=[{kw}]{tag} | {s.description}".rstrip())
+        lines.append(f"- {s.name}: search_intent=[{intent_str}]{tag} | {s.description}"
+                     .rstrip())
     return "\n".join(lines)
 
 
@@ -478,11 +481,11 @@ def _parse(text: str) -> tuple[FormulatedQuery, ...]:
 def _fallback_queries(
     query_text: str, spec: AnswerSpec
 ) -> tuple[FormulatedQuery, ...]:
-    """모델 부재/파싱불가 → 슬롯 keywords 로 슬롯당 쿼리 1개(결정론). 슬롯이 없으면
-    원질의 1개."""
+    """모델 부재/파싱불가 → 슬롯 검색의도로 슬롯당 쿼리 1개(결정론). scope_hint(v2) 우선,
+    비면 keywords(v1) fallback. 슬롯이 없으면 원질의 1개."""
     out: list[FormulatedQuery] = []
     for s in spec.required_slots:
-        qt = " ".join(s.keywords).strip()
+        qt = (s.scope_hint or " ".join(s.keywords)).strip()
         if not qt:
             continue
         out.append(FormulatedQuery(slot_name=s.name, query_text=qt))

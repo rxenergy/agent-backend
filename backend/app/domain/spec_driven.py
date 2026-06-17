@@ -17,38 +17,56 @@ from typing import Any
 
 @dataclass(frozen=True)
 class SpecSlot:
-    """답을 *방어 가능하게* 떠받칠 근거 조각 하나. `keywords` 는 검색 쿼리의 lexical
-    앵커(리터럴 보존 — 정규화 금지, F1). N2 QueryFormulator 가 슬롯당 검색쿼리 1개를
-    만들 때 이 keywords 를 query_text 로 옮긴다(BM25 lexical).
+    """답을 *방어 가능하게* 떠받칠 근거 조각 하나이자, 답변의 한 *논리 구획*. 슬롯은 검색의
+    단위(슬롯당 쿼리 1개)이자 생성의 단위(슬롯당 구획 1개)다.
 
-    `facet` 은 이 슬롯이 *어떤 종류*의 근거를 회수하는지의 라벨이다(값/결론이 아니라 종류
-    — address-not-content 불변, project_answer_spec_address_not_content). 인허가 추론 사슬의
-    한 층(spec_driven_expert_grade.design.v1 §2.1): N1 이 한 질의를 requirement→
-    acceptance_criterion→demonstration_method→applicant_design→review_finding→
-    open_item_condition 사슬(+technical_basis·exemption_departure·applicability·definition·
-    cross_reference)로 펼쳐 각자 슬롯화하면, N2 가 그 층의 문서군(collection)으로 라우팅하고
-    (§3), N4 가 그 facet 을 어떻게 표현할지(값이면 verbatim+기술근거, 주장↔판단 분리) 안다.
-    조문 인용에 그치지 않고 *값의 근거*(technical_basis)·*입증 방법*(demonstration_method)·
-    *심사 조건*(open_item_condition)을 별도 층으로 겨냥해 전문가가 원하는 깊이에 닿는다.
-    optional(미지정 None 허용 — 하위호환). frozen dataclass 라 asdict 재귀 호환(기존 idiom).
+    책임 재분배(spec_driven_answer_spec_query_responsibility_split.design.v1): N1 은 *답변
+    설계자* — 슬롯이 답의 무엇을(facet)·전체에서 어떤 역할을(role)·어느 선행 슬롯 위에서
+    (depends_on)·어느 깊이로(depth)·무슨 개념을 찾을지(scope_hint)를 정한다. *검색 주소
+    번역*(어느 collection·어떤 토큰·canonical_id)은 N2 QueryFormulator 의 책임이다 — N1 은
+    reg ID 사전·BM25 토큰을 더 이상 만들지 않는다.
 
-    `expected_authority` 는 이 facet 근거가 *어느 권위/문서군*에 사는지의 힌트다(예:
-    requirement→10 CFR/GDC, acceptance_criterion→SRP/DSRS, demonstration_method→Topical/
-    FSAR, review_finding→SER, open_item_condition→RAI). N2 가 collection filter/boost 를 고를
-    때 보조 신호로 쓴다(권위 분리 — expert_grade §3). 역시 라벨이지 값이 아니다."""
+    `facet` — 이 슬롯이 *어떤 종류*의 근거를 회수하는지의 라벨(값/결론 아닌 종류 —
+    address-not-content 불변, project_answer_spec_address_not_content). 인허가 추론 사슬의 한
+    층(requirement→acceptance_criterion→demonstration_method→applicant_design→
+    review_finding→open_item_condition (+technical_basis·exemption_departure·applicability·
+    definition·cross_reference)). **N1 이 소유한다**(facet=답변 분해 논리). N2 가 이 라벨을
+    검색 collection 으로 *번역*하고, N4 가 facet 을 어떻게 표현할지(값이면 verbatim+기술근거,
+    주장↔판단 분리) 안다. optional(None 허용 — 하위호환). frozen 이라 asdict 재귀 호환.
+
+    `role` — 이 슬롯이 *전체 답에서* 맡는 역할/목표 1문장(N1 산출). N4 슬롯 생성이 독립 LLM
+    콜이라도 자기 역할을 매번 추론하지 않게 하는 일관성 장치(설계 §4.3). 예: "이후 슬롯들의
+    판단 기준이 되는 지배 요건을 확립".
+
+    `depends_on` — 이 슬롯 생성이 *논리적으로* 참조해야 할 선행 슬롯 name 들. N4 가 PRIOR
+    SECTIONS 를 위치(직전 K개)가 아니라 *논리 의존*으로 전달하는 근거이자, 병렬 스케줄링의
+    DAG 간선(의존 없는 슬롯끼리 병렬 생성 가능). 입증 사슬은 자연히 사슬 의존, 병렬 개념(예:
+    5개 허용기준)은 의존 없음. 사이클 금지(AnswerSpec.slot_graph 가 위상정렬 시 검증).
+
+    `depth` — 이 슬롯을 얼마나 깊게 전개할지(`shallow`|`standard`|`deep`). archetype(질의
+    유형)이 결정 — definition 질의=shallow, technical_basis/demonstration=deep. N4 표현 심도 신호.
+
+    `scope_hint` — *개념 수준*의 검색 의도(예: "최대 피복재 온도 허용기준과 그 기술적 근거").
+    reg ID·정량값을 적지 않는다 — 그 번역(주소·토큰)은 N2 책임. address-not-content 불변.
+
+    `keywords`(deprecated) — v1 호환 잔존. N1 이 더는 채우지 않는다. N2 는 `scope_hint`
+    우선, 비어 있으면 `keywords` 로 fallback(회귀 0). v2 검증 후 제거.
+
+    `expected_authority`(deprecated) — facet 에서 N2 가 문서군을 도출하므로 잉여. v1 호환
+    잔존, v2 검증 후 제거."""
 
     name: str
-    keywords: tuple[str, ...] = ()
-    description: str = ""
+    # N1 책임 — 답변 설계.
+    facet: str | None = None  # 회수 근거의 *종류* 라벨(N1 소유, N2 가 collection 으로 번역).
+    role: str = ""  # 전체 답에서 이 슬롯의 역할/목표 1문장(일관성 장치 — 설계 §4.3).
+    depends_on: tuple[str, ...] = ()  # 논리 선행 슬롯 name(PRIOR 전달·DAG 간선).
+    depth: str = "standard"  # shallow | standard | deep — 전개 심도(archetype 결정).
+    scope_hint: str = ""  # 개념 수준 검색 의도(reg ID/값 아님 — N2 가 주소로 번역).
+    description: str = ""  # 생성이 surface 할 sub-point(질의 언어 가능). 값/결론 금지.
     required: bool = True
-    # 회수 근거의 *종류* 라벨(값 아님) — 인허가 추론 사슬의 한 층. requirement |
-    # acceptance_criterion | demonstration_method | applicant_design | review_finding |
-    # open_item_condition | technical_basis | exemption_departure | applicability |
-    # definition | cross_reference | None. N2 collection 라우팅·N4 표현형의 신호
-    # (spec_driven_expert_grade.design.v1 §2.1).
-    facet: str | None = None
-    # 이 facet 이 사는 권위/문서군 힌트(N2 collection 선택 보조 — expert_grade §3). 라벨.
-    expected_authority: str | None = None
+    # --- deprecated(v1 호환 잔존, v2 검증 후 제거) ---
+    keywords: tuple[str, ...] = ()  # N1 더는 안 채움. N2 가 scope_hint 없을 때 fallback.
+    expected_authority: str | None = None  # facet 에서 N2 가 도출 — 잉여.
 
 
 @dataclass(frozen=True)
@@ -78,6 +96,39 @@ class AnswerSpec:
     instantiation_method: str = "stub"  # "llm" | "fallback" | "stub"
     spec_hash: str | None = None
     policy_hash: str | None = None
+
+    def slot_order(self) -> tuple[SpecSlot, ...]:
+        """슬롯의 *생성 순서* — `depends_on` DAG 위상정렬(의존 슬롯이 먼저)
+        (책임 재분배 설계 §4.1). 같은 위상층에서는 N1 산출 순서를 보존한다(required 가
+        먼저 오도록 한 N1 의도 유지 — 재정렬 룰 없음, 표현=모델). depends_on 이 모두 비어
+        있으면 산출 순서 그대로(=v1 동형). 사이클이나 미존재 의존은 *무시*하고 산출 순서로
+        fallback 한다(silent degrade 금지 — 호출부가 graceful 하게 선형 진행)."""
+        slots = list(self.required_slots)
+        by_name = {s.name: s for s in slots}
+        # 미존재 의존은 간선에서 제외(graceful). 존재하는 의존만 indegree 계산.
+        deps = {
+            s.name: {d for d in s.depends_on if d in by_name and d != s.name}
+            for s in slots
+        }
+        ordered: list[SpecSlot] = []
+        placed: set[str] = set()
+        remaining = list(slots)  # 산출 순서 보존(같은 층 내 안정 정렬).
+        # Kahn 변형 — 매 패스에서 "의존이 모두 배치된" 슬롯을 산출 순서대로 배치.
+        progressed = True
+        while remaining and progressed:
+            progressed = False
+            still: list[SpecSlot] = []
+            for s in remaining:
+                if deps[s.name] <= placed:
+                    ordered.append(s)
+                    placed.add(s.name)
+                    progressed = True
+                else:
+                    still.append(s)
+            remaining = still
+        # 사이클로 남은 슬롯(의존이 영영 안 풀림)은 산출 순서로 뒤에 붙인다(fallback).
+        ordered.extend(remaining)
+        return tuple(ordered)
 
 
 @dataclass(frozen=True)

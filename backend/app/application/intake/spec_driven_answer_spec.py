@@ -40,6 +40,9 @@ _FACETS = frozenset(
      "review_finding", "open_item_condition", "technical_basis", "exemption_departure",
      "applicability", "definition", "cross_reference"}
 )
+# 슬롯 전개 심도(answer_spec_query_responsibility_split.design.v1 §2.1). archetype 이
+# 결정 — definition=shallow, technical_basis/demonstration=deep. enum 외/미지정은 standard.
+_DEPTHS = frozenset({"shallow", "standard", "deep"})
 
 
 class SpecDrivenAnswerSpecInstantiator:
@@ -166,10 +169,6 @@ def _parse(text: str) -> dict[str, Any] | None:
         name = str(s.get("name") or "").strip()
         if not name:
             continue
-        kw = s.get("keywords")
-        keywords = tuple(
-            str(k).strip() for k in kw if str(k).strip()
-        ) if isinstance(kw, list) else ()
         desc = str(s.get("description") or "").strip()
         required = bool(s.get("required", True))
         # facet — 회수 근거의 종류 라벨(값 아님). enum 외/미지정은 None(오라벨 방지).
@@ -177,12 +176,32 @@ def _parse(text: str) -> dict[str, Any] | None:
         facet = str(facet_raw).strip().lower() if facet_raw else None
         if facet not in _FACETS:
             facet = None
-        # expected_authority — 자유 라벨(문서군/권위 힌트). 비검증(N2 보조 신호일 뿐).
+        # --- v2 책임 재분배 필드(답변 설계 — split.design.v1) ---
+        # role — 전체 답에서 이 슬롯의 역할 1문장(일관성 장치 §4.3).
+        role = str(s.get("role") or "").strip()
+        # scope_hint — 개념 수준 검색 의도(reg ID/값 아님 — N2 가 주소로 번역).
+        scope_hint = str(s.get("scope_hint") or "").strip()
+        # depends_on — 논리 선행 슬롯 name(PRIOR 전달·DAG 간선). 자기참조/빈값 제외.
+        dep_raw = s.get("depends_on")
+        depends_on = tuple(
+            d for d in (str(x).strip() for x in dep_raw)
+            if d and d != name
+        ) if isinstance(dep_raw, list) else ()
+        # depth — enum 외/미지정은 standard.
+        depth_raw = str(s.get("depth") or "").strip().lower()
+        depth = depth_raw if depth_raw in _DEPTHS else "standard"
+        # --- v1 호환 잔존(deprecated) — N2 가 scope_hint 없을 때 keywords 로 fallback ---
+        kw = s.get("keywords")
+        keywords = tuple(
+            str(k).strip() for k in kw if str(k).strip()
+        ) if isinstance(kw, list) else ()
         auth_raw = s.get("expected_authority")
         auth = str(auth_raw).strip() if auth_raw else None
-        slots.append(SpecSlot(name=name, keywords=keywords,
-                              description=desc, required=required,
-                              facet=facet, expected_authority=auth))
+        slots.append(SpecSlot(
+            name=name, facet=facet, role=role, depends_on=depends_on,
+            depth=depth, scope_hint=scope_hint, description=desc, required=required,
+            keywords=keywords, expected_authority=auth,
+        ))
     refs_raw = data.get("explicit_references")
     refs = tuple(
         str(r).strip() for r in refs_raw if str(r).strip()
@@ -211,7 +230,9 @@ def _fallback(query_text: str, policy_hash: str | None) -> AnswerSpec:
     """모델 부재/파싱불가 시 최소 spec — 원질의를 단일 근거 슬롯으로(키워드 보존).
     명시적 참조 추출은 모델 책임이라 fallback 은 refs 비움(억지 추출 금지)."""
     kw = tuple(t for t in query_text.split() if t)[:12]
+    # scope_hint(v2) + keywords(v1) 둘 다 채워 어느 N2 경로든 동작(회귀 0).
     slot = SpecSlot(name="primary_evidence", keywords=kw,
+                   scope_hint=query_text.strip(),
                    description="원질의 핵심 근거", required=True)
     parsed = {
         "intent": "unknown",
@@ -232,16 +253,19 @@ def _build(parsed: dict[str, Any], method: str, policy_hash: str | None) -> Answ
     intent = parsed["intent"]
     topic_label = parsed.get("topic_label")
     # spec_hash = canonical 문자열 sha16(dict-bearing 인스턴스를 해시하지 않는다 —
-    # finder._build 와 동일 규율). 슬롯·keywords·refs·구조·권위·의도를 평탄 직렬화.
+    # finder._build 와 동일 규율). 슬롯·검색의도·관계·심도·refs·구조·권위·의도를 평탄
+    # 직렬화. facet/depth/depends_on 을 포함 — 같은 검색의도라도 분해·심도·의존 그래프가
+    # 다르면 다른 spec(다른 답변 설계)이므로 재현 핀이 구별해야 한다(split.design.v1 §2).
+    # scope_hint(v2) 우선, 비면 keywords(v1) 로 fallback — 둘 다 검색의도 직렬화.
     canon = (
         intent
         + "||" + ",".join(refs)
         + "||" + (gnc or "")
         + "||" + (structure or "")
         + "||" + "|".join(
-            # facet 을 canonical 에 포함 — 같은 keywords 라도 facet 분해가 다르면 다른
-            # spec(다른 회수 의도)이므로 재현 핀이 구별해야 한다(답변 심도 §3.2).
-            f"{s.name}:{int(s.required)}:{s.facet or '-'}:{'+'.join(s.keywords)}"
+            f"{s.name}:{int(s.required)}:{s.facet or '-'}:{s.depth}"
+            f":>{'+'.join(s.depends_on)}"
+            f":={s.scope_hint or '+'.join(s.keywords)}"
             for s in slots
         )
     )

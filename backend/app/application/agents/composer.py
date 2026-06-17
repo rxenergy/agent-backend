@@ -1242,6 +1242,19 @@ class ComposerRunner(SpecDrivenRunner):
 @register_variant(COMPOSER_VARIANT_ID)
 def _build_composer(spec: VariantSpec, deps: AgentDeps) -> "ComposerRunner":
     t = deps.tunables
+    # 책임 재분배(split.design.v1): composer 전용 v2 source(N1 답변설계·N2 검색설계·슬롯
+    # role 소비)를 *기본* 으로 쓰되, tunable `composer_prompts_v2=false` 면 계승한 base v1
+    # source 로 떨어진다(A/B 비교). v2 source 미배선(구버전 deps)이어도 base 로 graceful.
+    use_v2 = t.get("composer_prompts_v2", True)
+    answer_spec_source = (
+        getattr(deps, "composer_answer_spec_source", None) if use_v2 else None
+    ) or deps.spec_driven_answer_spec_source
+    query_source = (
+        getattr(deps, "composer_query_source", None) if use_v2 else None
+    ) or deps.spec_driven_query_source
+    slot_source = (
+        getattr(deps, "composer_slot_v2_source", None) if use_v2 else None
+    ) or getattr(deps, "composer_slot_source", None)
     return ComposerRunner(
         spec=spec,
         llm_router=deps.llm_router,
@@ -1251,8 +1264,8 @@ def _build_composer(spec: VariantSpec, deps: AgentDeps) -> "ComposerRunner":
         event_sink=deps.event_sink,
         app_profile=deps.app_profile,
         utility_llm=deps.utility_llm,
-        answer_spec_source=deps.spec_driven_answer_spec_source,
-        query_source=deps.spec_driven_query_source,
+        answer_spec_source=answer_spec_source,
+        query_source=query_source,
         generation_source=deps.spec_driven_generation_source,
         triage_source=deps.spec_driven_triage_source,
         general_source=deps.spec_driven_general_source,
@@ -1269,8 +1282,9 @@ def _build_composer(spec: VariantSpec, deps: AgentDeps) -> "ComposerRunner":
         session_keep_turns=t.get("spec_driven_session_keep_turns", 10),
         session_retrieval_window=t.get("spec_driven_session_retrieval_window", 5),
         session_overlap_threshold=t.get("spec_driven_session_overlap_threshold", 0.5),
-        # composer 전용 — 신규 source(미배선이면 graceful) + tunable.
-        slot_source=getattr(deps, "composer_slot_source", None),
+        # composer 전용 — 신규 source(미배선이면 graceful) + tunable. slot_source 는 위에서
+        # v2(role/depends_on 소비)·v1 중 선택됨.
+        slot_source=slot_source,
         synthesize_source=getattr(deps, "composer_synthesize_source", None),
         slot_verify_source=getattr(deps, "composer_slot_verify_source", None),
         slot_max_tokens=t.get("composer_slot_max_tokens", 8192),

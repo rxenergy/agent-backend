@@ -185,6 +185,27 @@ class ComposerSlotVerifySource(_SpecDrivenPromptSource):
         self, prompt_dir: str | Path, *, profile_id: str = "composer_slot_verify_v1") -> None:
         super().__init__(prompt_dir, profile_id=profile_id)
 
+
+# composer N1/N2/슬롯 v2 — 책임 재분배(answer_spec_query_responsibility_split.design.v1).
+# composer 만 이 source 를 쓴다(spec_driven_v1/v2 variant 의 N1/N2 source 와 별개 — A/B
+# 비교 위해 base profile 불변). N1 은 검색 지식을 뺀 답변 설계 프롬프트+v2 스키마, N2 는
+# address map 을 흡수한 검색 설계 프롬프트(출력 스키마는 v1 동형), 슬롯은 role/depends_on
+# 소비·헤더 충돌 해소판. base 로직(sha 검증·schema 로드) 그대로, profile_id 만 분리.
+class ComposerAnswerSpecSource(SpecDrivenAnswerSpecSource):
+    def __init__(self, prompt_dir: str | Path) -> None:
+        super().__init__(prompt_dir, profile_id="composer_answer_spec_v1")
+
+
+class ComposerQuerySource(SpecDrivenQuerySource):
+    def __init__(self, prompt_dir: str | Path) -> None:
+        super().__init__(prompt_dir, profile_id="composer_query_v1")
+
+
+class ComposerSlotV2Source(ComposerSlotSource):
+    def __init__(self, prompt_dir: str | Path) -> None:
+        super().__init__(prompt_dir, profile_id="composer_slot_v2")
+
+
 # spec_driven_v2 — 2-노드(DGX Spark) 분산 변형 전용 프롬프트 source. base 로직은 동일하고
 # 기본 profile_id 만 `*_v2` 로 바꿔 registry 의 v2 블록을 읽는다. 초기 v2 블록은 v1 fragment
 # 를 그대로 참조(동일 sha)하므로 동작은 v1 과 같으나, v2 전용 프롬프트 진화를 v1 과 격리한다

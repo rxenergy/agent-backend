@@ -158,6 +158,16 @@ spec_driven_answer_spec_prompts:
     prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "ac709c89e810585cb15b50974149eaa44aa0c40890ce74abb2b5a61bb9edcaa4"}
     output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "7b3d3dd66d3a2590bec977aa98fe10901293ae799259f8adf251b02730280777"}
     model_options: {temperature: 0.0, max_tokens: 1100}
+  # composer N1 — 책임 재분배(answer_spec_query_responsibility_split.design.v1): 검색 지식
+  # (address map·BM25·keyword 규칙)을 N2 로 이관하고, 답변 설계(role/depends_on/depth/
+  # scope_hint)만 남긴 v2 프롬프트·스키마. spec_driven_v1/v2 variant 는 불변(A/B 비교) —
+  # composer 만 이 profile 을 쓴다. max_tokens — 검색토큰 제거로 슬롯 JSON 이 가벼워졌으나
+  # role/scope_hint/reasoning 이 추가돼 비슷 → 3000 유지(truncate→fallback 강등 방지).
+  composer_answer_spec_v1:
+    profile_version: v1
+    prompt:        {path: spec_driven/answer_spec_v2.md,            version: v2, sha256: "6831bb0a0bcf8806332ef29e4179a763b657abe9f2b935e1e5e31b2179481296"}
+    output_schema: {path: spec_driven/schemas/answer_spec_v2.json,  version: v2, sha256: "b594a4449b289516a6488e72ca82170475805f2bf0bc704b20b0264ab4ac2ce4"}
+    model_options: {temperature: 0.0, max_tokens: 3000}
 
 spec_driven_query_prompts:
   spec_driven_query_v1:
@@ -170,6 +180,17 @@ spec_driven_query_prompts:
   spec_driven_query_v2:
     profile_version: v1
     prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "c0ea142506d2fe93ac550217e8f5cec8e21df13a7a7a1e93ac22aad80fce09a2"}
+    output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "6a93ef879516d1923328e47ef7ab9a1955238c94620bd70ca4526bd8e9462d29"}
+    model_options: {temperature: 0.0, max_tokens: 1400}
+  # composer N2 — 책임 재분배(split.design.v1): N1 에서 이관받은 검색 지식(regulatory
+  # address map·BM25/keyword 규칙·facet→document family)을 흡수해 *검색 설계자* 가 된 v2
+  # 프롬프트. 입력 계약이 keywords(완성 토큰) → scope_hint(개념 의도)로 바뀌어 N2 가
+  # query_text 를 생성하는 비중이 커진다. 출력 스키마는 v1 동형(FormulatedQuery 불변).
+  # composer 만 이 profile 을 쓴다(spec_driven_v1/v2 불변 — A/B). max_tokens — 슬롯당 1쿼리
+  # + 스코프 4채널은 v1 과 동일 → 1400 유지.
+  composer_query_v1:
+    profile_version: v1
+    prompt:        {path: spec_driven/query_formulation_v2.md,            version: v2, sha256: "da84fc854eff14db0bbc1369d5fd2ce766b522f05f023af7ab2abd67c5d88488"}
     output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "6a93ef879516d1923328e47ef7ab9a1955238c94620bd70ca4526bd8e9462d29"}
     model_options: {temperature: 0.0, max_tokens: 1400}
 
@@ -225,6 +246,14 @@ composer_slot_prompts:
     prompt:        {path: spec_driven/composer_slot_v1.md, version: v1, sha256: "f60695141e949d5469e27ca1d94a2625eda5aed326d9e15296f2609b446d162e"}
     # max_tokens — 슬롯 1구획이라 단일 N4(16384)보다 작되, 슬롯 CONTEXT(귀속 청크) + 이전
     # 섹션 *전문* PRIOR + 4축 다층 전개를 한 구획에 담으므로 3000 에선 절단 위험 → 8192.
+    model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 8192, seed: 7}
+  # composer 슬롯 v2 — 책임 재분배(split.design.v1): generation_v1 4축 흡수(단일 출처),
+  # 슬롯의 role/depth 를 계약으로 소비("역할대로만, 그 이상도 이하도 아님"), depends_on
+  # 기반 PRIOR 만 연속성 입력, 헤더 충돌 해소(섹션 제목 금지 ↔ 본문 내 표/리스트/bold 허용을
+  # 한 번에 명시). composer_slot_v1 불변(A/B). model_options 는 v1 동형(8192 — 다층 전개).
+  composer_slot_v2:
+    profile_version: v2
+    prompt:        {path: spec_driven/composer_slot_v2.md, version: v2, sha256: "f7c7121d5b936a91cc29ff63b3297231184e9c6e32a76d499b079d0a6007a031"}
     model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 8192, seed: 7}
 
 composer_synthesize_prompts:

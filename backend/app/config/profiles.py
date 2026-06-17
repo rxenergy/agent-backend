@@ -48,7 +48,10 @@ from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
 from app.application.prompting.classification_source import ClassificationPromptSource
 from app.application.prompting.spec_driven_source import (
+    ComposerAnswerSpecSource,
+    ComposerQuerySource,
     ComposerSlotSource,
+    ComposerSlotV2Source,
     ComposerSlotVerifySource,
     ComposerSynthesizeSource,
     SpecDrivenAnswerSpecSource,
@@ -294,6 +297,10 @@ async def build_container(settings: Settings) -> AppContainer:
     composer_slot_source: Any = None
     composer_synthesize_source: Any = None
     composer_slot_verify_source: Any = None
+    # composer v2 — 책임 재분배(split.design.v1): N1 답변설계 / N2 검색설계 / 슬롯 role 소비.
+    composer_answer_spec_source: Any = None
+    composer_query_source: Any = None
+    composer_slot_v2_source: Any = None
     spec_driven_v2_answer_spec_source: Any = None
     spec_driven_v2_query_source: Any = None
     spec_driven_v2_generation_source: Any = None
@@ -606,6 +613,15 @@ async def build_container(settings: Settings) -> AppContainer:
         )
         composer_slot_verify_source = ComposerSlotVerifySource(Path(settings.prompt_local_dir)
         )
+        # composer v2 — 책임 재분배(split.design.v1): N1 답변설계(검색지식 제거)+v2 스키마 /
+        # N2 검색설계(address map 흡수) / 슬롯 role 소비판. composer variant 만 쓴다 —
+        # spec_driven_v1/v2 의 N1/N2 source 는 불변(A/B 비교). 미배선이면 composer 는 계승한
+        # base source(v1)로 graceful fallback(점진 도입 — _build_composer 가 v2 우선).
+        composer_answer_spec_source = ComposerAnswerSpecSource(
+            Path(settings.prompt_local_dir)
+        )
+        composer_query_source = ComposerQuerySource(Path(settings.prompt_local_dir))
+        composer_slot_v2_source = ComposerSlotV2Source(Path(settings.prompt_local_dir))
         # spec_driven_v2 — 2-노드 분산 변형 전용 프롬프트 source(registry 호스팅, sha 핀).
         # 초기엔 v1 fragment 를 그대로 참조(동일 sha)하나 profile_id 만 `*_v2` 로 분리해
         # v2 전용 프롬프트 진화를 v1 과 격리한다(설계 spec_driven_agent.design.v2).
@@ -666,6 +682,9 @@ async def build_container(settings: Settings) -> AppContainer:
         composer_slot_source=composer_slot_source,
         composer_synthesize_source=composer_synthesize_source,
         composer_slot_verify_source=composer_slot_verify_source,
+        composer_answer_spec_source=composer_answer_spec_source,
+        composer_query_source=composer_query_source,
+        composer_slot_v2_source=composer_slot_v2_source,
         spec_driven_v2_answer_spec_source=spec_driven_v2_answer_spec_source,
         spec_driven_v2_query_source=spec_driven_v2_query_source,
         spec_driven_v2_generation_source=spec_driven_v2_generation_source,

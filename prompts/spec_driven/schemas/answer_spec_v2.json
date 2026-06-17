@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "spec_driven_answer_spec_v2",
+  "description": "N1 Define Spec output (v2 — responsibility split: split.design.v1). N1 is the *answer designer*: it decides the answer's structure/scope/depth and decomposes it into logical slots with their role, dependency, and depth — NOT the search address (which collection, which tokens). That translation is N2 Query Formulation's job. required_slots = the logical units of the answer (each a search unit and a generation unit). explicit_references = regulatory documents/clauses explicitly named in the query (literal preservation). governing_normative_class = the authority class the answer is anchored on. answer_structure = the composition logic (narrative skeleton).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reasoning", "intent", "explicit_references", "required_slots"],
+  "properties": {
+    "reasoning": {"type": "string", "description": "1-3 sentence rationale written *before* fixing the spec (the query's language is fine): which explicit references / authority class / slots you choose, how they relate, and why. Guided decoding decodes this field first, so the decision fields are conditioned on it (leading CoT)."},
+    "intent": {"type": "string"},
+    "explicit_references": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Regulatory documents/clauses explicitly NAMED in the query, verbatim (no normalization): '10 CFR 50.46', 'GDC 35', 'RG 1.157'. Empty if none named. N2 turns these into search anchors — do not invent one the query did not name."
+    },
+    "governing_normative_class": {
+      "type": ["string", "null"],
+      "enum": ["binding", "guidance", "review_record", "applicant_claim", "mixed", null],
+      "description": "The authority class the answer is anchored on (no inflation): binding (10 CFR/GDC/App); guidance (RG/SRP/DSRS); review_record (SER/RAI); applicant_claim (FSAR/DCA); mixed when several decide it."
+    },
+    "required_slots": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "description": "The logical units of the answer. Each slot is BOTH a search unit (N2 makes one query for it) and a generation unit (N4 writes one section for it). Derive the slot set from the query's intent — there is no quota; a focused query is 1-2 slots, 6 is a hard ceiling. Decide WHAT each slot is for and HOW the slots relate — not how to search for them (that is N2).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "scope_hint"],
+        "properties": {
+          "name": {"type": "string", "description": "A concrete identifier for this concept (English, model-generated), e.g. 'peak_cladding_temperature_limit'. Used as the slot's id in depends_on and downstream pins."},
+          "facet": {
+            "type": ["string", "null"],
+            "enum": ["requirement", "acceptance_criterion", "demonstration_method", "applicant_design", "review_finding", "open_item_condition", "technical_basis", "exemption_departure", "applicability", "definition", "cross_reference", null],
+            "description": "The *kind* of evidence this slot carries — one node in the licensing reasoning chain. This is the answer-decomposition logic (and a rendering signal for N4: a value→verbatim+basis, a claim vs a finding kept separate); N2 translates it into a search collection. NOT a value/conclusion. The chain: requirement=the binding obligation (10 CFR/GDC/App); acceptance_criterion=the concrete pass threshold/method (SRP for LWR, DSRS for NuScale); demonstration_method=*how* compliance was shown (method/code/assumptions/conservatism — Topical/FSAR); applicant_design=the applicant's design assertion (FSAR/DCA); review_finding=the NRC staff's independent judgment (SER/FSER); open_item_condition=remaining issues/conditions/ITAAC/COL items/RAI resolutions; technical_basis=the *source/derivation/conservatism/validity-envelope/edition* behind a value (why that number); exemption_departure=GDC exemption/PDC/departure + staff disposition; applicability=reactor type/plant condition/licensing stage/edition the layer binds; definition=the defined regulatory meaning/scope; cross_reference=another clause/appendix/table this one points to. Keep applicant_design and review_finding separate."
+          },
+          "role": {
+            "type": "string",
+            "description": "One sentence: this slot's role/goal in the WHOLE answer (the query's language is fine). Because N4 writes each section as an independent call, this tells that section what it is responsible for and how it fits the others — the primary consistency lever. E.g. '이후 슬롯들의 판단 기준이 되는 지배 요건을 확립' or 'establishes the staff finding that the applicant_design slot's claim is judged against'. Not a value/conclusion."
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Names of the prior slots THIS slot's section logically builds on. N4 passes those sections' full text (not a fixed window) as continuity context, and the set forms the generation DAG (slots with no unmet dependency can generate in parallel). A licensing reasoning chain (requirement→demonstration→finding) is naturally a dependency chain; parallel concepts (e.g. five independent acceptance criteria) have no dependency. Do not create cycles; reference only slot names in this spec."
+          },
+          "depth": {
+            "type": ["string", "null"],
+            "enum": ["shallow", "standard", "deep", null],
+            "description": "How deeply N4 should develop this section, set by the query's archetype (a ceiling, not a quota): shallow = a definition / single fact (one layer); standard = an interpretation / single requirement; deep = a value with its technical basis, or a demonstration/review chain layer the expert wants unfolded (origin/companion criteria/method/conservatism/applicability/edition, or SER conditions/ITAAC verbatim). Omit/null = standard."
+          },
+          "scope_hint": {
+            "type": "string",
+            "description": "The CONCEPT this slot needs to retrieve, at concept level — NOT the search address. State WHAT substance is needed (the kinds of facts N4 should surface), in the query's language. NO regulatory IDs, NO numeric values, NO conclusions — N2 translates the concept into the search address (collection, tokens, canonical_id) and retrieval supplies the values. E.g. '최대 피복재 온도 허용기준과 그 기술적 근거·보수성·적용 fuel 범위' (good) vs 'PCT 2200 F' or '10 CFR 50.46(b) acceptance criteria' (these are values/addresses — not allowed here)."
+          },
+          "description": {"type": "string", "description": "Optional — extra sub-points N4 should surface from this slot (the query's language is fine). Same address-not-content rule as scope_hint: name the *kinds* of substance, never the answer (no values/conclusions)."},
+          "required": {"type": "boolean", "description": "true if essential to defend the answer, false if supporting."}
+        }
+      }
+    },
+    "answer_structure": {
+      "type": ["string", "null"],
+      "description": "The narrative skeleton — what the answer presents/distinguishes and in what order (e.g. '정의→지배조문→요건→예외'). Derive it from this query's logic; do not clone a fixed template. The per-slot depends_on carries the logical dependencies; this carries the reading order."
+    },
+    "topic_label": {
+      "type": ["string", "null"],
+      "description": "A short topic label (a few words) identifying the subject (e.g. 'ECCS acceptance criteria'). Used only for multi-turn topic-shift detection — a label, never a value. Omit/null for one-off queries."
+    }
+  }
+}
