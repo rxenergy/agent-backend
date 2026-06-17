@@ -48,6 +48,9 @@ from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
 from app.application.prompting.classification_source import ClassificationPromptSource
 from app.application.prompting.spec_driven_source import (
+    ComposerSlotSource,
+    ComposerSlotVerifySource,
+    ComposerSynthesizeSource,
     SpecDrivenAnswerSpecSource,
     SpecDrivenGeneralSource,
     SpecDrivenGenerationSource,
@@ -272,6 +275,9 @@ async def build_container(settings: Settings) -> AppContainer:
     spec_driven_generation_source: Any = None
     spec_driven_triage_source: Any = None
     spec_driven_general_source: Any = None
+    composer_slot_source: Any = None
+    composer_synthesize_source: Any = None
+    composer_slot_verify_source: Any = None
     summarizer: ConversationSummarizer | None = None
     corpus_map: Any = None
 
@@ -526,6 +532,15 @@ async def build_container(settings: Settings) -> AppContainer:
         spec_driven_general_source = SpecDrivenGeneralSource(
             Path(settings.prompt_local_dir)
         )
+        # composer N4 슬롯 파이프라인 프롬프트(슬롯 생성 / 종합 / L1 검수) — 동일 fail-fast
+        # sha 검증. spec_driven_v1 와 무관(별 variant), composer 활성 시에만 의미.
+        composer_slot_source = ComposerSlotSource(Path(settings.prompt_local_dir))
+        composer_synthesize_source = ComposerSynthesizeSource(
+            Path(settings.prompt_local_dir)
+        )
+        composer_slot_verify_source = ComposerSlotVerifySource(
+            Path(settings.prompt_local_dir)
+        )
         if settings.classifier_backend == "rule":
             classifier = RuleClassifier()
         elif settings.classifier_backend == "llm":
@@ -565,6 +580,9 @@ async def build_container(settings: Settings) -> AppContainer:
         spec_driven_generation_source=spec_driven_generation_source,
         spec_driven_triage_source=spec_driven_triage_source,
         spec_driven_general_source=spec_driven_general_source,
+        composer_slot_source=composer_slot_source,
+        composer_synthesize_source=composer_synthesize_source,
+        composer_slot_verify_source=composer_slot_verify_source,
         summarizer=summarizer,
         tunables={
             "classification_threshold": settings.classification_threshold,
@@ -596,6 +614,11 @@ async def build_container(settings: Settings) -> AppContainer:
             "citation_contract_path": str(
                 Path(settings.prompt_local_dir) / "system" / "citation_contract_v1.md"
             ),
+            # composer variant N4 슬롯 파이프라인(COMPOSER_* env → settings → tunable).
+            "composer_slot_verify": settings.composer_slot_verify,
+            "composer_slot_max_tokens": settings.composer_slot_max_tokens,
+            "composer_synthesize": settings.composer_synthesize,
+            "composer_slot_context_k": settings.composer_slot_context_k,
         },
     )
     runners: dict[str, AgentRunner] = {

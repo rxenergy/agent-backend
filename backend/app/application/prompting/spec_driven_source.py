@@ -145,3 +145,43 @@ class SpecDrivenGenerationSource(_SpecDrivenPromptSource):
         self, prompt_dir: str | Path, *, profile_id: str = "spec_driven_generation_v1"
     ) -> None:
         super().__init__(prompt_dir, profile_id=profile_id)
+
+
+class ComposerSlotSource(_SpecDrivenPromptSource):
+    """composer N4.1 슬롯 생성 프롬프트 source(자유 텍스트). 슬롯 1개를 facet 범위로
+    펼치고 이전 슬롯 요지(PRIOR SECTIONS)를 참조한다. 설계:
+    docs/plans/spec_driven_slotwise_generation.design.v1.md §6.1."""
+
+    registry_key = "composer_slot_prompts"
+    has_schema = False
+
+    def __init__(
+        self, prompt_dir: str | Path, *, profile_id: str = "composer_slot_v1"
+    ) -> None:
+        super().__init__(prompt_dir, profile_id=profile_id)
+
+
+class ComposerSynthesizeSource(_SpecDrivenPromptSource):
+    """composer N4.3 종합 프롬프트 source(자유 텍스트). 슬롯 본문 재출력 금지 — "핵심
+    정리 + 다음 단계 제안" 닫음 블록만(슬롯은 조기 스트리밍됨). 설계 §5/§6.2."""
+
+    registry_key = "composer_synthesize_prompts"
+    has_schema = False
+
+    def __init__(
+        self, prompt_dir: str | Path, *, profile_id: str = "composer_synthesize_v1"
+    ) -> None:
+        super().__init__(prompt_dir, profile_id=profile_id)
+
+
+class ComposerSlotVerifySource(_SpecDrivenPromptSource):
+    """composer N4.2 L1 groundedness 게이트 프롬프트 source(json_schema guided). 슬롯
+    출력↔CONTEXT entailment 판정만(생성 아님 — self-verification 금지). 설계 §4.1."""
+
+    registry_key = "composer_slot_verify_prompts"
+    has_schema = True
+
+    def __init__(
+        self, prompt_dir: str | Path, *, profile_id: str = "composer_slot_verify_v1"
+    ) -> None:
+        super().__init__(prompt_dir, profile_id=profile_id)

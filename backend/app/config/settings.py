@@ -129,6 +129,16 @@ class Settings(BaseSettings):
     # vLLM 16384 윈도우 안전 — 1차 검색 전량 보존 + 2차 검색을 score 순으로 이 예산
     # 한도까지 채운다(spec_driven_v1._assemble_final_chunks).
     spec_driven_context_token_budget: int = 0
+    # composer variant N4 슬롯 파이프라인 튜너블(설계
+    # docs/plans/spec_driven_slotwise_generation.design.v1.md). spec_driven_v1 와 무관.
+    #   slot_verify  — off(기본, 현재 비활성) | l0(결정론 cite-범위) | l1(추가 모델 entailment).
+    #   slot_max_tokens — 슬롯 1구획 생성 상한(단일 N4 16384 대비 축소).
+    #   synthesize   — 모든 슬롯 후 "정리+다음액션" 닫음 블록 생성 여부.
+    #   slot_context_k — 슬롯당 CONTEXT 서브셋 상위 K(feed-narrow).
+    composer_slot_verify: str = "off"
+    composer_slot_max_tokens: int = 3000
+    composer_synthesize: bool = True
+    composer_slot_context_k: int = 6
     opensearch_endpoint: str = "http://opensearch:9200"
     opensearch_index: str = "nrc-all-v1"
     # 적재 데이터가 따르는 인덱스 스키마 버전의 *선언적* 단일 출처.

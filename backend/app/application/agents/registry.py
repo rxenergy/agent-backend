@@ -54,6 +54,13 @@ class AgentDeps:
     # 에서 부트 배선 오류로 처리(프롬프트는 코드 인라인 금지).
     spec_driven_triage_source: Any = None
     spec_driven_general_source: Any = None
+    # composer variant N4 슬롯 파이프라인 프롬프트 source(registry 호스팅, sha 핀). 슬롯
+    # 생성 / 종합(정리+다음액션) / L1 검수. None 이면 composer 가 계승한 generation_source
+    # (단일 N4)로 graceful fallback(프롬프트 점진 도입). 설계:
+    # docs/plans/spec_driven_slotwise_generation.design.v1.md.
+    composer_slot_source: Any = None
+    composer_synthesize_source: Any = None
+    composer_slot_verify_source: Any = None
     summarizer: "ConversationSummarizer | None" = None
     # Pass-through tunables — runners read what they care about.
     tunables: dict[str, Any] = field(default_factory=dict)
