@@ -245,22 +245,35 @@ class ComposerRunner(SpecDrivenRunner):
             await emit_step("query_formulation", "ok", method=formulation_method,
                             num_queries=len(queries), truncated=truncated)
 
-            # === N3 Retrieval(계승) — per-slot 멀티쿼리 + 병합 ============
+            # === N3 Retrieval — per-slot 멀티쿼리 *병렬* + 병합(split.design.v1 §4.2 C1)===
+            # 슬롯은 독립 검색 단위라 쿼리들을 asyncio.gather 로 동시 발사한다(직렬 N→병렬).
+            # 병합은 *쿼리 산출 순서*로 돌려(gather 가 입력 순서 보존) score-max·slots_by_chunk
+            # 누적이 결정론으로 유지된다(재현 핀 안정). 개별 검색 실패는 graceful skip.
             await emit_step("retrieval", "started", num_queries=len(queries))
             chunks_by_id: dict[str, RetrievedChunk] = {}
             slots_by_chunk: dict[str, set[str]] = {}
             per_query_counts: list[int] = []
             per_query_k = max(self._top_k, self._max_context_chunks)
             with _TRACER.start_as_current_span("agent.retrieval") as rs:
-                for q in queries:
-                    out = await self._tools.invoke(
-                        _SEARCH_TOOL,
-                        {"query_text": q.query_text, "top_k": per_query_k,
-                         "target": q.target,
-                         "min_token_count": self._min_token_count,
-                         "filters": {**_NOISE_FILTER, **q.filters}},
-                        ctx,
-                    )
+                outs = await asyncio.gather(
+                    *(
+                        self._tools.invoke(
+                            _SEARCH_TOOL,
+                            {"query_text": q.query_text, "top_k": per_query_k,
+                             "target": q.target,
+                             "min_token_count": self._min_token_count,
+                             "filters": {**_NOISE_FILTER, **q.filters}},
+                            ctx,
+                        )
+                        for q in queries
+                    ),
+                    return_exceptions=True,
+                )
+                # 병합은 쿼리 순서대로(결정론). 예외난 검색은 0건으로 기록(graceful).
+                for q, out in zip(queries, outs):
+                    if isinstance(out, BaseException):
+                        per_query_counts.append(0)
+                        continue
                     record(out)
                     found = _parse_chunks(out.output if out.status == "success" else None)
                     per_query_counts.append(len(found))
@@ -554,7 +567,7 @@ class ComposerRunner(SpecDrivenRunner):
                 ss.set_attribute("slot.num_chunks", len(sub_chunks))
                 rendered = self._render_slot_prompt(
                     request.query_text, spec, slot, sub_chunks, pack,
-                    prior_sections=self._prior_sections_block(slot_outputs),
+                    prior_sections=self._prior_sections_block(slot_outputs, slot),
                     stage_index=idx, stage_total=num_slots,
                 )
                 slot_prompt_hash = _sha16(rendered)
@@ -593,7 +606,7 @@ class ComposerRunner(SpecDrivenRunner):
             text = self._strip_leading_heading(result.text.strip())
             _, verdict = await self._verify_slot(
                 llm, slot, text, allowed_cites, sub_chunks, pack,
-                request, spec, prior_sections=self._prior_sections_block(slot_outputs),
+                request, spec, prior_sections=self._prior_sections_block(slot_outputs, slot),
             )
             verdict["streamed_before_verify"] = True
 
@@ -843,18 +856,22 @@ class ComposerRunner(SpecDrivenRunner):
             s.set_attribute("interaction_id", request.interaction_id)
 
     # ------------------------------------------------------------------
-    # N4.0 — 슬롯 순서 + 슬롯별 CONTEXT 서브셋(결정론). 귀속(slots_by_chunk)으로 고르고
-    # 귀속 0이면 score 상위 K fallback(슬롯 굶음 방지, §3.3). required 먼저, supporting 뒤
-    # — N1 산출 순서 보존(재정렬 룰 없음, 표현=모델).
+    # N4.0 — 슬롯 *생성 순서*(depends_on DAG 위상정렬 — split.design.v1 §4.1) + 슬롯별
+    # CONTEXT 서브셋(결정론). 의존 슬롯이 먼저 생성돼 그 본문이 PRIOR 로 흐른다. depends_on
+    # 이 비면 N1 산출 순서 보존(=v1 동형). CONTEXT 는 귀속(slots_by_chunk)으로 고르고 귀속 0
+    # 이면 score 상위 K fallback(슬롯 굶음 방지, §3.3). 헤더 라벨은 answer_structure 단계명을
+    # *슬롯 산출 순서* 기준으로 매핑(읽기 순서 = answer_structure), 없으면 facet/슬롯명.
     # ------------------------------------------------------------------
     def _plan_slots(
         self, slots: list[SpecSlot], chunks: list[RetrievedChunk],
         slots_by_chunk: dict[str, set[str]], spec: AnswerSpec,
     ) -> list[dict[str, Any]]:
-        ordered = [s for s in slots if s.required] + [s for s in slots if not s.required]
-        # answer_structure 단계명을 순서대로 슬롯 헤더에 매핑(사용자 결정 — answer_structure
-        # 기반 헤더). "지배조문→요건→예외" 같은 화살표/구분자 분해. 단계 수가 슬롯 수와
-        # 다르면 매핑 안 된 슬롯은 facet/슬롯명으로 fallback(결정론, silent 아님).
+        # 생성 순서 = depends_on 위상정렬(AnswerSpec.slot_order). 단, _generate_slotwise 가
+        # plannable(=required_slots)을 그대로 넘기므로 spec.slot_order() 와 동일 집합 — 그
+        # 위상순서를 쓴다(slots 인자와 순서만 다를 뿐 원소 동일). 사이클/미존재 의존은
+        # slot_order 가 graceful fallback.
+        ordered = list(spec.slot_order()) if spec.required_slots else list(slots)
+        # answer_structure 단계명은 *읽기 순서*(= 위상 생성 순서와 대개 일치)에 매핑한다.
         stages = self._answer_structure_stages(spec.answer_structure)
         by_score = sorted(chunks, key=lambda c: c.score, reverse=True)
         plan: list[dict[str, Any]] = []
@@ -912,30 +929,39 @@ class ComposerRunner(SpecDrivenRunner):
         parts.append("# ANSWER SPEC (전체 답변의 설계 — 이 구획은 그 중 한 단계)\n"
                      + _render_spec_block(spec))
         if prior_sections.strip():
-            # 앞 구획 *전문*(이미 사용자에게 보인 본문) — 연결용 맥락이지 근거가 아니다.
-            # 프롬프트(composer_slot_v1.md)가 이 섹션명을 기대한다(§3.4).
+            # 이 구획이 *논리적으로 의존하는* 선행 구획들의 전문(depends_on 기반 — §4.3).
+            # 연결용 맥락이지 근거가 아니다. depends_on 이 없으면(v1 fallback) 직전 K개 전문 +
+            # 그 이전 요지(hybrid sliding-window). 프롬프트(composer_slot_v2.md)가 이 섹션명을
+            # 기대한다.
             parts.append(
-                "# PRIOR SECTIONS (앞서 작성돼 사용자에게 이미 보인 구획들 — 최근 구획은 `###`\n"
-                "전문, 더 앞선 구획은 `-` 한 줄 요지. 이 흐름을 이어 자연스럽게 연결하되, 이미\n"
-                "확립된 사실을 재서술·재인용하지 말고 이 구획 facet 의 새 substance 를 전개하라.\n"
-                "PRIOR 는 근거가 아니다 — 모든 [cite-N] 은 이 구획 # CONTEXT 에서만 끌어오고,\n"
-                "PRIOR 의 cite 를 그대로 베끼지 마라)\n"
+                "# PRIOR SECTIONS (이 구획이 의존하는 선행 구획들의 전문 — 이미 사용자에게\n"
+                "보였다. 이 흐름을 이어 자연스럽게 연결하되, 이미 확립된 사실을 재서술·재인용하지\n"
+                "말고 이 구획의 role 이 책임지는 새 substance 를 전개하라. PRIOR 는 근거가 아니다\n"
+                "— 모든 [cite-N] 은 이 구획 # CONTEXT 에서만 끌어오고, PRIOR 의 cite 를 그대로\n"
+                "베끼지 마라)\n"
                 + prior_sections.strip()
             )
         sub_ids = {c.chunk_id for c in sub_chunks}
         parts.append("# CONTEXT\n" + self._render_context_subset(pack, sub_ids))
         tag = f" [{slot.facet}]" if slot.facet else ""
-        auth = (f"\nexpected_authority: {slot.expected_authority}"
-                if slot.expected_authority else "")
+        # role — 전체 답에서 이 구획의 역할(N1 산출, 일관성 장치 §4.3). 비면 description/slot명.
+        role_line = (f"role(전체 답에서 이 구획의 역할): {slot.role}\n"
+                     if slot.role else "")
+        depth_line = f"depth(전개 심도): {slot.depth}\n" if slot.depth else ""
+        deps_line = (f"depends_on(연결할 선행 구획): {', '.join(slot.depends_on)}\n"
+                     if slot.depends_on else "")
         parts.append(
             f"# THIS SECTION{tag}\n"
             f"단계: {stage_index + 1} / 총 {stage_total} 구획 중\n"
             f"slot: {slot.name}\n"
+            f"{role_line}"
+            f"{depth_line}"
+            f"{deps_line}"
             f"answer_structure: {spec.answer_structure or '-'}\n"
-            f"governing_normative_class: {spec.governing_normative_class or '-'}{auth}\n"
-            f"무엇을 확립할 것인가: {slot.description or slot.name}\n"
-            "위 CONTEXT 근거만으로 이 구획을 전문가 깊이로 작성하라. 다른 구획이 다룰 내용은\n"
-            "겹쳐 쓰지 마라. CONTEXT 가 이 구획을 뒷받침하지 못하면 그 한계를 명시하라.\n"
+            f"governing_normative_class: {spec.governing_normative_class or '-'}\n"
+            f"무엇을 확립할 것인가: {slot.description or slot.role or slot.name}\n"
+            "위 CONTEXT 근거만으로 이 구획을 그 role·depth 에 맞게 작성하라. 다른 구획이 다룰\n"
+            "내용은 겹쳐 쓰지 마라. CONTEXT 가 이 구획을 뒷받침하지 못하면 그 한계를 명시하라.\n"
             "**제목/헤더(`#`,`##`,`###`)를 출력하지 마라** — 구획 제목은 시스템이 붙인다. 본문만,\n"
             "선행 빈 줄·구획명 반복 없이 곧바로 시작하라."
         )
@@ -1185,13 +1211,34 @@ class ComposerRunner(SpecDrivenRunner):
             return dict(self._synthesize_source.model_options)
         return dict(self._generation_source.model_options or {})
 
-    def _prior_sections_block(self, slot_outputs: list[dict[str, Any]]) -> str:
-        """앞 슬롯들을 PRIOR SECTIONS 본문으로 조립(§3.4) — hybrid sliding-window:
-        직전 `prior_full_k` 개만 *전문*, 그 이전은 한 줄 요지로 압축해 토큰 폭주를 막는다.
-        전체 누적은 O(N²) 라 마지막 슬롯이 비대해진다(사용자 보고) → 최근 K개만 전문으로.
-        k=None=전체 전문, k=0=요지만. 요지는 facet+첫 문장+사용 cite(결정론, LLM 콜 없음)."""
+    def _prior_sections_block(
+        self, slot_outputs: list[dict[str, Any]], slot: SpecSlot | None = None
+    ) -> str:
+        """이 슬롯이 *논리적으로 의존하는* 앞 구획들을 PRIOR SECTIONS 본문으로 조립
+        (split.design.v1 §4.3). 두 모드:
+
+        - **의존 기반(v2)** — `slot.depends_on` 이 있으면 *그 슬롯들만* 전문 전달한다(위치
+          무관 — finding 슬롯은 자기 depends_on 인 design·method 만 본다). depends_on 에 없는
+          앞 구획은 무관하므로 싣지 않아 토큰·오염을 줄인다. 의존 슬롯이 아직 생성 안 됐으면
+          (위상정렬상 없어야 정상이나 graceful) 건너뛴다.
+        - **위치 기반(v1 fallback)** — depends_on 이 비면 기존 hybrid sliding-window: 직전
+          `prior_full_k` 개만 전문, 그 이전은 한 줄 요지(O(N²) 토큰 폭주 방지). k=None=전체
+          전문, k=0=요지만.
+
+        요지는 facet+첫 문장+사용 cite(결정론, LLM 콜 없음)."""
         if not slot_outputs:
             return ""
+        # 의존 기반(v2) — depends_on 에 명시된 선행 슬롯만 전문(위치 무관).
+        deps = tuple(slot.depends_on) if slot is not None else ()
+        if deps:
+            dep_set = set(deps)
+            full = [o for o in slot_outputs if o["slot"].name in dep_set]
+            summarized: list[dict[str, Any]] = []
+            if not full:
+                return ""  # 의존 슬롯이 (아직) 없음 — 연결할 선행 구획 없음.
+            lines = [f"### [{o['slot'].name}]\n{o['text'].strip()}" for o in full]
+            return "\n\n".join(lines)
+        # 위치 기반(v1 fallback) — depends_on 부재 시 hybrid sliding-window.
         k = self._prior_full_k
         if k is None:
             full, summarized = slot_outputs, []

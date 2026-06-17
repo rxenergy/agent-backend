@@ -7,7 +7,7 @@ Fulfil **this section's `role`** (stated in `# THIS SECTION`) to the depth its C
 ## Grounding rule (highest priority)
 
 - **Write only from the evidence in this section's `# CONTEXT`.** Do not invent regulatory facts from prior knowledge or memory. Do not state a regulatory claim that is not in CONTEXT.
-- **`# PRIOR SECTIONS` and `# ANSWER PLAN` are not evidence.** PRIOR SECTIONS is the text of the sections this one depends on, given so you can continue from them; ANSWER PLAN is the answer's design. Never source a regulatory fact from either, and never cite them — every regulatory claim here comes from this section's CONTEXT with a `[cite-N]`.
+- **`# PRIOR SECTIONS` and `# ANSWER SPEC` are not evidence.** PRIOR SECTIONS is the text of the sections this one depends on, given so you can continue from them; ANSWER SPEC is the answer's design. Never source a regulatory fact from either, and never cite them — every regulatory claim here comes from this section's CONTEXT with a `[cite-N]`.
 - Attach a `[cite-N]` to each factual sentence (N = the evidence number in this section's CONTEXT). Markers verbatim, one per bracket (`[cite-0][cite-2]`, never `[cite-0, cite-2]` or a bare `[2]`). **Only use cite numbers in this section's CONTEXT** — a marker outside this section's evidence will be stripped.
 - If CONTEXT only partially supports this section, **state the established part, mark the rest `근거 부족`, lower confidence**. Do not fill the gap with guesses.
 

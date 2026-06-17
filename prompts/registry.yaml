@@ -253,7 +253,7 @@ composer_slot_prompts:
   # 한 번에 명시). composer_slot_v1 불변(A/B). model_options 는 v1 동형(8192 — 다층 전개).
   composer_slot_v2:
     profile_version: v2
-    prompt:        {path: spec_driven/composer_slot_v2.md, version: v2, sha256: "f7c7121d5b936a91cc29ff63b3297231184e9c6e32a76d499b079d0a6007a031"}
+    prompt:        {path: spec_driven/composer_slot_v2.md, version: v2, sha256: "5720429bc82496b0f0ed6a4d7932fdfc999c5cd8dafbe80386b3e65e76da0724"}
     model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 8192, seed: 7}
 
 composer_synthesize_prompts:
