@@ -29,3 +29,15 @@ variants:
       - retrieval.search
     required_scenarios: []
     capability_tags: [spec_driven, retrieval, stateless, keyword_fidelity]
+
+  # spec_driven_v2 — spec_driven_v1 의 선형 4-노드 흐름을 상속하되 LLM 업무를 두 DGX
+  # Spark vLLM 노드로 분할한다(Node1=요청 LLM: N1/N2/N3.5/N4, Node2=SECONDARY_LLM:
+  # 슬롯 단위 1차 검색 결과 검증). 설계: docs/plans/spec_driven_agent.design.v2.md.
+  # required_tools 는 retrieval.search 만 — retrieval.verify_slot(Node2)·retrieval.follow_up
+  # 는 graceful skip(미배선 시 단일노드 degrade)이라 필수에서 제외한다(원칙 6).
+  spec_driven_v2:
+    compatible_llms: ["*"]
+    required_tools:
+      - retrieval.search
+    required_scenarios: []
+    capability_tags: [spec_driven, retrieval, stateless, keyword_fidelity, dual_node]

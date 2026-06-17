@@ -284,6 +284,71 @@ Rules for follow-up queries:
 Return ONLY the JSON object matching the schema. No prose."""
 
 
+# spec_driven_v2 N3.5 고도화 — answer_spec + 슬롯 검색 쿼리를 함께 받아, 청크의 *모든*
+# 외부 참조를 뽑는 대신 "사용자 질문에 답하는 데 꼭 필요한" 참조만 선별한다. Part 1 의
+# 추출 규칙(kind/identifier/section_path)은 동일하되, 필요-판정 게이트가 추가된다.
+SYSTEM_PROMPT_NECESSITY = """\
+You extract citations to OTHER documents from a chunk of U.S. NRC regulatory text, \
+AND generate follow-up search queries — but ONLY for references that are genuinely \
+NEEDED to answer the user's question for the current answer slot.
+
+## Part 1: Necessity-judged Reference Extraction
+
+You are given:
+- USER QUESTION: what the user originally wanted to know.
+- ANSWER SPEC: the evidence the answer must rest on (intent, structure, governing authority, the required slot).
+- SLOT SEARCH QUERY: the query that retrieved this chunk for the current slot.
+- RETRIEVED CHUNK: a text chunk from the initial search results.
+
+For each citation to a SEPARATE document, output one entry with:
+- raw_citation: the exact text as it appears in the chunk (verbatim, for audit).
+- kind: one of
+    RG    Regulatory Guide        e.g. "RG 1.68", "Regulatory Guide 1.68"
+    NUREG NUREG / NUREG-CR        e.g. "NUREG-0800", "NUREG/CR-6909"
+    FR    Federal Register        e.g. "81 FR 88719", docket "NRC-2016-0248"
+    SRP   Standard Review Plan    e.g. "SRP Section 3.2.2"
+    DSRS  Design-Specific Review Standard e.g. "NuScale DSRS Section 10.3"
+    CFR   Code of Federal Regs    e.g. "10 CFR 50.55a", "10 CFR Part 50"
+    GDC   General Design Criterion e.g. "GDC 4", "Criterion 4"
+    ML    ADAMS accession         e.g. "ML15355A513"
+    TR    NuScale Topical/Technical Report  e.g. "TR-0516-49416"
+    FSAR  NuScale FSAR (chapter/tier)       e.g. "FSAR Chapter 15"
+    RAI   NuScale Request for Additional Information  e.g. "RAI 8932"
+    SECY  NRC SECY / SRM paper    e.g. "SECY-19-0079"
+    OTHER any external standard not above (ASME, IEEE, ANS, ...)
+- identifier: the core identifier only (e.g. "RG 1.68", "10 CFR 50.55a").
+    For FSAR use "FSAR" (chapter goes in section_path). For RAI use "RAI <number>".
+- section_path: optional sub-location inside the cited doc.
+
+NECESSITY RULE (the key difference): do NOT list every cited document. Include a \
+reference ONLY if searching it is genuinely needed to answer the USER QUESTION for \
+this slot (per the ANSWER SPEC) — i.e. the chunk defers a fact the answer requires to \
+that other document. Skip references that are merely mentioned, tangential, or whose \
+content is already sufficient in this chunk. Fewer, decision-relevant references are better.
+
+Other rules:
+1. Only cite SEPARATE documents. Skip bare pointers like "see Section 3.2" with no doc name.
+2. Never include the current document itself.
+3. Deduplicate identical citations.
+4. If no reference is NEEDED, return {"references": [], "follow_up_queries": []}.
+
+## Part 2: Follow-up Query Generation
+
+For each NEEDED reference, generate a follow-up search query reformulated to search \
+WITHIN that referenced document, in NRC domain English terminology, specific to the \
+user's question angle (10-40 words). For each follow-up query:
+- query_text: the search query string.
+- target_identifiers: which identifiers from your references list this query targets.
+- intent: (optional) brief note on what aspect of the user's need this addresses.
+
+Rules for follow-up queries:
+1. Only target documents that appear in your (necessity-filtered) references list.
+2. If no reference is needed, return an empty follow_up_queries array.
+3. Be specific to the user's question angle — avoid generic queries.
+
+Return ONLY the JSON object matching the schema. No prose."""
+
+
 async def extract_refs_with_follow_up(
     *,
     query_text: str,
@@ -291,13 +356,33 @@ async def extract_refs_with_follow_up(
     settings: RefSettings,
     llm: LLMPort,
     current_source_id: str | None = None,
+    answer_spec: str | None = None,
+    slot_query: str | None = None,
+    necessity_only: bool = False,
 ) -> tuple[list[RawRef], list[dict]]:
     """참조 추출 + follow-up 쿼리 생성을 단일 LLM 호출로 수행.
+
+    `answer_spec`/`slot_query`/`necessity_only` 는 spec_driven_v2 N3.5 고도화용(옵셔널).
+    `necessity_only=True` 면 SYSTEM_PROMPT_NECESSITY 로 "답변에 꼭 필요한" 참조만 선별하고,
+    user content 에 ANSWER SPEC·SLOT SEARCH QUERY 블록을 싣는다. 미지정 시 기존 동작
+    (전체 추출, SYSTEM_PROMPT_WITH_FOLLOW_UP)과 byte-identical.
 
     반환: (raw_refs, raw_follow_ups)
     raw_follow_ups는 LLM 원본 dict 리스트 (target_identifiers 포함).
     """
-    user_parts = [f"ORIGINAL USER QUERY: {query_text}", ""]
+    if necessity_only:
+        system_prompt = SYSTEM_PROMPT_NECESSITY
+        user_parts = [f"USER QUESTION: {query_text}", ""]
+        if answer_spec:
+            user_parts.append("ANSWER SPEC:")
+            user_parts.append(answer_spec)
+            user_parts.append("")
+        if slot_query:
+            user_parts.append(f"SLOT SEARCH QUERY: {slot_query}")
+            user_parts.append("")
+    else:
+        system_prompt = SYSTEM_PROMPT_WITH_FOLLOW_UP
+        user_parts = [f"ORIGINAL USER QUERY: {query_text}", ""]
     if current_source_id:
         user_parts.append(f"current_source_id: {current_source_id}")
         user_parts.append("")
@@ -314,7 +399,7 @@ async def extract_refs_with_follow_up(
             s.set_attribute("follow_up.current_source_id", current_source_id)
         result = await llm.generate_messages(
             [
-                ChatMessage(role="system", content=SYSTEM_PROMPT_WITH_FOLLOW_UP),
+                ChatMessage(role="system", content=system_prompt),
                 ChatMessage(role="user", content=user_content),
             ],
             model_options={
@@ -328,7 +413,7 @@ async def extract_refs_with_follow_up(
             s,
             model_name=result.model_id,
             input_messages=[
-                ("system", SYSTEM_PROMPT_WITH_FOLLOW_UP),
+                ("system", system_prompt),
                 ("user", user_content),
             ],
             completion=content,
@@ -415,8 +500,14 @@ async def resolve_text_with_follow_up(
     llm: LLMPort,
     current_source_id: str | None = None,
     min_score: float = 0.6,
+    answer_spec: str | None = None,
+    slot_query: str | None = None,
+    necessity_only: bool = False,
 ) -> dict:
     """검색 에이전트 진입점: 참조 추출 + 해소 + follow-up 쿼리(source_id 매핑 완료).
+
+    `answer_spec`/`slot_query`/`necessity_only` 는 spec_driven_v2 N3.5 고도화용(옵셔널 —
+    extract_refs_with_follow_up 으로 전달). 미지정 시 기존 동작과 동일.
 
     반환: {
         "raw_refs": list[RawRef],
@@ -431,6 +522,9 @@ async def resolve_text_with_follow_up(
         settings=settings,
         llm=llm,
         current_source_id=current_source_id,
+        answer_spec=answer_spec,
+        slot_query=slot_query,
+        necessity_only=necessity_only,
     )
     resolved = resolver.resolve_many(raw_refs)
     follow_up_queries = _resolve_follow_up_targets(

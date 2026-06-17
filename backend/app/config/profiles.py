@@ -49,10 +49,16 @@ from app.application.events.recorder import EventRecorder
 from app.application.prompting.classification_source import ClassificationPromptSource
 from app.application.prompting.spec_driven_source import (
     SpecDrivenAnswerSpecSource,
+    SpecDrivenAnswerSpecV2Source,
     SpecDrivenGeneralSource,
+    SpecDrivenGeneralV2Source,
     SpecDrivenGenerationSource,
+    SpecDrivenGenerationV2Source,
     SpecDrivenQuerySource,
+    SpecDrivenQueryV2Source,
     SpecDrivenTriageSource,
+    SpecDrivenTriageV2Source,
+    SpecDrivenVerifySource,
 )
 from app.application.prompting.hybrid_source import HybridPromptSource
 from app.application.prompting.local_source import LocalPromptSource
@@ -249,8 +255,18 @@ async def build_container(settings: Settings) -> AppContainer:
         raise ValueError(
             f"utility_llm={utility_llm_id!r} not in pool ids={sorted(llm_pool)}"
         )
+    # spec_driven_v2 Node2 — 슬롯 검증을 도는 보조 LLM(SECONDARY_LLM). 빈 값이면
+    # default_llm 폴백(단일노드 graceful — Node2 가 없으면 검증을 Node1 에서 도는 셈이나
+    # 도구 배선은 openai_compat 게이트가 따로 막는다). 설정됐으나 pool 에 없으면 fail-fast
+    # (오타 방지 — utility_llm 검증과 동형, 원칙 5 부트 결정성).
+    secondary_llm_id = settings.secondary_llm or settings.default_llm
+    if secondary_llm_id not in llm_pool:
+        raise ValueError(
+            f"secondary_llm={secondary_llm_id!r} not in pool ids={sorted(llm_pool)}"
+        )
     llm_router = LLMRouter(pool=llm_pool, default_id=settings.default_llm)
     utility_llm = llm_pool[utility_llm_id]
+    secondary_llm = llm_pool[secondary_llm_id]
 
     # Heavy deps (postgres pool / tool executor / prompt resolver / classifier /
     # summarizer) are constructed only when at least one enabled variant
@@ -272,6 +288,12 @@ async def build_container(settings: Settings) -> AppContainer:
     spec_driven_generation_source: Any = None
     spec_driven_triage_source: Any = None
     spec_driven_general_source: Any = None
+    spec_driven_v2_answer_spec_source: Any = None
+    spec_driven_v2_query_source: Any = None
+    spec_driven_v2_generation_source: Any = None
+    spec_driven_v2_triage_source: Any = None
+    spec_driven_v2_general_source: Any = None
+    spec_driven_v2_verify_source: Any = None
     summarizer: ConversationSummarizer | None = None
     corpus_map: Any = None
 
@@ -460,6 +482,40 @@ async def build_container(settings: Settings) -> AppContainer:
                     hint="utility_llm is openai_compat but tool init failed; graceful degrade",
                 )
 
+        # retrieval.verify_slot — spec_driven_v2 Node2 슬롯 검증. follow_up 과 동일 가드:
+        # SECONDARY_LLM(secondary_llm_id) pool 엔트리가 openai_compat(내부망 vLLM)일 때만
+        # 배선한다(verify 는 vLLM guided_json 에 의존 — anthropic/fake 비호환 → graceful
+        # skip). 토글(spec_driven_v2_verify_enabled)이 꺼져 있어도 미배선(단일노드 degrade).
+        # 연결 정보(endpoint/model/timeout·재시도)는 secondary_llm(HttpLLM)이 단독 소유한다.
+        verify_slot_tool = None
+        _sec_entry = next(
+            (e for e in settings.llm_pool if e.id == secondary_llm_id), None
+        )
+        if (
+            settings.spec_driven_v2_verify_enabled
+            and _sec_entry is not None
+            and _sec_entry.provider == "openai_compat"
+        ):
+            try:
+                from app.adapters.slot_verifier_llm import SlotVerifierLlm
+                from app.adapters.tools.retrieval_verify_slot import RetrievalVerifySlotTool
+
+                # verify 프롬프트 source(registry 호스팅, sha 핀) — tool 이전에 구성해야
+                # 하므로 여기서 만든다. AgentDeps 로도 같은 인스턴스를 넘겨 재현 핀이 일관.
+                _verify_source = SpecDrivenVerifySource(Path(settings.prompt_local_dir))
+                spec_driven_v2_verify_source = _verify_source
+                verify_slot_tool = RetrievalVerifySlotTool(
+                    slot_verifier=SlotVerifierLlm(llm=secondary_llm, source=_verify_source),
+                    max_concurrency=settings.spec_driven_v2_verify_concurrency,
+                )
+            except Exception as _exc:
+                structlog.get_logger("retrieval.verify_slot.boot").warning(
+                    "verify_slot_tool_disabled",
+                    error=str(_exc),
+                    llm_id=secondary_llm_id,
+                    hint="secondary_llm is openai_compat but tool init failed; single-node degrade",
+                )
+
         # 검색·범위·용어 도구. retrieval.search = 내부 retriever 재사용 + Reranker 정렬
         # (실 cross-encoder 는 배포 시 주입, dev/test 는 identity 폴백 — seam 보존).
         # scope=CorpusMap 결정론. 용어 정규화/확장은 용어집(ISO 25964 lookup).
@@ -501,6 +557,8 @@ async def build_container(settings: Settings) -> AppContainer:
         }
         if follow_up_tool is not None:
             tools["retrieval.follow_up"] = follow_up_tool
+        if verify_slot_tool is not None:
+            tools["retrieval.verify_slot"] = verify_slot_tool
         tool_executor = ToolExecutor(registry=registry, tools=tools, event_sink=event_sink)
 
         # 분류 프롬프트 source(registry 호스팅) — boot 시 fragment sha 검증(fail-fast).
@@ -524,6 +582,24 @@ async def build_container(settings: Settings) -> AppContainer:
             Path(settings.prompt_local_dir)
         )
         spec_driven_general_source = SpecDrivenGeneralSource(
+            Path(settings.prompt_local_dir)
+        )
+        # spec_driven_v2 — 2-노드 분산 변형 전용 프롬프트 source(registry 호스팅, sha 핀).
+        # 초기엔 v1 fragment 를 그대로 참조(동일 sha)하나 profile_id 만 `*_v2` 로 분리해
+        # v2 전용 프롬프트 진화를 v1 과 격리한다(설계 spec_driven_agent.design.v2).
+        spec_driven_v2_answer_spec_source = SpecDrivenAnswerSpecV2Source(
+            Path(settings.prompt_local_dir)
+        )
+        spec_driven_v2_query_source = SpecDrivenQueryV2Source(
+            Path(settings.prompt_local_dir)
+        )
+        spec_driven_v2_generation_source = SpecDrivenGenerationV2Source(
+            Path(settings.prompt_local_dir)
+        )
+        spec_driven_v2_triage_source = SpecDrivenTriageV2Source(
+            Path(settings.prompt_local_dir)
+        )
+        spec_driven_v2_general_source = SpecDrivenGeneralV2Source(
             Path(settings.prompt_local_dir)
         )
         if settings.classifier_backend == "rule":
@@ -565,6 +641,13 @@ async def build_container(settings: Settings) -> AppContainer:
         spec_driven_generation_source=spec_driven_generation_source,
         spec_driven_triage_source=spec_driven_triage_source,
         spec_driven_general_source=spec_driven_general_source,
+        spec_driven_v2_answer_spec_source=spec_driven_v2_answer_spec_source,
+        spec_driven_v2_query_source=spec_driven_v2_query_source,
+        spec_driven_v2_generation_source=spec_driven_v2_generation_source,
+        spec_driven_v2_triage_source=spec_driven_v2_triage_source,
+        spec_driven_v2_general_source=spec_driven_v2_general_source,
+        spec_driven_v2_verify_source=spec_driven_v2_verify_source,
+        secondary_llm=secondary_llm,
         summarizer=summarizer,
         tunables={
             "classification_threshold": settings.classification_threshold,
@@ -592,6 +675,9 @@ async def build_container(settings: Settings) -> AppContainer:
             "spec_driven_max_context_chunks": settings.spec_driven_max_context_chunks,
             # N4 생성 컨텍스트 토큰 예산(0=무제한). 1차 전량 보존 + 2차 score 순 채움 캡.
             "spec_driven_context_token_budget": settings.spec_driven_context_token_budget,
+            # spec_driven_v2 — Node2 검증 토글 + 동시 검증 슬롯 상한(per-slot 파이프라인 캡).
+            "spec_driven_v2_verify_enabled": settings.spec_driven_v2_verify_enabled,
+            "spec_driven_v2_verify_concurrency": settings.spec_driven_v2_verify_concurrency,
             # spec_driven_v1 N4 — 인용 계약(파일 호스팅 → rendered_prompt_hash 에 반영).
             "citation_contract_path": str(
                 Path(settings.prompt_local_dir) / "system" / "citation_contract_v1.md"
@@ -611,6 +697,7 @@ async def build_container(settings: Settings) -> AppContainer:
         default_variant=settings.default_variant,
         default_llm=settings.default_llm,
         utility_llm=utility_llm_id,  # 폴백 해석된 실제 id(빈 값이면 default_llm).
+        secondary_llm=secondary_llm_id,  # Node2 검증 LLM(빈 값이면 default_llm).
     )
 
     return AppContainer(

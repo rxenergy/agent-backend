@@ -77,6 +77,11 @@ class RetrievalFollowUpTool:
                     chunk_text=chunk_text,
                     current_source_id=chunk.source_id,
                     min_score=tool_input.min_score,
+                    # spec_driven_v2 N3.5 — answer_spec+slot_query 기준 필요-판정 선별
+                    # (옵셔널, 미지정 시 v1 전체 추출). 입력 필드 기본값이 v1 byte-identical.
+                    answer_spec=tool_input.answer_spec,
+                    slot_query=tool_input.slot_query,
+                    necessity_only=tool_input.necessity_only,
                 )
 
         results = await asyncio.gather(
