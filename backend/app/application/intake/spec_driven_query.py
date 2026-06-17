@@ -621,11 +621,18 @@ def _attach_targets(
 
 # reference verbatim 토큰을 query_text 에서 떼어낼 때 쓰는 매칭 — 공백 변형(연속 공백)을
 # 흡수하고 토큰 경계를 존중한다(대소문자 무시). "10 CFR 50.61" 이 query_text 에 "10 cfr
-# 50.61" 로 들어가도 잡고, "50.461" 같은 부분일치는 \b 경계로 배제한다.
+# 50.61" 로 들어가도 잡고, "50.461" 같은 부분일치는 경계로 배제한다.
+#
+# 경계는 \b 가 아니라 **인접 영숫자 부정(lookaround)** 으로 둔다: `\b` 는 단어/비단어
+# *전환* 이 있어야 매칭하는데, reference 가 괄호로 끝나거나(`10 CFR 50.46(b)`,
+# `50.46(a)(1)(i)`) 시작하면 그 가장자리 문자(`)`)가 비단어라, 뒤에 공백(역시 비단어)이
+# 오면 전환이 없어 `\b` 가 실패 → ref 가 안 떼어지고 query 에 남았다(괄호 하위호 누수
+# 버그). (?<![\w]) / (?![\w]) 는 "직전/직후가 영숫자가 *아니면*" 으로 가장자리 문자
+# 종류와 무관하게 성립하므로 괄호 끝 ref 도 잡고, "50.461"(직후가 숫자)은 여전히 배제한다.
 def _ref_pattern(ref: str) -> "re.Pattern[str]":
     parts = [re.escape(tok) for tok in ref.split()]
     body = r"\s+".join(parts)
-    return re.compile(r"\b" + body + r"\b", re.IGNORECASE)
+    return re.compile(r"(?<![\w])" + body + r"(?![\w])", re.IGNORECASE)
 
 
 def _strip_scoped_references(

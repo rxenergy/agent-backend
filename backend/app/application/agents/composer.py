@@ -603,7 +603,6 @@ class ComposerRunner(SpecDrivenRunner):
         # 비활성이면 닫음 블록 생략(짧은 답에 군더더기 금지).
         synth_hash: str | None = None
         closing = ""
-        all_allowed_cites = {cand.citation_id for cand in pack.citation_candidates}
         if self._synthesize and len(slot_outputs) >= 1:
             await emit_step("synthesize", "started", num_slots=len(slot_outputs))
             with _TRACER.start_as_current_span("llm.synthesize") as sy:
@@ -613,19 +612,17 @@ class ComposerRunner(SpecDrivenRunner):
                 synth_hash = _sha16(synth_prompt)
                 sy.set_attribute("synthesize.rendered_prompt_hash", synth_hash)
                 try:
-                    synth = await self._slot_generate(
-                        llm, synth_prompt, span=sy,
+                    # 닫음 블록도 *토큰 단위 스트리밍*(사용자 요구). 본문과 사이에 빈 줄
+                    # 구분(prefix)을 첫 토큰 앞에 한 번 emit한다. 슬롯 본문과 달리 검수
+                    # 대상이 아니므로(검수 off·종합은 재조직) 그대로 흘린다.
+                    synth = await self._slot_generate_stream(
+                        llm, synth_prompt, span=sy, prefix="\n\n",
                         model_options_override=self._synth_model_options(),
                     )
-                    # 닫음 블록에 슬롯 cite 합 밖 cite 가 있으면 제거(grounding 재가드 H4).
-                    closing = self._strip_out_of_range_cites(
-                        synth.text, all_allowed_cites).strip()
+                    closing = synth.text.strip()
                     synth_mode = "model"
                 except LLMUnavailableError:
                     synth_mode = "skipped_unavailable"
-            if closing:
-                # 본문 뒤 빈 줄 후 닫음 블록을 이어 스트리밍(순서 보존).
-                await emit_token("\n\n" + closing)
             await emit_step("synthesize", "ok", mode=synth_mode)
         else:
             synth_mode = "off"
@@ -1087,6 +1084,44 @@ class ComposerRunner(SpecDrivenRunner):
                    prompt_tokens=int(res.token_usage.get("prompt_tokens", 0)),
                    completion_tokens=int(res.token_usage.get("completion_tokens", 0)))
         return res
+
+    async def _slot_generate_stream(
+        self, llm: LLMPort, prompt: str, *, span,
+        prefix: str = "", model_options_override: dict[str, Any] | None = None,
+    ) -> LLMResult:
+        """토큰 단위 스트리밍 생성 — 종합(닫음 블록)처럼 *검수 없이 그대로 흘리는* 출력에
+        쓴다(슬롯 본문은 검수 후 노출해야 하므로 비스트리밍 _slot_generate). `prefix` 는
+        본문과 닫음 블록 사이 구분(빈 줄 등)을 첫 토큰 *앞*에 한 번 emit 한다. 누적 텍스트를
+        LLMResult 로 돌려줘 호출부가 answer_text 재구성·cite 가드에 쓴다."""
+        opts = model_options_override or self._synth_model_options()
+        text_buf: list[str] = []
+        token_usage: dict[str, int] = {}
+        model_id: str | None = None
+        first = True
+        async for delta in llm.generate_stream(prompt, model_options=opts):
+            if delta.content:
+                if first and prefix:
+                    await emit_token(prefix)
+                    first = False
+                text_buf.append(delta.content)
+                await emit_token(delta.content)
+            if delta.token_usage:
+                token_usage = dict(delta.token_usage)
+            if delta.model_id:
+                model_id = delta.model_id
+        text = "".join(text_buf)
+        span.set_attribute("model_id", model_id or getattr(llm, "model_id", "unknown"))
+        oi.set_kind(span, oi.KIND_LLM)
+        oi.set_llm(span, model_name=model_id or "unknown", prompt=prompt,
+                   completion=text,
+                   prompt_tokens=int(token_usage.get("prompt_tokens", 0)),
+                   completion_tokens=int(token_usage.get("completion_tokens", 0)))
+        return LLMResult(
+            text=text,
+            token_usage=token_usage or {"prompt_tokens": 0,
+                                        "completion_tokens": len(text)},
+            model_id=model_id or getattr(llm, "model_id", "unknown"),
+        )
 
     # ------------------------------------------------------------------
     # 보조 — model_options / 이어붙이기 / 요지 추출 / cite 범위 가드.

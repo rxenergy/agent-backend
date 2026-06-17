@@ -502,6 +502,41 @@ def test_strip_scoped_reference_keeps_unscoped_and_cross_reference() -> None:
     assert "10 CFR 50.46" in out_c.query_text  # 다른 문서 참조 → 앵커 유지
 
 
+def test_strip_scoped_reference_handles_parenthesized_subsection() -> None:
+    # 회귀: 괄호로 끝나는 ref(10 CFR 50.46(b), 50.46(a)(1)(i))는 \b 경계가 실패해
+    # query_text 에 남아 있었다. 인접-영숫자-부정 경계로 교정 — 괄호 하위호도 떼어낸다.
+    q = FormulatedQuery(
+        slot_name="s",
+        query_text="10 CFR 50.46(b) acceptance criteria peak cladding temperature",
+        filters={"collection": ["10CFR"], _CANONICAL_FIELD: ["10CFR-Part1-50"]},
+    )
+    (out,) = _strip_scoped_references((q,), ("10 CFR 50.46(b)",))
+    assert "50.46(b)" not in out.query_text
+    assert out.query_text == "acceptance criteria peak cladding temperature"
+    # 더 깊은 하위호도(50.46(a)(1)(i)) 떼어진다.
+    q2 = FormulatedQuery(
+        slot_name="s2", query_text="ECCS 10 CFR 50.46(a)(1)(i) performance",
+        filters={"collection": ["10CFR"]},
+    )
+    (out2,) = _strip_scoped_references((q2,), ("10 CFR 50.46(a)(1)(i)",))
+    assert "50.46" not in out2.query_text
+    assert out2.query_text == "ECCS performance"
+
+
+def test_strip_scoped_reference_keeps_cross_ref_in_differently_scoped_query() -> None:
+    # RG 로 filter 된 쿼리 안의 10 CFR 50.46 cross-reference 는 *다른* 문서를 가리키므로
+    # 스코프 아님 → 앵커로 유지(괄호 ref 라도). 자기 문서(RG 1.157)만 떼어진다.
+    q = FormulatedQuery(
+        slot_name="rg",
+        query_text="RG 1.157 ECCS performance criteria 10 CFR 50.46(a)(1)(i)",
+        filters={"collection": ["RG"], _CANONICAL_FIELD: ["RG-1.157"]},
+    )
+    (out,) = _strip_scoped_references((q,), ("RG 1.157", "10 CFR 50.46(a)(1)(i)"))
+    assert "RG 1.157" not in out.query_text           # 자기 스코프 → 제거
+    assert "10 CFR 50.46(a)(1)(i)" in out.query_text   # cross-ref → 유지
+    assert out.references == ("10 CFR 50.46(a)(1)(i)",)
+
+
 def test_strip_scoped_reference_preserves_query_when_only_document_name() -> None:
     # query_text 가 전부 문서명이면(개념 토큰 없음) 빈 쿼리 방지로 원본 보존.
     q = FormulatedQuery(slot_name="s", query_text="RG 1.206",

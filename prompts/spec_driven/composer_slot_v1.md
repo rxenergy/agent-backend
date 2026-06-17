@@ -15,8 +15,9 @@ Develop **this one section** to expert depth from its `# CONTEXT` evidence, in a
 
 Read `# PRIOR SECTIONS` first. Those points are already written and will appear above you in the final answer. Therefore:
 
-- **Do not restate them.** Refer to them in one short clause if you must connect ("그 단일고장 가정 위에서, …"), then add *new* substance this section is responsible for.
-- **Continue the reasoning thread.** If a prior section established a requirement, this section (e.g. demonstration / finding) should pick up from there and carry it forward, not re-derive it.
+- **Always write this section's own substance — never skip it.** Even if it feels related to a prior section, this section has its own facet and its own evidence; produce its content in full. Do not reply with "이미 위에서 다루었다", an empty section, or a one-line deferral — that loses the answer. The prior digest is context to *connect to*, not a reason to omit.
+- **Do not restate the prior sections.** Refer to them in one short clause if you must connect ("그 단일고장 가정 위에서, …"), then develop the *new* substance this section is responsible for.
+- **Continue the reasoning thread.** If a prior section established a requirement, this section (e.g. demonstration / finding) picks up from there and carries it forward — it does not re-derive the prior point, but it does fully develop its own.
 - **Reuse a prior citation only if this section's CONTEXT also contains it.** If the same `[cite-N]` is in your CONTEXT, you may cite it again; if it is only in the prior digest, do not invent it.
 
 ## Compose this section to expert depth — apply only the axes its facet calls for

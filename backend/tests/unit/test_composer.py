@@ -215,8 +215,9 @@ async def test_slotwise_streams_slots_then_appends_closing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_slots_streamed_as_tokens_in_order() -> None:
-    # run_stream 으로 토큰 이벤트 순서를 검증 — 슬롯1 토큰이 슬롯2·닫음 블록보다 먼저.
+async def test_slots_and_synthesize_streamed_in_order() -> None:
+    # run_stream 토큰 이벤트 순서 — 슬롯1 → 슬롯2 → 닫음 블록(종합)이 *모두 토큰으로*
+    # 스트리밍되고 순서가 보존되는지. 종합도 토큰 스트림에 실린다(별도 final 본문 아님).
     with tempfile.TemporaryDirectory() as tmp:
         runner = _build(Path(tmp), _slotwise_script())
         tokens: list[str] = []
@@ -224,9 +225,14 @@ async def test_slots_streamed_as_tokens_in_order() -> None:
             if ev.kind == "token":
                 tokens.append(ev.payload["content"])
         joined = "".join(tokens)
-        # 첫 슬롯이 토큰 스트림에 등장하고, 닫음 블록보다 앞선다(조기 스트리밍).
+        # 두 슬롯 본문 + 종합 닫음 블록이 전부 토큰 스트림에 등장.
         assert "ECCS 성능을 요구한다" in joined
-        assert joined.index("ECCS 성능을 요구한다") < joined.index("## 핵심 정리")
+        assert "최대 피복재 온도는 2200°F" in joined
+        assert "## 핵심 정리" in joined and "## 다음 단계 제안" in joined
+        # 순서: 슬롯1 < 슬롯2 < 종합(닫음 블록).
+        assert (joined.index("ECCS 성능을 요구한다")
+                < joined.index("최대 피복재 온도는 2200°F")
+                < joined.index("## 핵심 정리"))
 
 
 @pytest.mark.asyncio
