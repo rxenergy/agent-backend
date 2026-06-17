@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 from app.application.agents.events import (
@@ -50,6 +51,26 @@ _TRACER = get_tracer("agent")
 _LOG = get_logger("agent.spec_driven_v1")
 
 SPEC_DRIVEN_VARIANT_ID = "spec_driven_v1"
+
+
+@dataclass
+class _PostRetrievalOutcome:
+    """N3.5(follow-up/검증) + 최종 조립 단계의 산출. `_post_retrieval` 시임(seam)이
+    돌려주고 run() 이 소비한다 — v1 은 follow-up 2차 검색, v2(SpecDrivenV2Runner)는
+    per-slot Node2 검증→Node1 외부참조 선별→2차 검색 파이프라인으로 *동일 계약*을 채운다.
+
+    `chunks` 는 최종 N4 컨텍스트 청크(score desc), `evidence_gap` 은 0건 여부,
+    `qu_sections` 는 query_understanding 핀의 retrieval/follow_up/context_budget(+v2 의
+    verify) 섹션 dict, `fq_summary` 는 reasoning 방출용 요약(없으면 None)."""
+
+    chunks: list[RetrievedChunk]
+    evidence_gap: bool
+    qu_sections: dict[str, Any]
+    fq_summary: str | None = None
+    source_ids_fq: list[dict[str, Any]] = field(default_factory=list)
+    # 추가 reasoning 블록(UI thinking 노출용). v1 은 None(동작 불변). v2 는 Node2 슬롯
+    # 검증/재검증 근거를 여기 담고, base run() 이 fq_summary emit 직후 한 번 더 방출한다.
+    extra_reasoning: str | None = None
 _SEARCH_TOOL = "retrieval.search"
 # 인덱싱 단계에서 표시한 노이즈 chunk(noise:true — 목차·헤더·fragment 등) 를 검색
 # 모집단에서 hard-scope 로 제외(filters → OpenSearch term). local retriever 는 무시.
@@ -140,6 +161,13 @@ class SpecDrivenRunner:
     지어내지 못하게 N4 프롬프트가 parametric 답변을 hard-forbid 한다(CLAUDE.md #6 불변식
     호환). 재현성·통제된 도구·실패 1급 불변식은 유지한다. v1 은 coverage 재검색·검증을
     두지 않는다(stub — 설계 §4.2/§11)."""
+
+    # N4 / N4-G 생성 프롬프트의 event/step profile_id 라벨. prompt_body 자체는 주입된
+    # source(registry 호스팅)가 소유하나, 이벤트·스텝에 찍히는 profile_id 문자열은 변형마다
+    # 다르다(재현 핀이 어느 프롬프트 정책으로 생성됐는지 단독 설명 — 원칙 5). 서브클래스
+    # (spec_driven_v2)가 `*_v2` 로 오버라이드한다. 동작 불변(기본값=기존 하드코딩 문자열).
+    _GENERATION_PROFILE_ID = "spec_driven_generation_v1"
+    _GENERAL_PROFILE_ID = "spec_driven_general_v1"
 
     def __init__(
         self,
@@ -463,156 +491,35 @@ class SpecDrivenRunner:
                             uncovered_required=len(coverage["uncovered_required"]),
                             evidence_gap=evidence_gap)
 
-            # N3.5 — follow-up 2차 검색 (외부 참조 문서 내 재검색).
-            # 1차 검색 청크에서 외부 참조를 추출하고, 사용자 의도를 반영한 재검색 쿼리로
-            # 참조 문서 내부를 다시 검색한다. 미배선(ToolUnknown)/실패 시 graceful skip.
-            #
-            # reasoning 방출 순서가 중요하다: 재검색 도구 + 2차 search 루프를 *먼저* 다
-            # 돌려 요약(fq_summary)만 버퍼해 두고, `**참조 문서 재검색**` reasoning 은
-            # 루프가 끝난 *뒤* 단 한 번 방출한다. 그래야 2차 search 의 tool 프레임이
-            # reasoning_content 와 본문(N4 generation) 사이에 끼지 않아 OpenWebUI Thought
-            # 블록이 조기 종결되지 않는다(#24295). 헤더 라벨은 N0 triage(질의 분류)와
-            # 동형의 직접 emit_reasoning — 결정론 요약이라 LazyReasoning 불필요.
-            await emit_step("follow_up_search", "started")
-            follow_up_added = 0
-            fq_summary: str | None = None
-            # qu_pin(재현 핀)이 미배선/예외 경로에서도 follow_up 섹션을 균일하게 싣도록
-            # try 밖에서 선초기화 — 어떤 skip 경로든 빈 리스트로 남는다.
-            fq_list: list[dict[str, Any]] = []
-            # 2차 검색 대상 쿼리 수(target_source_ids 보유분) — phase span 속성용.
-            searchable_count = 0
-            # N3.5 phase span — N3 의 agent.retrieval 과 대칭. 이게 없으면 Phoenix 에서
-            # 참조 추출(retrieval.follow_up)·2차 search(retrieval.search) tool span 이
-            # phase 부모 없이 agent.run 바로 밑에 흩어져, follow-up 단계를 묶어 분석할 수
-            # 없다. CHAIN kind 로 추출→재검색 복합 단계를 표현하고, IO(질의·생성된 재검색
-            # 쿼리 요약)와 카운터(생성·검색대상·채택 청크)를 span 에 실어 단계별 귀인을
-            # 가능케 한다. self._tools.invoke 의 tool span 들은 이 with 컨텍스트 안에서
-            # 생성돼 자동으로 이 span 의 자식으로 nesting 된다(병렬 gather 포함 — task
-            # 생성 시점 컨텍스트가 캡처됨).
-            with _TRACER.start_as_current_span("agent.follow_up_search") as fs:
-                oi.set_kind(fs, oi.KIND_CHAIN)
-                oi.set_io(fs, input_value=request.query_text)
-                fs.set_attribute("follow_up.first_pass_chunks", len(chunks))
-                fs.set_attribute("follow_up.fetch_k", self._follow_up_fetch_k)
-                fs.set_attribute("follow_up.keep_k", self._follow_up_keep_k)
-                try:
-                    follow_up_res = await self._tools.invoke(
-                        "retrieval.follow_up",
-                        {
-                            "query_text": request.query_text,
-                            "chunks": [c.model_dump(mode="json") for c in chunks],
-                        },
-                        ctx,
-                    )
-                    record(follow_up_res)
-
-                    if follow_up_res.status == "success" and follow_up_res.output:
-                        fq_list = follow_up_res.output.get("follow_up_queries", []) or []
-                        if fq_list:
-                            # reasoning 텍스트는 버퍼만 — 아래 2차 search 가 끝난 뒤 방출.
-                            fq_summary = "\n".join(
-                                f"- {fq['query_text']} → {fq.get('target_source_ids', [])}"
-                                for fq in fq_list
-                            )
-
-                            # target_source_ids 가 있는 쿼리만 2차 검색 대상(없으면 필터 불가).
-                            searchable = [
-                                fq for fq in fq_list if fq.get("target_source_ids")
-                            ]
-                            searchable_count = len(searchable)
-                            # 2차 검색을 *병렬*로 실행한다(1차 추출 병렬화와 동일 취지). 각
-                            # retrieval.search invoke 는 재진입 안전(span/httpx/encoder stateless)
-                            # 이고, OpenSearch 어댑터가 torch 인코딩을 to_thread 로 풀어 동시
-                            # 검색이 실제로 겹친다. record / chunks_by_id / follow_up_added 변이는
-                            # race 방지를 위해 gather 완료 후 fq 원순서대로 *순차* 처리한다
-                            # (dedup 우선순위·결정성 보존 → 직렬판과 동일 결과).
-                            sub_results = await asyncio.gather(
-                                *(
-                                    self._tools.invoke(
-                                        _SEARCH_TOOL,
-                                        {
-                                            "query_text": fq["query_text"],
-                                            "top_k": self._follow_up_fetch_k,
-                                            # 참조 문서 *내부* 로 모집단을 좁힌 hard-scope.
-                                            # 노이즈 floor·noise:false 도 1차와 동일하게 실어
-                                            # 목차·헤더·fragment 가 2차 결과를 오염시키지 않게
-                                            # 한다(필요·중요 내용만 — 사용자 요구).
-                                            "min_token_count": self._min_token_count,
-                                            "filters": {
-                                                **_NOISE_FILTER,
-                                                "source_id": fq["target_source_ids"],
-                                            },
-                                        },
-                                        ctx,
-                                    )
-                                    for fq in searchable
-                                ),
-                                return_exceptions=True,
-                            )
-                            for sub_res in sub_results:
-                                if isinstance(sub_res, BaseException):
-                                    # 개별 검색 실패는 graceful skip(형제 검색 비취소).
-                                    continue
-                                record(sub_res)
-                                found = _parse_chunks(
-                                    sub_res.output if sub_res.status == "success" else None
-                                )
-                                # 관련성 게이트(사용자 요구 — "필요·중요 내용만"). 2차 검색
-                                # 점수는 follow-up 쿼리·대상 문서마다 척도가 달라 *전역* 절대
-                                # 임계값이 부적절하다. 대신 쿼리 *내부* 상대순위 상위
-                                # _follow_up_keep_k 개만 채택한다(검색이 score desc 로 반환).
-                                # 나머지(저관련 tail)는 컨텍스트에서 배제 → 참조 문서에서
-                                # 의도와 무관한 단락이 답변을 희석하지 않는다.
-                                for c in found[: self._follow_up_keep_k]:
-                                    if c.chunk_id not in chunks_by_id:
-                                        chunks_by_id[c.chunk_id] = c
-                                        follow_up_added += 1
-
-                            if follow_up_added > 0:
-                                # 1차+2차 통합 재정렬(score desc). 최종 chunk 선택은 try
-                                # 밖에서 _assemble_final_chunks 가 일괄 수행한다(예외/미배선
-                                # 경로에서도 동일 조립이 돌도록 — 토큰 캡은 항상 적용).
-                                merged = sorted(
-                                    chunks_by_id.values(),
-                                    key=lambda c: c.score,
-                                    reverse=True,
-                                )
-                except Exception:  # noqa: BLE001 — ToolUnknown 등 graceful skip
-                    pass
-                # phase 결과를 span 에 실어 Phoenix 에서 단계별 귀인 — 추출된 재검색 쿼리
-                # 수 / 2차 검색 실행 수 / 컨텍스트에 새로 채택된 청크 수. output 은 생성된
-                # 재검색 쿼리 요약(없으면 미설정).
-                fs.set_attribute("follow_up.num_queries", len(fq_list))
-                fs.set_attribute("follow_up.searchable_queries", searchable_count)
-                fs.set_attribute("follow_up.added_chunks", follow_up_added)
-                if fq_summary:
-                    oi.set_io(fs, output_value=fq_summary)
-            await emit_step("follow_up_search", "ok", added_chunks=follow_up_added)
-
-            # === 최종 조립 — 1차 전량 보존 + 2차 score 순 채움(토큰 예산 캡) =======
-            # follow_up 성공/실패/미배선 무관하게 항상 실행한다. budget=0 이면 캡 없이
-            # (1차+2차 전량), >0 이면 추정 토큰 합이 예산을 넘는 만큼 2차 tail(낮은
-            # score)부터 drop. 1차 청크는 1차만으로 예산을 초과할 때만 최후로 drop.
-            chunks, budget_log, total_tokens_est, first_pass_dropped = (
-                _assemble_final_chunks(
-                    first_pass_ids, merged, self._context_token_budget
-                )
+            # === N3.5 + 최종 조립 (overridable seam) =====================
+            # v1: follow-up 2차 검색(외부 참조 추출 → 참조 문서 내 재검색). v2
+            # (SpecDrivenV2Runner)는 per-slot Node2 검증 → Node1 외부참조 선별 → 2차 검색
+            # 파이프라인으로 *동일* _PostRetrievalOutcome 계약을 채운다. 둘 다 최종 N4
+            # 컨텍스트 청크·evidence_gap·재현 핀 섹션(retrieval/follow_up/context_budget
+            # [+v2 verify])·reasoning 요약을 돌려준다.
+            post_outcome = await self._post_retrieval(
+                request=request, ctx=ctx, record=record, spec=spec,
+                queries=queries, merged=merged, chunks=chunks,
+                chunks_by_id=chunks_by_id, slots_by_chunk=slots_by_chunk,
+                first_pass_ids=first_pass_ids, coverage=coverage,
+                per_query_counts=per_query_counts, per_query_k=per_query_k,
             )
-            evidence_gap = not chunks
-            if budget_log:
-                await emit_step("context_budget", "ok",
-                                budget=self._context_token_budget,
-                                total_tokens_est=total_tokens_est,
-                                dropped=len(budget_log),
-                                first_pass_dropped=first_pass_dropped)
+            chunks = post_outcome.chunks
+            evidence_gap = post_outcome.evidence_gap
 
             # 루프(tool 프레임)가 모두 끝난 *뒤* reasoning 을 단 한 번 방출 → 다음에 오는
             # 것은 context_build(step, 사이드채널) · generation 본문 토큰뿐이라 Thought
-            # 블록과 본문이 연속된다(정상 렌더되는 `**질의 분류**` 패턴과 동일).
-            if fq_summary:
-                await emit_reasoning(f"\n**참조 문서 재검색**\n{fq_summary}\n")
+            # 블록과 본문이 연속된다(#24295, 정상 렌더되는 `**질의 분류**` 패턴과 동일).
+            # extra_reasoning(v2 Node2 검증 근거)을 먼저, fq_summary(외부참조 재검색)를 다음.
+            if post_outcome.extra_reasoning:
+                await emit_reasoning(post_outcome.extra_reasoning)
+            if post_outcome.fq_summary:
+                await emit_reasoning(
+                    f"\n**참조 문서 재검색**\n{post_outcome.fq_summary}\n"
+                )
 
             # 재현 핀(원칙 5) — triage→spec→query→retrieval 경로를 query_understanding 백에.
+            # retrieval/follow_up/context_budget(+v2 verify) 섹션은 seam 이 채운다.
             qu_pin: dict[str, Any] = {
                 "spec_driven": {
                     "route": "retrieval",
@@ -645,44 +552,7 @@ class SpecDrivenRunner:
                             for q in queries
                         ],
                     },
-                    "retrieval": {
-                        "num_chunks": len(chunks),
-                        "merged": len(merged),
-                        "budget": self._max_context_chunks,
-                        "fetch_k": per_query_k,
-                        # 1차 검색 청크 수 — 최종 컨텍스트에 전량 반영됨(예산 안전판이
-                        # 발동해 first_pass_dropped=True 가 아닌 한). num_chunks 와 대조.
-                        "first_pass_kept": len(first_pass_ids),
-                        "per_query_counts": per_query_counts,
-                        "min_token_count": self._min_token_count,
-                        "filters": dict(_NOISE_FILTER),
-                        "floored_slots": coverage["floored_slots"],
-                        "covered_required_slots": coverage["covered_required"],
-                        "uncovered_required_slots": coverage["uncovered_required"],
-                    },
-                    "follow_up": {
-                        # num_queries==0 ⇒ 2차 검색 스킵(미배선/실패) 또는 후속쿼리 없음.
-                        # 키 자체는 항상 존재(스키마 균일) — 값으로 구별한다.
-                        "num_queries": len(fq_list),
-                        "added_chunks": follow_up_added,
-                        "queries": [
-                            {
-                                "query_text": fq.get("query_text"),
-                                "target_source_ids": fq.get("target_source_ids", []),
-                                "intent": fq.get("intent"),
-                            }
-                            for fq in fq_list
-                        ],
-                    },
-                    # 토큰 예산 거버너 결과(원칙 5/6 — silent cap 금지). budget=0 이면
-                    # drop 없음. first_pass_dropped=True 는 1차 근거가 윈도우 안전판에
-                    # 밀린 비정상 신호(감사 가시).
-                    "context_budget": {
-                        "budget": self._context_token_budget,
-                        "total_tokens_est": total_tokens_est,
-                        "dropped_chunk_ids": budget_log,
-                        "first_pass_dropped": first_pass_dropped,
-                    },
+                    **post_outcome.qu_sections,
                     "evidence_gap": evidence_gap,
                     "session": self._session_pin(sess, post),
                 }
@@ -731,7 +601,7 @@ class SpecDrivenRunner:
                 request.interaction_id, self._context_builder.to_snapshot(pack),
             )
             await emit_step("prompt_render", "ok",
-                            profile_id="spec_driven_generation_v1",
+                            profile_id=self._GENERATION_PROFILE_ID,
                             rendered_prompt_hash=rendered_prompt_hash)
 
             await emit_step("generation", "started", llm_id=llm_id,
@@ -784,7 +654,8 @@ class SpecDrivenRunner:
                 request, ctx, record,
                 user_turn=request.query_text, assistant_turn=answer_text,
                 references=list(spec.explicit_references),
-                chunk_ids=chunk_ids, source_ids=_source_ids_of(chunks, fq_list),
+                chunk_ids=chunk_ids,
+                source_ids=_source_ids_of(chunks, post_outcome.source_ids_fq),
                 topic_signature=_topic_signature(spec),
                 memory_ids_used=memory_ids_used,
                 variant_state={
@@ -801,7 +672,7 @@ class SpecDrivenRunner:
                     agent_variant=self.spec.variant_id,
                     retrieved_chunk_ids=tuple(chunk_ids),
                     retrieval_confidence=(chunks[0].score if chunks else 0.0),
-                    prompt_profile_id="spec_driven_generation_v1",
+                    prompt_profile_id=self._GENERATION_PROFILE_ID,
                     prompt_version=self._generation_source.prompt_version,
                     rendered_prompt_hash=rendered_prompt_hash,
                     prompt_composition_hash=self._generation_source.policy_hash,
@@ -818,6 +689,167 @@ class SpecDrivenRunner:
                 s.set_attribute("interaction_id", request.interaction_id)
 
             return response
+
+    # ------------------------------------------------------------------
+    # N3.5 + 최종 조립 시임(seam) — v1 은 follow-up 2차 검색. v2 는 오버라이드해 per-slot
+    # Node2 검증→Node1 외부참조 선별→2차 검색 파이프라인으로 동일 _PostRetrievalOutcome 을
+    # 채운다(run() 의 N4 입력·재현 핀·N5 source_id 가 변형과 무관하게 동작 — 원칙 1).
+    # ------------------------------------------------------------------
+    async def _post_retrieval(
+        self, *, request: AgentRequest, ctx: ToolExecutionContext, record,
+        spec: AnswerSpec, queries: list[FormulatedQuery],
+        merged: list[RetrievedChunk], chunks: list[RetrievedChunk],
+        chunks_by_id: dict[str, RetrievedChunk],
+        slots_by_chunk: dict[str, set[str]], first_pass_ids: set[str],
+        coverage: dict[str, list[str]], per_query_counts: list[int],
+        per_query_k: int,
+    ) -> "_PostRetrievalOutcome":
+        """v1 — follow-up 2차 검색(외부 참조 추출 → 참조 문서 내 재검색). 1차 검색 결과는
+        전량 보존하고 2차를 score 순으로 토큰 예산까지 채운다. 미배선/실패 graceful skip."""
+        await emit_step("follow_up_search", "started")
+        follow_up_added = 0
+        fq_summary: str | None = None
+        # qu_pin(재현 핀)이 미배선/예외 경로에서도 follow_up 섹션을 균일하게 싣도록
+        # try 밖에서 선초기화 — 어떤 skip 경로든 빈 리스트로 남는다.
+        fq_list: list[dict[str, Any]] = []
+        searchable_count = 0
+        # N3.5 phase span — N3 의 agent.retrieval 과 대칭. self._tools.invoke 의 tool span
+        # 들은 이 with 컨텍스트 안에서 생성돼 자동으로 이 span 의 자식으로 nesting 된다
+        # (병렬 gather 포함 — task 생성 시점 컨텍스트가 캡처됨).
+        with _TRACER.start_as_current_span("agent.follow_up_search") as fs:
+            oi.set_kind(fs, oi.KIND_CHAIN)
+            oi.set_io(fs, input_value=request.query_text)
+            fs.set_attribute("follow_up.first_pass_chunks", len(chunks))
+            fs.set_attribute("follow_up.fetch_k", self._follow_up_fetch_k)
+            fs.set_attribute("follow_up.keep_k", self._follow_up_keep_k)
+            try:
+                follow_up_res = await self._tools.invoke(
+                    "retrieval.follow_up",
+                    {
+                        "query_text": request.query_text,
+                        "chunks": [c.model_dump(mode="json") for c in chunks],
+                    },
+                    ctx,
+                )
+                record(follow_up_res)
+
+                if follow_up_res.status == "success" and follow_up_res.output:
+                    fq_list = follow_up_res.output.get("follow_up_queries", []) or []
+                    if fq_list:
+                        # reasoning 텍스트는 버퍼만 — 아래 2차 search 가 끝난 뒤 방출.
+                        fq_summary = "\n".join(
+                            f"- {fq['query_text']} → {fq.get('target_source_ids', [])}"
+                            for fq in fq_list
+                        )
+
+                        # target_source_ids 가 있는 쿼리만 2차 검색 대상(없으면 필터 불가).
+                        searchable = [
+                            fq for fq in fq_list if fq.get("target_source_ids")
+                        ]
+                        searchable_count = len(searchable)
+                        # 2차 검색을 *병렬*로 실행한다. record / chunks_by_id /
+                        # follow_up_added 변이는 race 방지를 위해 gather 완료 후 fq 원순서대로
+                        # *순차* 처리한다(dedup 우선순위·결정성 보존 → 직렬판과 동일 결과).
+                        sub_results = await asyncio.gather(
+                            *(
+                                self._tools.invoke(
+                                    _SEARCH_TOOL,
+                                    {
+                                        "query_text": fq["query_text"],
+                                        "top_k": self._follow_up_fetch_k,
+                                        # 참조 문서 *내부* 로 모집단을 좁힌 hard-scope.
+                                        # 노이즈 floor·noise:false 도 1차와 동일하게 실어
+                                        # 목차·헤더·fragment 가 2차를 오염시키지 않게.
+                                        "min_token_count": self._min_token_count,
+                                        "filters": {
+                                            **_NOISE_FILTER,
+                                            "source_id": fq["target_source_ids"],
+                                        },
+                                    },
+                                    ctx,
+                                )
+                                for fq in searchable
+                            ),
+                            return_exceptions=True,
+                        )
+                        for sub_res in sub_results:
+                            if isinstance(sub_res, BaseException):
+                                # 개별 검색 실패는 graceful skip(형제 검색 비취소).
+                                continue
+                            record(sub_res)
+                            found = _parse_chunks(
+                                sub_res.output if sub_res.status == "success" else None
+                            )
+                            # 관련성 게이트 — 쿼리 *내부* 상대순위 상위 keep_k 만 채택.
+                            for c in found[: self._follow_up_keep_k]:
+                                if c.chunk_id not in chunks_by_id:
+                                    chunks_by_id[c.chunk_id] = c
+                                    follow_up_added += 1
+
+                        if follow_up_added > 0:
+                            merged = sorted(
+                                chunks_by_id.values(),
+                                key=lambda c: c.score, reverse=True,
+                            )
+            except Exception:  # noqa: BLE001 — ToolUnknown 등 graceful skip
+                pass
+            fs.set_attribute("follow_up.num_queries", len(fq_list))
+            fs.set_attribute("follow_up.searchable_queries", searchable_count)
+            fs.set_attribute("follow_up.added_chunks", follow_up_added)
+            if fq_summary:
+                oi.set_io(fs, output_value=fq_summary)
+        await emit_step("follow_up_search", "ok", added_chunks=follow_up_added)
+
+        # === 최종 조립 — 1차 전량 보존 + 2차 score 순 채움(토큰 예산 캡) =======
+        chunks, budget_log, total_tokens_est, first_pass_dropped = (
+            _assemble_final_chunks(first_pass_ids, merged, self._context_token_budget)
+        )
+        evidence_gap = not chunks
+        if budget_log:
+            await emit_step("context_budget", "ok",
+                            budget=self._context_token_budget,
+                            total_tokens_est=total_tokens_est,
+                            dropped=len(budget_log),
+                            first_pass_dropped=first_pass_dropped)
+
+        qu_sections: dict[str, Any] = {
+            "retrieval": {
+                "num_chunks": len(chunks),
+                "merged": len(merged),
+                "budget": self._max_context_chunks,
+                "fetch_k": per_query_k,
+                "first_pass_kept": len(first_pass_ids),
+                "per_query_counts": per_query_counts,
+                "min_token_count": self._min_token_count,
+                "filters": dict(_NOISE_FILTER),
+                "floored_slots": coverage["floored_slots"],
+                "covered_required_slots": coverage["covered_required"],
+                "uncovered_required_slots": coverage["uncovered_required"],
+            },
+            "follow_up": {
+                # num_queries==0 ⇒ 2차 검색 스킵(미배선/실패) 또는 후속쿼리 없음.
+                "num_queries": len(fq_list),
+                "added_chunks": follow_up_added,
+                "queries": [
+                    {
+                        "query_text": fq.get("query_text"),
+                        "target_source_ids": fq.get("target_source_ids", []),
+                        "intent": fq.get("intent"),
+                    }
+                    for fq in fq_list
+                ],
+            },
+            "context_budget": {
+                "budget": self._context_token_budget,
+                "total_tokens_est": total_tokens_est,
+                "dropped_chunk_ids": budget_log,
+                "first_pass_dropped": first_pass_dropped,
+            },
+        }
+        return _PostRetrievalOutcome(
+            chunks=chunks, evidence_gap=evidence_gap, qu_sections=qu_sections,
+            fq_summary=fq_summary, source_ids_fq=fq_list,
+        )
 
     # ------------------------------------------------------------------
     # N4-G General Generation — RAG 비대상 도메인 질의 직답(검색·도구·인용 없음).
@@ -864,7 +896,7 @@ class SpecDrivenRunner:
             request.interaction_id, self._context_builder.to_snapshot(pack),
         )
         await emit_step("prompt_render", "ok",
-                        profile_id="spec_driven_general_v1",
+                        profile_id=self._GENERAL_PROFILE_ID,
                         rendered_prompt_hash=rendered_prompt_hash)
 
         await emit_step("generation", "started", llm_id=llm_id, route="general")
@@ -918,7 +950,7 @@ class SpecDrivenRunner:
                 agent_variant=self.spec.variant_id,
                 retrieved_chunk_ids=(),
                 retrieval_confidence=0.0,
-                prompt_profile_id="spec_driven_general_v1",
+                prompt_profile_id=self._GENERAL_PROFILE_ID,
                 prompt_version=self._general_source.prompt_version,
                 rendered_prompt_hash=rendered_prompt_hash,
                 prompt_composition_hash=self._general_source.policy_hash,

@@ -61,6 +61,19 @@ class AgentDeps:
     composer_slot_source: Any = None
     composer_synthesize_source: Any = None
     composer_slot_verify_source: Any = None
+    # spec_driven_v2 — 2-노드(DGX Spark) 분산 변형 전용 프롬프트 source(registry 호스팅,
+    # sha 핀). v1 과 격리된 `*_v2` profile_id 를 읽는다(초기엔 v1 fragment 재사용 → 동일
+    # sha). None 이면 v2 변형이 run() 에서 부트 배선 오류로 처리(프롬프트 인라인 금지).
+    spec_driven_v2_answer_spec_source: Any = None
+    spec_driven_v2_query_source: Any = None
+    spec_driven_v2_generation_source: Any = None
+    spec_driven_v2_triage_source: Any = None
+    spec_driven_v2_general_source: Any = None
+    spec_driven_v2_verify_source: Any = None
+    # spec_driven_v2 Node2 — 슬롯 검증 보조 LLM(SECONDARY_LLM resolve 결과). 변형은
+    # 검증을 retrieval.verify_slot 도구로 호출하므로 러너가 직접 쓰진 않으나, 재현 핀
+    # (어느 모델이 검증했는가)·테스트 가시성을 위해 번들에 싣는다. 미배선 시 None.
+    secondary_llm: Any = None
     summarizer: "ConversationSummarizer | None" = None
     # Pass-through tunables — runners read what they care about.
     tunables: dict[str, Any] = field(default_factory=dict)
