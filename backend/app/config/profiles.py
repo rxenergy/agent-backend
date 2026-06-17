@@ -604,7 +604,8 @@ async def build_container(settings: Settings) -> AppContainer:
         composer_synthesize_source = ComposerSynthesizeSource(
             Path(settings.prompt_local_dir)
         )
-        composer_slot_verify_source = ComposerSlotVerifySource(
+        composer_slot_verify_source = ComposerSlotVerifySource(Path(settings.prompt_local_dir)
+        )
         # spec_driven_v2 — 2-노드 분산 변형 전용 프롬프트 source(registry 호스팅, sha 핀).
         # 초기엔 v1 fragment 를 그대로 참조(동일 sha)하나 profile_id 만 `*_v2` 로 분리해
         # v2 전용 프롬프트 진화를 v1 과 격리한다(설계 spec_driven_agent.design.v2).
