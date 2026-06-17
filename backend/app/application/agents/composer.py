@@ -90,7 +90,7 @@ class ComposerRunner(SpecDrivenRunner):
         slot_verify: str = "off",  # "off"(기본, 현재 비활성) | "l0" | "l1"
         synthesize: bool = True,
         slot_context_k: int = 12,
-        prior_full_k: int | None = None,
+        prior_full_k: int | None = 2,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -107,8 +107,11 @@ class ComposerRunner(SpecDrivenRunner):
         # 청크를 억지로 채우면 오인용·환각을 부르므로 점수상위 보충은 하지 않는다(사용자 결정).
         # 귀속 0(굶음)일 때만 결정론 fallback(score 상위 K)로 빈 슬롯을 막는다(§3.3).
         self._slot_context_k = slot_context_k
-        # PRIOR SECTIONS 전달 폭(설계 §3.4) — 직전 K개 슬롯은 *전문*, 그 이전은 요지로 떨어뜨려
-        # 토큰 폭주를 막는 안전판. None=전체 전문(사용자 결정 — 기본은 전체).
+        # PRIOR SECTIONS 전달 폭(설계 §3.4) — hybrid sliding-window: 직전 K개 슬롯만 *전문*,
+        # 그 이전은 한 줄 요지로 압축한다. 전체 누적은 O(N²) 토큰이라 마지막 슬롯이 비대해지고
+        # 지연·비용이 뒤로 갈수록 폭증 → 기본 K=2(직전 2개 전문). 연결은 최근 맥락이 좌우하고
+        # (sliding-window 패턴), 오래된 구획은 요지로 연속성만 유지(summary 패턴) — 둘의 hybrid.
+        # None=전체 전문(긴 답에선 비권장), 0=요지만(전문 없음). tunable 로 조절.
         self._prior_full_k = prior_full_k
 
     # ------------------------------------------------------------------
@@ -912,10 +915,11 @@ class ComposerRunner(SpecDrivenRunner):
             # 앞 구획 *전문*(이미 사용자에게 보인 본문) — 연결용 맥락이지 근거가 아니다.
             # 프롬프트(composer_slot_v1.md)가 이 섹션명을 기대한다(§3.4).
             parts.append(
-                "# PRIOR SECTIONS (앞서 작성돼 사용자에게 이미 보인 구획들의 *전문* — 이 흐름을\n"
-                "이어 자연스럽게 연결하되, 이미 확립된 사실을 재서술·재인용하지 말고 이 구획\n"
-                "facet 의 새 substance 를 전개하라. PRIOR 는 근거가 아니다 — 모든 [cite-N] 은 이\n"
-                "구획 # CONTEXT 에서만 끌어오고, PRIOR 의 cite 를 그대로 베끼지 마라)\n"
+                "# PRIOR SECTIONS (앞서 작성돼 사용자에게 이미 보인 구획들 — 최근 구획은 `###`\n"
+                "전문, 더 앞선 구획은 `-` 한 줄 요지. 이 흐름을 이어 자연스럽게 연결하되, 이미\n"
+                "확립된 사실을 재서술·재인용하지 말고 이 구획 facet 의 새 substance 를 전개하라.\n"
+                "PRIOR 는 근거가 아니다 — 모든 [cite-N] 은 이 구획 # CONTEXT 에서만 끌어오고,\n"
+                "PRIOR 의 cite 를 그대로 베끼지 마라)\n"
                 + prior_sections.strip()
             )
         sub_ids = {c.chunk_id for c in sub_chunks}
@@ -1182,23 +1186,32 @@ class ComposerRunner(SpecDrivenRunner):
         return dict(self._generation_source.model_options or {})
 
     def _prior_sections_block(self, slot_outputs: list[dict[str, Any]]) -> str:
-        """앞 슬롯들의 *전문*을 PRIOR SECTIONS 본문으로 조립(§3.4 — 요지 아님). 다음 슬롯이
-        앞 내용에 자연스럽게 이어쓰도록 헤더+본문을 그대로 싣는다. `prior_full_k` 가 설정되면
-        직전 K개만 전문, 그 이전은 한 줄 요지로 떨어뜨려 토큰 폭주를 막는다(기본 None=전체)."""
+        """앞 슬롯들을 PRIOR SECTIONS 본문으로 조립(§3.4) — hybrid sliding-window:
+        직전 `prior_full_k` 개만 *전문*, 그 이전은 한 줄 요지로 압축해 토큰 폭주를 막는다.
+        전체 누적은 O(N²) 라 마지막 슬롯이 비대해진다(사용자 보고) → 최근 K개만 전문으로.
+        k=None=전체 전문, k=0=요지만. 요지는 facet+첫 문장+사용 cite(결정론, LLM 콜 없음)."""
         if not slot_outputs:
             return ""
         k = self._prior_full_k
-        if k is None or k >= len(slot_outputs):
+        if k is None:
             full, summarized = slot_outputs, []
+        elif k <= 0:
+            full, summarized = [], slot_outputs
         else:
             full, summarized = slot_outputs[-k:], slot_outputs[:-k]
         lines: list[str] = []
         for o in summarized:
-            # 오래된 구획은 한 줄 요지(슬롯명 + 첫 문장)로 압축 — 연결 맥락만 남긴다.
-            lines.append(f"- [{o['slot'].name}] {self._first_sentence(o['text'])}")
+            # 오래된 구획은 한 줄 요지(facet + 첫 문장 + 사용 cite)로 압축 — 무엇을 어느 근거로
+            # 다뤘는지 표시해 중복 회피·연결 맥락만 남긴다(전문은 최근 K개에만).
+            facet = f" [{o['slot'].facet}]" if o["slot"].facet else ""
+            used = sorted(set(_CITE_N_RE.findall(o["text"])), key=int)
+            cites = (" (cites: " + ", ".join("cite-" + n for n in used) + ")") if used else ""
+            lines.append(
+                f"- [{o['slot'].name}]{facet} {self._first_sentence(o['text'])}{cites}"
+            )
         for o in full:
-            # 헤더(결정론)는 빼고 본문 전문만 — PRIOR 는 연결용이지 화면 재현이 아니므로
-            # 슬롯명으로 라벨링해 어느 구획인지만 표시한다.
+            # 최근 K개는 전문(헤더 제외 — PRIOR 는 연결용이지 화면 재현 아님). 슬롯명으로
+            # 라벨링해 어느 구획인지만 표시한다.
             lines.append(f"### [{o['slot'].name}]\n{o['text'].strip()}")
         return "\n\n".join(lines)
 
@@ -1264,5 +1277,5 @@ def _build_composer(spec: VariantSpec, deps: AgentDeps) -> "ComposerRunner":
         slot_verify=t.get("composer_slot_verify", "off"),
         synthesize=t.get("composer_synthesize", True),
         slot_context_k=t.get("composer_slot_context_k", 12),
-        prior_full_k=t.get("composer_prior_full_k", None),
+        prior_full_k=t.get("composer_prior_full_k", 2),
     )

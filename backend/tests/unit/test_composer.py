@@ -318,3 +318,50 @@ async def test_slot_llm_unavailable_refuses() -> None:
         runner = _build(Path(tmp), script)
         resp = await runner.run(_req())
         assert resp.refusal_reason == "llm_unavailable"
+
+
+def _slot_out(name: str, facet: str, text: str) -> dict:
+    from app.domain.spec_driven import SpecSlot
+    slot = SpecSlot(name=name, keywords=(), description="", required=True, facet=facet)
+    return {"slot": slot, "header": f"## {name}\n\n", "text": text}
+
+
+def test_prior_sections_sliding_window_keeps_recent_full_summarizes_older() -> None:
+    # 토큰 폭주 방지(사용자 보고): 직전 K개만 *전문*, 그 이전은 한 줄 요지.
+    outs = [
+        _slot_out("s0", "requirement", "첫 구획 본문입니다. 상세 내용 [cite-0]."),
+        _slot_out("s1", "acceptance_criterion", "둘째 구획 본문. 또 다른 내용 [cite-1]."),
+        _slot_out("s2", "review_finding", "셋째 구획 본문이 여기 있다 [cite-2]."),
+        _slot_out("s3", "open_item_condition", "넷째 구획 본문 [cite-3]."),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = _build(Path(tmp), _ComposerScriptLLM([]))
+
+    runner._prior_full_k = 2  # 직전 2개만 전문.
+    block = runner._prior_sections_block(outs)
+    # 최근 2개(s2·s3)는 `###` 전문, 오래된 2개(s0·s1)는 `-` 요지.
+    assert "### [s2]" in block and "### [s3]" in block
+    assert "### [s0]" not in block and "### [s1]" not in block
+    assert "- [s0] [requirement]" in block and "- [s1] [acceptance_criterion]" in block
+    # 요지엔 사용 cite 가 표기된다(중복 회피·연결 맥락).
+    assert "cite-0" in block and "셋째 구획 본문" in block
+
+    runner._prior_full_k = None  # 전체 전문.
+    full = runner._prior_sections_block(outs)
+    assert all(f"### [s{i}]" in full for i in range(4))
+    assert "- [s0]" not in full
+
+    runner._prior_full_k = 0  # 요지만(전문 없음).
+    summ = runner._prior_sections_block(outs)
+    assert "###" not in summ
+    assert all(f"- [s{i}]" in summ for i in range(4))
+
+    assert runner._prior_sections_block([]) == ""  # 첫 슬롯 = 빈 PRIOR.
+
+
+def test_strip_leading_heading_removes_only_leading_headers() -> None:
+    # 가독성 backstop: 본문 선두 헤더만 제거, 중간 소제목은 보존.
+    assert ComposerRunner._strip_leading_heading("## 제목\n\n본문") == "본문"
+    assert ComposerRunner._strip_leading_heading("# A\n## B\n본문 시작") == "본문 시작"
+    body = "본문 먼저\n\n### 중간 소제목\n그 뒤"
+    assert ComposerRunner._strip_leading_heading(body) == body  # 선두 아님 → 보존.

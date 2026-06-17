@@ -27,7 +27,7 @@ Calibrate this section's wording to its `expected_authority` / the answer's `gov
 
 ## Continue from the prior sections (full-text continuity, no repetition)
 
-`# PRIOR SECTIONS` is the **full body of the sections already written and already shown to the reader above you**. Therefore:
+`# PRIOR SECTIONS` is the record of sections already written and already shown to the reader above you — the **most recent ones in full (`###` blocks)** and **earlier ones compressed to a one-line summary (`-` bullets: facet · first line · cites used)**. Therefore:
 - **Read them and continue the thread.** If a prior section established a requirement, this section (e.g. demonstration / finding) picks up *from there* and carries it forward — refer back in one short clause if it helps the flow ("그 단일고장 가정 위에서, …"), then develop this section's own substance.
 - **Do not restate or re-cite the prior sections.** Their points are already on screen; re-printing them is the primary failure to avoid. Develop the *new* substance this section's facet is responsible for.
 - **Always write this section's own substance in full** — never reply "이미 위에서 다루었다", an empty section, or a one-line deferral.

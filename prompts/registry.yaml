@@ -129,7 +129,7 @@ spec_driven_triage_prompts:
   # 진화(2-노드 분할 튜닝)는 이 블록만 바꿔 v1 과 격리한다(profile_id 분리).
   spec_driven_triage_v2:
     profile_version: v1
-    prompt:        {path: spec_driven/triage_v1.md,            version: v1, sha256: "279b0ac135b41828240462080c8d94a5ef79318e5060f5ec8f06f1cee4a87820"}
+    prompt:        {path: spec_driven/triage_v1.md,            version: v1, sha256: "1c969d779d21a811bb09d63d9cd3bba9e2dcdd2aa1b843437e503675b3776b93"}
     output_schema: {path: spec_driven/schemas/triage_v1.json,  version: v1, sha256: "347c9af3b64434746b72098e8d0f7e465c3c82c691ac236d7d0c309695c995bd"}
     model_options: {temperature: 0.0, max_tokens: 300}
 
@@ -155,8 +155,8 @@ spec_driven_answer_spec_prompts:
     model_options: {temperature: 0.0, max_tokens: 3000}
   spec_driven_answer_spec_v2:
     profile_version: v1
-    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "c9ed7781fb8198edfc5daf81e98b77c378f8525ec6eb158a3408fcb7d6b65372"}
-    output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "cfa433336ccb7b4efd8f99c634c33e55636ed135b41c46f2ca1600a172863e7a"}
+    prompt:        {path: spec_driven/answer_spec_v1.md,            version: v1, sha256: "ac709c89e810585cb15b50974149eaa44aa0c40890ce74abb2b5a61bb9edcaa4"}
+    output_schema: {path: spec_driven/schemas/answer_spec_v1.json,  version: v1, sha256: "7b3d3dd66d3a2590bec977aa98fe10901293ae799259f8adf251b02730280777"}
     model_options: {temperature: 0.0, max_tokens: 1100}
 
 spec_driven_query_prompts:
@@ -169,8 +169,8 @@ spec_driven_query_prompts:
     model_options: {temperature: 0.0, max_tokens: 1400}
   spec_driven_query_v2:
     profile_version: v1
-    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "49610728f3178f19248f46e68e3db660714754c725e8688ab188c3593b682ba8"}
-    output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "a33c68059af2c5e60a0e26e99239ff9cc9da42679419feaaf4fe5dac71b3ecc0"}
+    prompt:        {path: spec_driven/query_formulation_v1.md,            version: v1, sha256: "c0ea142506d2fe93ac550217e8f5cec8e21df13a7a7a1e93ac22aad80fce09a2"}
+    output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "6a93ef879516d1923328e47ef7ab9a1955238c94620bd70ca4526bd8e9462d29"}
     model_options: {temperature: 0.0, max_tokens: 1400}
 
 spec_driven_generation_prompts:
@@ -187,7 +187,7 @@ spec_driven_generation_prompts:
     model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 16384, seed: 7}
   spec_driven_generation_v2:
     profile_version: v1
-    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "b3088ac960d3817e14f1ccf9414ef7b3028211712ad68905e926225766f34542"}
+    prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "eb3e0153ea8ebfe4174f6a8c1d1aa84e7124d269b6218c16fd769f89b82acd69"}
     model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 16384, seed: 7}
 
 # spec_driven_v2 Node2 — 슬롯 단위 1차 검색 결과 검증(필요 청크 + 멀티홉 청크 선별).
@@ -222,7 +222,7 @@ spec_driven_verify_prompts:
 composer_slot_prompts:
   composer_slot_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/composer_slot_v1.md, version: v1, sha256: "b29152094b3ab51c3ce77a4c971f53179b0084da0f047778d885ca9465639b6f"}
+    prompt:        {path: spec_driven/composer_slot_v1.md, version: v1, sha256: "f60695141e949d5469e27ca1d94a2625eda5aed326d9e15296f2609b446d162e"}
     # max_tokens — 슬롯 1구획이라 단일 N4(16384)보다 작되, 슬롯 CONTEXT(귀속 청크) + 이전
     # 섹션 *전문* PRIOR + 4축 다층 전개를 한 구획에 담으므로 3000 에선 절단 위험 → 8192.
     model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 8192, seed: 7}
