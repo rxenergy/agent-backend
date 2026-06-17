@@ -22,7 +22,7 @@ import pytest
 from app.adapters.llm.http import HttpLLM
 from app.adapters.slot_verifier_llm import SlotVerifierLlm
 from app.adapters.tools.retrieval_verify_slot import RetrievalVerifySlotTool
-from app.application.prompting.spec_driven_source import SpecDrivenVerifySource
+from app.application.prompting.spec_driven_source import SpecDrivenVerifyChunkSource
 from app.domain.retrieval import RetrievedChunk, VerifySlotInput, VerifySlotResult
 from app.ports.tool import ToolExecutionContext
 
@@ -36,8 +36,8 @@ def _node2_endpoint() -> str | None:
 
 
 @pytest.fixture(scope="session")
-def verify_source() -> SpecDrivenVerifySource:
-    return SpecDrivenVerifySource(_REPO_PROMPTS)
+def verify_source() -> SpecDrivenVerifyChunkSource:
+    return SpecDrivenVerifyChunkSource(_REPO_PROMPTS)
 
 
 @pytest.fixture(scope="session")

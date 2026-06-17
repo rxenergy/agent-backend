@@ -58,7 +58,7 @@ from app.application.prompting.spec_driven_source import (
     SpecDrivenQueryV2Source,
     SpecDrivenTriageSource,
     SpecDrivenTriageV2Source,
-    SpecDrivenVerifySource,
+    SpecDrivenVerifyChunkSource,
 )
 from app.application.prompting.hybrid_source import HybridPromptSource
 from app.application.prompting.local_source import LocalPromptSource
@@ -456,9 +456,11 @@ async def build_container(settings: Settings) -> AppContainer:
                 from app.adapters.tools.retrieval_follow_up import RetrievalFollowUpTool
                 from app.adapters.ref_postprocess.settings import RefSettings as _RefSettings
 
-                # 동시성 캡(_MAX_CONCURRENCY)으로 ceil(N/conc) 라운드라, 라운드×per-call
-                # timeout 이 registry 예산(100s) 안에 들도록 둔다. per-call timeout·재시도는
-                # HttpLLM(pool 엔트리 timeout_s·max_attempts)이 소유한다.
+                # 동시성 캡(_MAX_CONCURRENCY, 기본 8)은 슬롯 fan-out 전체에 걸친 전역값 —
+                # 청크별 독립 HTTP 요청을 동시에 쏴 vLLM continuous batching 으로 묶어 처리한다.
+                # ceil(N/conc) 라운드 × per-call timeout 이 registry 예산(100s) 안에 들도록 두되,
+                # KV cache 경쟁이 보이면 DOCUMENTS_REF_MAX_CONCURRENCY 로 낮춘다. per-call
+                # timeout·재시도는 HttpLLM(pool 엔트리 timeout_s·max_attempts)이 소유한다.
                 _ref_extractor = LlmRefExtractor(
                     llm=utility_llm,
                     settings=_RefSettings.from_env(),
@@ -500,12 +502,18 @@ async def build_container(settings: Settings) -> AppContainer:
                 from app.adapters.slot_verifier_llm import SlotVerifierLlm
                 from app.adapters.tools.retrieval_verify_slot import RetrievalVerifySlotTool
 
-                # verify 프롬프트 source(registry 호스팅, sha 핀) — tool 이전에 구성해야
-                # 하므로 여기서 만든다. AgentDeps 로도 같은 인스턴스를 넘겨 재현 핀이 일관.
-                _verify_source = SpecDrivenVerifySource(Path(settings.prompt_local_dir))
+                # verify(chunk) 프롬프트 source(registry 호스팅, sha 핀) — tool 이전에
+                # 구성해야 하므로 여기서 만든다. AgentDeps 로도 같은 인스턴스를 넘겨 재현 핀
+                # 일관. 청크별 fan-out 이라 슬롯 일괄(verify_slot_v2)이 아닌 청크 프롬프트.
+                _verify_source = SpecDrivenVerifyChunkSource(Path(settings.prompt_local_dir))
                 spec_driven_v2_verify_source = _verify_source
                 verify_slot_tool = RetrievalVerifySlotTool(
-                    slot_verifier=SlotVerifierLlm(llm=secondary_llm, source=_verify_source),
+                    slot_verifier=SlotVerifierLlm(
+                        llm=secondary_llm, source=_verify_source,
+                        # 청크별 동시 호출 전역 캡(슬롯 fan-out 전체에 걸침).
+                        max_concurrency=settings.spec_driven_v2_verify_chunk_concurrency,
+                    ),
+                    # 동시 슬롯 캡(러너 _verify_sem 과 동일 취지의 tool 레벨 캡).
                     max_concurrency=settings.spec_driven_v2_verify_concurrency,
                 )
             except Exception as _exc:

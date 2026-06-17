@@ -97,8 +97,11 @@ class _MultiChunkRetriever:
                          if not isinstance(tool_input, dict)
                          else (tool_input.get("filters") or {}).get("source_id"))
         if is_second:
+            # 2차 검색은 2건 — Stage4 재검증이 hop1 만 필요로 골라 hop2 는 drop 되는지 검증.
             chunks = [{"chunk_id": "hop1", "document_id": "EXT", "score": 0.7,
-                       "snippet": "external ref body", "source_id": "ML_T"}]
+                       "snippet": "external ref body", "source_id": "ML_T"},
+                      {"chunk_id": "hop2", "document_id": "EXT", "score": 0.6,
+                       "snippet": "irrelevant external body", "source_id": "ML_T"}]
         else:
             chunks = [
                 {"chunk_id": "c1", "document_id": "D1", "score": 0.9,
@@ -114,17 +117,26 @@ class _MultiChunkRetriever:
 
 
 class _FakeVerifyTool:
-    """Node2 — c1 만 necessary, c1 은 멀티홉도 필요(외부 참조)로 고른다. c2/c3 drop."""
+    """Node2 — 입력 청크 id 에 따라 분기(Stage1 1차 / Stage4 2차 모두 처리).
+    - 1차(c1/c2/c3): c1 만 necessary, c1 은 멀티홉도 필요(외부 참조). c2/c3 drop.
+    - 2차(hop1/hop2): Stage4 재검증 — hop1 만 necessary(hop2 drop)."""
 
     name = "retrieval.verify_slot"
     version = "v1"
 
     async def invoke(self, tool_input, context) -> ToolResult:
+        chunks = (tool_input.get("chunks") if isinstance(tool_input, dict)
+                  else getattr(tool_input, "chunks", [])) or []
+        ids = {(c.get("chunk_id") if isinstance(c, dict) else c.chunk_id) for c in chunks}
+        if "hop1" in ids or "hop2" in ids:  # Stage4 2차 재검증
+            out = {"necessary_chunk_ids": ["hop1"], "multihop_chunk_ids": [],
+                   "rationale": "hop1 relevant, hop2 not", "method": "llm"}
+        else:  # Stage1 1차 검증
+            out = {"necessary_chunk_ids": ["c1"], "multihop_chunk_ids": ["c1"],
+                   "rationale": "c1 only", "method": "llm"}
         return ToolResult(
             tool_name="retrieval.verify_slot", tool_version="v1", status="success",
-            output={"necessary_chunk_ids": ["c1"], "multihop_chunk_ids": ["c1"],
-                    "rationale": "c1 only", "method": "llm"},
-            latency_ms=0, input_hash="x", output_hash="y", trace_id="",
+            output=out, latency_ms=0, input_hash="x", output_hash="y", trace_id="",
         )
 
 
@@ -209,24 +221,49 @@ async def test_n4_context_is_necessary_plus_second_pass_not_all_first_pass() -> 
         )
         resp = await runner.run(_req())
         assert resp.refusal_reason is None
-        chunk_ids = {c.chunk_id for c in resp.citations}
         event = _event(tmp)
         ret_ids = set(event["retrieved_chunk_ids"])
-        # c1(necessary) + hop1(2차) 만. c2/c3(1차이나 not-necessary)는 drop.
+        # c1(necessary) + hop1(Stage4 통과 2차) 만. c2/c3(1차 not-necessary) + hop2(Stage4
+        # 재검증 drop)는 제외 — "검색 후 무조건 Node2 relevance".
         assert "c1" in ret_ids
         assert "hop1" in ret_ids
         assert "c2" not in ret_ids and "c3" not in ret_ids
+        assert "hop2" not in ret_ids
         pin = event["query_understanding"]["spec_driven"]
         assert pin["verify"]["node2"] is True
         assert pin["verify"]["total_necessary"] == 1
         assert pin["verify"]["total_multihop"] == 1
+        # Stage 4 — 2차 2건 검증 입력 중 1건만 통과.
+        assert pin["verify"]["second_pass_total"] == 2
+        assert pin["verify"]["second_necessary_total"] == 1
         assert pin["retrieval"]["necessary_kept"] == 1
         assert pin["retrieval"]["first_pass_total"] == 3
         assert pin["node1_llm_id"] == "fake"
-        # per-slot verify 핀.
+        # per-slot verify 핀 — 1차 + 2차 재검증 메타.
         slots = pin["verify"]["slots"]
         assert slots[0]["slot"] == "governing_clause"
         assert slots[0]["method"] == "llm"
+        assert slots[0]["num_second_pass"] == 2
+        assert slots[0]["num_second_necessary"] == 1
+        assert slots[0]["second_method"] == "llm"
+
+
+@pytest.mark.asyncio
+async def test_node2_verify_rationale_surfaces_in_thinking() -> None:
+    # UI thinking — run_stream 의 reasoning 이벤트에 **슬롯 검증 (Node2)** 블록 + Node2
+    # 판정 근거(1차 rationale + 2차 rationale2)가 실린다(B2: rationale 까지).
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = VariantRegistry.build(
+            SPEC_DRIVEN_V2_VARIANT_ID, _SPEC, _deps(Path(tmp), llm=_script(), with_verify=True)
+        )
+        parts: list[str] = []
+        async for ev in runner.run_stream(_req()):
+            if ev.kind == "reasoning":
+                parts.append(ev.payload.get("content", ""))
+        reasoning = "".join(parts)
+        assert "**슬롯 검증 (Node2)**" in reasoning
+        assert "c1 only" in reasoning                    # 1차 검증 근거
+        assert "hop1 relevant, hop2 not" in reasoning    # 2차 재검증 근거(Stage 4)
 
 
 @pytest.mark.asyncio

@@ -189,3 +189,17 @@ class SpecDrivenVerifySource(_SpecDrivenPromptSource):
         self, prompt_dir: str | Path, *, profile_id: str = "spec_driven_verify_v2"
     ) -> None:
         super().__init__(prompt_dir, profile_id=profile_id)
+
+
+class SpecDrivenVerifyChunkSource(_SpecDrivenPromptSource):
+    """spec_driven_v2 Node2 — 청크 단위 검증 프롬프트 source(json_schema guided, boolean).
+    청크 1개를 {necessary, multihop} 로 판정. SlotVerifierLlm 이 청크별로 동시 호출(fan-out)
+    하고 boolean 을 모아 id 리스트로 집계한다(slot 일괄 비교판정인 verify_slot_v2 대체)."""
+
+    registry_key = "spec_driven_verify_prompts"
+    has_schema = True
+
+    def __init__(
+        self, prompt_dir: str | Path, *, profile_id: str = "spec_driven_verify_chunk_v2"
+    ) -> None:
+        super().__init__(prompt_dir, profile_id=profile_id)

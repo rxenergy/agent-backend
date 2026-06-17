@@ -68,6 +68,9 @@ class _PostRetrievalOutcome:
     qu_sections: dict[str, Any]
     fq_summary: str | None = None
     source_ids_fq: list[dict[str, Any]] = field(default_factory=list)
+    # 추가 reasoning 블록(UI thinking 노출용). v1 은 None(동작 불변). v2 는 Node2 슬롯
+    # 검증/재검증 근거를 여기 담고, base run() 이 fq_summary emit 직후 한 번 더 방출한다.
+    extra_reasoning: str | None = None
 _SEARCH_TOOL = "retrieval.search"
 # 인덱싱 단계에서 표시한 노이즈 chunk(noise:true — 목차·헤더·fragment 등) 를 검색
 # 모집단에서 hard-scope 로 제외(filters → OpenSearch term). local retriever 는 무시.
@@ -504,6 +507,9 @@ class SpecDrivenRunner:
             # 루프(tool 프레임)가 모두 끝난 *뒤* reasoning 을 단 한 번 방출 → 다음에 오는
             # 것은 context_build(step, 사이드채널) · generation 본문 토큰뿐이라 Thought
             # 블록과 본문이 연속된다(#24295, 정상 렌더되는 `**질의 분류**` 패턴과 동일).
+            # extra_reasoning(v2 Node2 검증 근거)을 먼저, fq_summary(외부참조 재검색)를 다음.
+            if post_outcome.extra_reasoning:
+                await emit_reasoning(post_outcome.extra_reasoning)
             if post_outcome.fq_summary:
                 await emit_reasoning(
                     f"\n**참조 문서 재검색**\n{post_outcome.fq_summary}\n"

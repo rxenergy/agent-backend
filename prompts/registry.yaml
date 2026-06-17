@@ -197,6 +197,15 @@ spec_driven_verify_prompts:
     output_schema: {path: spec_driven/schemas/verify_slot_v2.json,  version: v1, sha256: "ed002717f910bca6467fadab0f192478adcdc75bf222c27b4a44f0d3b4123298"}
     # max_tokens — rationale + 두 id 리스트만. 슬롯당 청크 ≤ 20 라 짧다.
     model_options: {temperature: 0.0, max_tokens: 600}
+  # spec_driven_v2 per-chunk 검증 — 청크 1개 binary 판정({necessary, multihop}). 어댑터가
+  # 청크별 호출을 asyncio.gather 로 동시 발사(continuous batch)하고 boolean 을 모아 id 리스트로
+  # 집계한다. verify_slot_v2(슬롯 일괄 비교판정)는 과거 이벤트 재현 위해 보존(dead config).
+  spec_driven_verify_chunk_v2:
+    profile_version: v1
+    prompt:        {path: spec_driven/verify_chunk_v2.md,           version: v1, sha256: "ccdd6a4fa9f045319ebccfe998f778ab5d9491d73b27a8e78632287f72a2de8a"}
+    output_schema: {path: spec_driven/schemas/verify_chunk_v2.json, version: v1, sha256: "2c8b94680157a025b0b323246f35a534c1960389ed42d932ba2180d4a97f83ca"}
+    # max_tokens — rationale 1문장 + boolean 2개만. 슬롯 프롬프트(600)보다 짧다.
+    model_options: {temperature: 0.0, max_tokens: 200}
 
 prompt_profiles:
 

@@ -186,7 +186,7 @@ def _deps_two_node(tmp: Path, *, node1, node2, verify_source) -> AgentDeps:
         spec_driven_v2_triage_source=SpecDrivenTriageV2Source(_REPO_PROMPTS),
         spec_driven_v2_general_source=SpecDrivenGeneralV2Source(_REPO_PROMPTS),
         tunables={"citation_contract_path": str(_CONTRACT), "retriever_top_k": 3,
-                  "spec_driven_max_queries": 6, "spec_driven_v2_verify_concurrency": 2},
+                  "spec_driven_max_queries": 6, "spec_driven_v2_verify_concurrency": 3},
     )
 
 
@@ -197,12 +197,12 @@ async def test_two_node_end_to_end_verify_pin(node1_llm: HttpLLM) -> None:
     ep2 = _node2_endpoint()
     if not ep2:
         pytest.skip("SPEC_DRIVEN_V2_NODE2_ENDPOINT not set; 2-node test skipped")
-    from app.application.prompting.spec_driven_source import SpecDrivenVerifySource
+    from app.application.prompting.spec_driven_source import SpecDrivenVerifyChunkSource
 
     model2 = os.environ.get("SPEC_DRIVEN_V2_NODE2_MODEL", "gemma-4-26b-a4b-it")
     node2 = HttpLLM(provider="openai_compat", endpoint=ep2, model=model2,
                     timeout_s=120.0, max_attempts=2)
-    verify_source = SpecDrivenVerifySource(_REPO_PROMPTS)
+    verify_source = SpecDrivenVerifyChunkSource(_REPO_PROMPTS)
     with tempfile.TemporaryDirectory() as tmp:
         deps = _deps_two_node(Path(tmp), node1=node1_llm, node2=node2,
                               verify_source=verify_source)
@@ -219,3 +219,33 @@ async def test_two_node_end_to_end_verify_pin(node1_llm: HttpLLM) -> None:
         assert pin["node1_llm_id"] == "node1"
         # 최종 컨텍스트는 necessary 기준(1차 전량 보존 아님) — 핀 키 존재 검증.
         assert "necessary_kept" in pin["retrieval"]
+        # Phase 6 — Stage 4(2차 검색 후 Node2 재검증) 핀 키 존재. 2차 검색이 없었으면
+        # second_pass_total==0 일 수 있으나 키는 항상 있어야 한다(스키마 균일).
+        assert "second_pass_total" in pin["verify"]
+        assert "second_necessary_total" in pin["verify"]
+        assert pin["verify"]["second_necessary_total"] <= pin["verify"]["second_pass_total"]
+
+
+@pytest.mark.asyncio
+async def test_two_node_thinking_surfaces_verify_rationale(node1_llm: HttpLLM) -> None:
+    # Phase 6 — UI thinking 에 Node2 슬롯 검증 블록이 실 vLLM 경로에서도 방출되는지.
+    ep2 = _node2_endpoint()
+    if not ep2:
+        pytest.skip("SPEC_DRIVEN_V2_NODE2_ENDPOINT not set; 2-node test skipped")
+    from app.application.prompting.spec_driven_source import SpecDrivenVerifyChunkSource
+
+    model2 = os.environ.get("SPEC_DRIVEN_V2_NODE2_MODEL", "gemma-4-26b-a4b-it")
+    node2 = HttpLLM(provider="openai_compat", endpoint=ep2, model=model2,
+                    timeout_s=120.0, max_attempts=2)
+    verify_source = SpecDrivenVerifyChunkSource(_REPO_PROMPTS)
+    with tempfile.TemporaryDirectory() as tmp:
+        deps = _deps_two_node(Path(tmp), node1=node1_llm, node2=node2,
+                              verify_source=verify_source)
+        runner = VariantRegistry.build(SPEC_DRIVEN_V2_VARIANT_ID, _SPEC, deps)
+        parts: list[str] = []
+        async for ev in runner.run_stream(_req()):
+            if ev.kind == "reasoning":
+                parts.append(ev.payload.get("content", ""))
+        reasoning = "".join(parts)
+        # Node2 검증 블록 헤더가 thinking 에 실린다(근거 텍스트는 비결정이라 헤더만 단언).
+        assert "**슬롯 검증 (Node2)**" in reasoning

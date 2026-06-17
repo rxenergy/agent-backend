@@ -62,10 +62,15 @@ class Settings(BaseSettings):
     spec_driven_max_queries: int = 10
     spec_driven_max_context_chunks: int = 10
 
-    # spec_driven_v2 — Node2 슬롯 검증 토글 + 동시 검증 슬롯 상한(단일 Node2 vLLM 의
-    # KV-cache 경쟁 방지). enabled=False 면 검증 도구 미배선 → 단일노드(v1식 전량 보존).
+    # spec_driven_v2 — Node2 슬롯 검증 토글 + 동시 검증 슬롯 상한 + 청크별 동시 호출 상한.
+    # enabled=False 면 검증 도구 미배선 → 단일노드(v1식 전량 보존).
+    # verify_concurrency: 동시에 도는 슬롯 수 캡(러너 _verify_sem). 최대 슬롯 수(≤10)와 맞춤.
+    # verify_chunk_concurrency: 슬롯 fan-out 전체에 걸친 청크별 동시 호출 *전역* 캡
+    #   (SlotVerifierLlm 소유). Node2 전용 노드 max_num_seqs 여유 안에서 잡아 continuous
+    #   batching 을 살리되 큐 적체·타임아웃 캐스케이드를 막는다.
     spec_driven_v2_verify_enabled: bool = True
-    spec_driven_v2_verify_concurrency: int = 3
+    spec_driven_v2_verify_concurrency: int = 10
+    spec_driven_v2_verify_chunk_concurrency: int = 48
 
     # Classifier (Node 1)
     classifier_backend: Literal["rule", "llm", "hybrid"] = "rule"
