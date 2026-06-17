@@ -2,7 +2,7 @@
 
 병합·trim 로직은 결정론이라 fake 포트로 잠근다(실 vLLM 통합 테스트는 integration/ 에서
 별도). 검증 포인트:
-  - N4 컨텍스트 = Node2 가 고른 necessary ∪ 2차(멀티홉) 결과 — 1차 *전량 보존 아님*
+  - N4 컨텍스트 = Node1 이 고른 necessary ∪ 2차(멀티홉) 결과 — 1차 *전량 보존 아님*
     (1차이나 not-necessary 청크는 drop).
   - verify 도구 미배선(ToolUnknown) → 슬롯 전량 necessary 보존(단일노드 degrade).
   - node1/node2 재현 핀 + per-slot verify 핀 존재.
@@ -224,13 +224,13 @@ async def test_n4_context_is_necessary_plus_second_pass_not_all_first_pass() -> 
         event = _event(tmp)
         ret_ids = set(event["retrieved_chunk_ids"])
         # c1(necessary) + hop1(Stage4 통과 2차) 만. c2/c3(1차 not-necessary) + hop2(Stage4
-        # 재검증 drop)는 제외 — "검색 후 무조건 Node2 relevance".
+        # 재검증 drop)는 제외 — "검색 후 무조건 Node1 relevance".
         assert "c1" in ret_ids
         assert "hop1" in ret_ids
         assert "c2" not in ret_ids and "c3" not in ret_ids
         assert "hop2" not in ret_ids
         pin = event["query_understanding"]["spec_driven"]
-        assert pin["verify"]["node2"] is True
+        assert pin["verify"]["node1"] is True
         assert pin["verify"]["total_necessary"] == 1
         assert pin["verify"]["total_multihop"] == 1
         # Stage 4 — 2차 2건 검증 입력 중 1건만 통과.
@@ -249,8 +249,8 @@ async def test_n4_context_is_necessary_plus_second_pass_not_all_first_pass() -> 
 
 
 @pytest.mark.asyncio
-async def test_node2_verify_rationale_surfaces_in_thinking() -> None:
-    # UI thinking — run_stream 의 reasoning 이벤트에 **슬롯 검증 (Node2)** 블록 + Node2
+async def test_node1_verify_rationale_surfaces_in_thinking() -> None:
+    # UI thinking — run_stream 의 reasoning 이벤트에 **슬롯 검증 (Node1)** 블록 + Node1
     # 판정 근거(1차 rationale + 2차 rationale2)가 실린다(B2: rationale 까지).
     with tempfile.TemporaryDirectory() as tmp:
         runner = VariantRegistry.build(
@@ -261,7 +261,7 @@ async def test_node2_verify_rationale_surfaces_in_thinking() -> None:
             if ev.kind == "reasoning":
                 parts.append(ev.payload.get("content", ""))
         reasoning = "".join(parts)
-        assert "**슬롯 검증 (Node2)**" in reasoning
+        assert "**슬롯 검증 (Node1)**" in reasoning
         assert "c1 only" in reasoning                    # 1차 검증 근거
         assert "hop1 relevant, hop2 not" in reasoning    # 2차 재검증 근거(Stage 4)
 

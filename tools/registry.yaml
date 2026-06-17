@@ -40,11 +40,11 @@ tools:
     retry: 0
     required: false
 
-  # retrieval.verify_slot — spec_driven_v2 Node2 슬롯 검증(필요 청크 + 멀티홉 청크 선별).
-  # SECONDARY_LLM(gemma-4-26b-sub)에서 슬롯당 1회 호출. required:false — 미배선/실패 시
+  # retrieval.verify_slot — spec_driven_v2 Node1 슬롯 검증(필요 청크 + 멀티홉 청크 선별).
+  # utility_llm(메인, gemma-4-26b)에서 슬롯당 1회 호출. required:false — 미배선/실패 시
   # 단일노드 degrade(v1식 전량 보존). 도구는 슬롯 1개를 처리하고 per-slot fan-out 은 러너가
-  # 수행하며, 동시 호출은 도구 내부 semaphore 가 캡한다(Node2 KV-cache 보호).
-  # timeout: 슬롯당 단일 Node2 호출(rationale+짧은 id 리스트) → follow_up(100s)보다 짧게.
+  # 수행하며, 동시 호출은 도구 내부 semaphore 가 캡한다(Node1 KV-cache 보호).
+  # timeout: 슬롯당 단일 Node1 호출(rationale+짧은 id 리스트) → follow_up(100s)보다 짧게.
   # retry:0 — follow_up 과 동일(타임아웃은 systemic, graceful skip).
   retrieval.verify_slot:
     version: v1

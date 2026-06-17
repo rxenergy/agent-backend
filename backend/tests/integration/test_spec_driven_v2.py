@@ -9,7 +9,7 @@ skip 한다(opt-in, 다른 integration 테스트와 동형).
   SPEC_DRIVEN_V2_NODE1_MODEL    — Node1 모델 id (예: gemma-4-26b-a4b-it)
 
 Phase 1 은 v2 가 v1 처럼 단일노드로 동작함을 검증한다(변형 등록·선택·프롬프트 profile_id
-분리). Node2 검증·per-slot 파이프라인은 Phase 2~4 에서 추가되며 그때 테스트가 확장된다.
+분리). Node1 검증·per-slot 파이프라인은 Phase 2~4 에서 추가되며 그때 테스트가 확장된다.
 """
 
 from __future__ import annotations
@@ -150,7 +150,9 @@ def _node2_endpoint() -> str | None:
 
 
 def _deps_two_node(tmp: Path, *, node1, node2, verify_source) -> AgentDeps:
-    """Node1(생성/쿼리/외부참조) + Node2(검증 도구) 둘 다 배선한 2-노드 deps."""
+    """Node1(생성/쿼리/검증) + 검증 도구를 별도 vLLM 엔드포인트(node2 인자)에 배선한 2-노드
+    deps. 검증은 swap 후 main 노드(Node1) 업무지만, 통합 테스트에선 검증 도구가 실 vLLM 에서
+    도는지 단독 확인하려 별도 엔드포인트로 주입한다(엔드포인트 분리 ≠ 논리 노드 분리)."""
     from app.adapters.slot_verifier_llm import SlotVerifierLlm
     from app.adapters.tools.retrieval_verify_slot import RetrievalVerifySlotTool
 
@@ -192,17 +194,17 @@ def _deps_two_node(tmp: Path, *, node1, node2, verify_source) -> AgentDeps:
 
 @pytest.mark.asyncio
 async def test_two_node_end_to_end_verify_pin(node1_llm: HttpLLM) -> None:
-    # Node1(생성) + Node2(검증) 둘 다 실 vLLM. verify 가 슬롯별로 Node2 에서 돌고 재현 핀에
-    # verify/node1_llm_id 가 남는지 검증(본문은 비결정이라 단언 안 함).
+    # Node1(생성) + 검증 도구(별도 vLLM 엔드포인트) 둘 다 실 vLLM. verify 가 슬롯별로 돌고
+    # 재현 핀에 verify/node1_llm_id 가 남는지 검증(본문은 비결정이라 단언 안 함).
     ep2 = _node2_endpoint()
     if not ep2:
         pytest.skip("SPEC_DRIVEN_V2_NODE2_ENDPOINT not set; 2-node test skipped")
-    from app.application.prompting.spec_driven_source import SpecDrivenVerifyChunkSource
+    from app.application.prompting.spec_driven_source import SpecDrivenVerifySource
 
     model2 = os.environ.get("SPEC_DRIVEN_V2_NODE2_MODEL", "gemma-4-26b-a4b-it")
     node2 = HttpLLM(provider="openai_compat", endpoint=ep2, model=model2,
                     timeout_s=120.0, max_attempts=2)
-    verify_source = SpecDrivenVerifyChunkSource(_REPO_PROMPTS)
+    verify_source = SpecDrivenVerifySource(_REPO_PROMPTS)
     with tempfile.TemporaryDirectory() as tmp:
         deps = _deps_two_node(Path(tmp), node1=node1_llm, node2=node2,
                               verify_source=verify_source)
@@ -214,12 +216,12 @@ async def test_two_node_end_to_end_verify_pin(node1_llm: HttpLLM) -> None:
         root = Path(tmp) / "events" / "t" / "interaction_events"
         line = next(root.rglob("*.jsonl")).read_text(encoding="utf-8").splitlines()[0]
         pin = _json.loads(line)["query_understanding"]["spec_driven"]
-        assert pin["verify"]["node2"] is True
+        assert pin["verify"]["node1"] is True
         assert pin["verify"]["num_slots"] >= 1
         assert pin["node1_llm_id"] == "node1"
         # 최종 컨텍스트는 necessary 기준(1차 전량 보존 아님) — 핀 키 존재 검증.
         assert "necessary_kept" in pin["retrieval"]
-        # Phase 6 — Stage 4(2차 검색 후 Node2 재검증) 핀 키 존재. 2차 검색이 없었으면
+        # Phase 6 — Stage 4(2차 검색 후 Node1 재검증) 핀 키 존재. 2차 검색이 없었으면
         # second_pass_total==0 일 수 있으나 키는 항상 있어야 한다(스키마 균일).
         assert "second_pass_total" in pin["verify"]
         assert "second_necessary_total" in pin["verify"]
@@ -228,16 +230,16 @@ async def test_two_node_end_to_end_verify_pin(node1_llm: HttpLLM) -> None:
 
 @pytest.mark.asyncio
 async def test_two_node_thinking_surfaces_verify_rationale(node1_llm: HttpLLM) -> None:
-    # Phase 6 — UI thinking 에 Node2 슬롯 검증 블록이 실 vLLM 경로에서도 방출되는지.
+    # Phase 6 — UI thinking 에 Node1 슬롯 검증 블록이 실 vLLM 경로에서도 방출되는지.
     ep2 = _node2_endpoint()
     if not ep2:
         pytest.skip("SPEC_DRIVEN_V2_NODE2_ENDPOINT not set; 2-node test skipped")
-    from app.application.prompting.spec_driven_source import SpecDrivenVerifyChunkSource
+    from app.application.prompting.spec_driven_source import SpecDrivenVerifySource
 
     model2 = os.environ.get("SPEC_DRIVEN_V2_NODE2_MODEL", "gemma-4-26b-a4b-it")
     node2 = HttpLLM(provider="openai_compat", endpoint=ep2, model=model2,
                     timeout_s=120.0, max_attempts=2)
-    verify_source = SpecDrivenVerifyChunkSource(_REPO_PROMPTS)
+    verify_source = SpecDrivenVerifySource(_REPO_PROMPTS)
     with tempfile.TemporaryDirectory() as tmp:
         deps = _deps_two_node(Path(tmp), node1=node1_llm, node2=node2,
                               verify_source=verify_source)
@@ -247,5 +249,5 @@ async def test_two_node_thinking_surfaces_verify_rationale(node1_llm: HttpLLM) -
             if ev.kind == "reasoning":
                 parts.append(ev.payload.get("content", ""))
         reasoning = "".join(parts)
-        # Node2 검증 블록 헤더가 thinking 에 실린다(근거 텍스트는 비결정이라 헤더만 단언).
-        assert "**슬롯 검증 (Node2)**" in reasoning
+        # Node1 검증 블록 헤더가 thinking 에 실린다(근거 텍스트는 비결정이라 헤더만 단언).
+        assert "**슬롯 검증 (Node1)**" in reasoning

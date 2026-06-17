@@ -122,7 +122,7 @@ class RerankOutput(BaseModel):
 
 
 class VerifySlotInput(BaseModel):
-    """retrieval.verify_slot 입력(spec_driven_v2 Node2 검증). 슬롯 1개의 1차 검색
+    """retrieval.verify_slot 입력(spec_driven_v2 Node1 검증). 슬롯 1개의 1차 검색
     결과를 "사용자 질문 + answer_spec + 검색 쿼리" 기준으로 판정한다."""
 
     model_config = ConfigDict(frozen=True)

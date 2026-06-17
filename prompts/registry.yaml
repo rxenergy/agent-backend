@@ -211,8 +211,8 @@ spec_driven_generation_prompts:
     prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "eb3e0153ea8ebfe4174f6a8c1d1aa84e7124d269b6218c16fd769f89b82acd69"}
     model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 16384, seed: 7}
 
-# spec_driven_v2 Node2 — 슬롯 단위 1차 검색 결과 검증(필요 청크 + 멀티홉 청크 선별).
-# SECONDARY_LLM(gemma-4-26b-sub)에서 json_schema guided decoding 으로 1회 호출. 식별자만
+# spec_driven_v2 Node1 — 슬롯 단위 1차 검색 결과 검증(필요 청크 + 멀티홉 청크 선별).
+# utility_llm(메인, gemma-4-26b)에서 json_schema guided decoding 으로 1회 호출. 식별자만
 # 산출(address-not-content). SpecDrivenVerifySource 가 boot 시 sha 검증(원칙 5).
 spec_driven_verify_prompts:
   spec_driven_verify_v2:
@@ -221,15 +221,6 @@ spec_driven_verify_prompts:
     output_schema: {path: spec_driven/schemas/verify_slot_v2.json,  version: v1, sha256: "ed002717f910bca6467fadab0f192478adcdc75bf222c27b4a44f0d3b4123298"}
     # max_tokens — rationale + 두 id 리스트만. 슬롯당 청크 ≤ 20 라 짧다.
     model_options: {temperature: 0.0, max_tokens: 600}
-  # spec_driven_v2 per-chunk 검증 — 청크 1개 binary 판정({necessary, multihop}). 어댑터가
-  # 청크별 호출을 asyncio.gather 로 동시 발사(continuous batch)하고 boolean 을 모아 id 리스트로
-  # 집계한다. verify_slot_v2(슬롯 일괄 비교판정)는 과거 이벤트 재현 위해 보존(dead config).
-  spec_driven_verify_chunk_v2:
-    profile_version: v1
-    prompt:        {path: spec_driven/verify_chunk_v2.md,           version: v1, sha256: "ccdd6a4fa9f045319ebccfe998f778ab5d9491d73b27a8e78632287f72a2de8a"}
-    output_schema: {path: spec_driven/schemas/verify_chunk_v2.json, version: v1, sha256: "2c8b94680157a025b0b323246f35a534c1960389ed42d932ba2180d4a97f83ca"}
-    # max_tokens — rationale 1문장 + boolean 2개만. 슬롯 프롬프트(600)보다 짧다.
-    model_options: {temperature: 0.0, max_tokens: 200}
 
 # composer — spec_driven_v1 N0~N3.5 를 계승하고 N4 만 슬롯 단위로 대체한 variant 의 N4
 # 프롬프트(설계 docs/plans/spec_driven_slotwise_generation.design.v1.md).

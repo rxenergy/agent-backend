@@ -4,16 +4,17 @@
 
 spec_driven_v1 의 선형 4-노드 흐름을 그대로 상속하되, LLM 업무를 **두 vLLM 노드**로
 분할한다:
-  - **Node1**(요청 resolved LLM = utility_llm/default_llm): N1 spec/slot 생성, N2 슬롯별
-    검색 쿼리, N3.5 외부 참조 문서 선별(enhanced retrieval.follow_up), N4 생성.
-  - **Node2**(SECONDARY_LLM = gemma-4-26b-sub): 슬롯 단위 1차 검색 결과 **검증**
-    (retrieval.verify_slot) — 답변에 꼭 필요한 청크 식별자 + 멀티홉 필요 청크 선별.
+  - **Node1**(main = 요청 resolved LLM = utility_llm/default_llm): N1 spec/slot 생성, N2
+    슬롯별 검색 쿼리, 슬롯 단위 1차 검색 결과 **검증**(retrieval.verify_slot) — 답변에 꼭
+    필요한 청크 식별자 + 멀티홉 필요 청크 선별, N4 생성.
+  - **Node2**(sub = SECONDARY_LLM = gemma-4-26b-sub): 외부 참조 문서 선별
+    (enhanced retrieval.follow_up) — 멀티홉 청크에서 재검색 대상 참조 문서를 고른다.
 
-핵심은 `_post_retrieval` 시임 오버라이드다: 슬롯별 파이프라인(Node2 검증 → Node1 외부참조
-선별 → 2차 검색)을 배리어 없이 동시 실행해, slot 1 이 Node1 처리로 넘어갈 때 slot 2 는
-이미 Node2 검증을 돈다(두 노드가 별개 vLLM 이라 실제 겹침). 결정성은 v1 idiom(gather 후
+핵심은 `_post_retrieval` 시임 오버라이드다: 슬롯별 파이프라인(Node1 검증 → Node2 외부참조
+선별 → 2차 검색)을 배리어 없이 동시 실행해, slot 1 이 Node2 처리로 넘어갈 때 slot 2 는
+이미 Node1 검증을 돈다(두 노드가 별개 vLLM 이라 실제 겹침). 결정성은 v1 idiom(gather 후
 고정 슬롯 순 순차 병합)으로 보존한다. N4 컨텍스트는 v1 의 "1차 전량 보존"을 폐기하고
-Node2 가 고른 **필요 청크 + 2차(멀티홉) 결과만** 쓴다(사용자 결정 #4)."""
+Node1 이 고른 **필요 청크 + 2차(멀티홉) 결과만** 쓴다(사용자 결정 #4)."""
 
 from __future__ import annotations
 
@@ -57,13 +58,13 @@ class _SlotPipelineResult:
     slot_name: str
     method: str                                       # "llm" | "fallback"
     num_first_pass: int
-    necessary: list[RetrievedChunk]                   # Node2 가 고른 필요 청크
+    necessary: list[RetrievedChunk]                   # Node1 이 고른 필요 청크
     multihop_ids: list[str]                            # 멀티홉 필요 청크 id
     rationale: str
-    fq_list: list[dict[str, Any]] = field(default_factory=list)   # Node1 외부참조 선별 결과
+    fq_list: list[dict[str, Any]] = field(default_factory=list)   # Node2 외부참조 선별 결과
     second_pass: list[RetrievedChunk] = field(default_factory=list)  # Stage4 검증 *통과* 2차 청크
     tool_results: list[Any] = field(default_factory=list)         # record() 용(순차 기록)
-    # Stage 4 — 2차 검색 결과 Node2 재검증(검색 후엔 항상 relevance). second_pass 는 이미
+    # Stage 4 — 2차 검색 결과 Node1 재검증(검색 후엔 항상 relevance). second_pass 는 이미
     # 통과 청크만 담는다(검증 후 trim). num_second_pass 는 검증 *입력* 수, second_method 는
     # 재검증 경로("llm"|"fallback"|"skip"), rationale2 는 재검증 근거(UI thinking 노출용).
     num_second_pass: int = 0
@@ -81,8 +82,8 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
 
     def __init__(self, *, verify_concurrency: int = 10, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        # 동시 슬롯 파이프라인 상한 — Node2 검증 도구도 자체 semaphore 를 갖지만, 러너 레벨
-        # 캡이 Node1 2차 검색 fan-out 까지 함께 묶는다. 실제 Node2 보호는 SlotVerifierLlm 의
+        # 동시 슬롯 파이프라인 상한 — Node1 검증 도구도 자체 semaphore 를 갖지만, 러너 레벨
+        # 캡이 Node2 2차 검색 fan-out 까지 함께 묶는다. 실제 Node1 보호는 SlotVerifierLlm 의
         # 청크별 전역 캡이 담당하므로 이 슬롯 캡은 최대 슬롯 수(≤10)에 맞춰 넉넉히 둔다.
         self._verify_sem = asyncio.Semaphore(max(1, verify_concurrency))
 
@@ -95,9 +96,9 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
         coverage: dict[str, list[str]], per_query_counts: list[int],
         per_query_k: int,
     ) -> "_PostRetrievalOutcome":
-        """v2 — per-slot 파이프라인(Node2 검증 → Node1 외부참조 선별 → 2차 검색)을 배리어
+        """v2 — per-slot 파이프라인(Node1 검증 → Node2 외부참조 선별 → 2차 검색)을 배리어
         없이 동시 실행하고, 결정성을 위해 gather 후 슬롯 원순서대로 순차 병합한다. N4
-        컨텍스트는 Node2 가 고른 필요 청크 ∪ 2차 결과만(1차 전량 보존 폐기)."""
+        컨텍스트는 Node1 이 고른 필요 청크 ∪ 2차 결과만(1차 전량 보존 폐기)."""
         spec_block = _render_spec_block(spec)
         # 슬롯별 1차 청크(슬롯 내 score desc). chunks 는 floor 정렬된 1차 전량.
         slot_order = [s.name for s in spec.required_slots]
@@ -112,119 +113,112 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
                     chunks_by_slot[sn].append(c)
 
         await emit_step("slot_verify", "started", num_slots=len(slot_order))
-        # 단계 라벨 분리 — 슬롯 파이프라인의 4 stage 가 한 gather 안에서 슬롯별로 interleave
-        # 되므로 stage 별 with 블록으로 쪼갤 수 없다. 대신 3 개 span 을 gather *전*에 띄워
-        # (current=agent.run → 모두 agent.run 의 자식 = agent.retrieval 의 형제), 각 stage 의
-        # 도구 호출을 _run_slot_pipeline 안에서 trace.use_span 으로 해당 span 에 re-parent 한다.
-        # span 종료는 아래 finally 한 곳에서만(예외 경로 포함 누락 방지).
-        verify_span = _TRACER.start_span("agent.slot_verify")
-        oi.set_kind(verify_span, oi.KIND_CHAIN)
-        oi.set_io(verify_span, input_value=request.query_text)
-        verify_span.set_attribute("verify.num_slots", len(slot_order))
-        follow_up_span = _TRACER.start_span("agent.follow_up")
-        oi.set_kind(follow_up_span, oi.KIND_CHAIN)
-        oi.set_io(follow_up_span, input_value=request.query_text)
-        second_span = _TRACER.start_span("agent.second_search")
-        oi.set_kind(second_span, oi.KIND_RETRIEVER)
-        try:
-            async def _pipeline_slot(slot_name: str) -> _SlotPipelineResult:
-                slot_chunks = chunks_by_slot.get(slot_name, [])
-                async with self._verify_sem:
-                    return await self._run_slot_pipeline(
-                        request=request, ctx=ctx, spec_block=spec_block,
-                        slot_name=slot_name,
-                        slot_query=slot_query_by_name.get(slot_name, request.query_text),
-                        slot_chunks=slot_chunks,
-                        verify_span=verify_span, follow_up_span=follow_up_span,
-                        second_span=second_span,
-                    )
+        # 슬롯 파이프라인은 배리어 없이 gather 로 동시 실행한다. 각 슬롯의 도구 호출(검증·
+        # 외부참조 선별·2차 검색)은 _run_slot_pipeline 안에서 연 `agent.slot.<name>` span
+        # 하나의 자식으로 자연히 묶인다 — gather task 마다 contextvars 가 독립이라 슬롯끼리
+        # 섞이지 않는다(Phoenix 에서 agent.run > agent.slot.<name> > {도구} 로 읽힌다).
+        # 전역 집계 속성은 아래에서 현재 span(=agent.run)에 단다.
 
-            # 배리어 없는 동시 실행 — task 로 띄워 slot 들이 두 노드에서 겹쳐 돈다.
-            slot_results = await asyncio.gather(
-                *(asyncio.create_task(_pipeline_slot(n)) for n in slot_order),
-                return_exceptions=True,
-            )
+        async def _pipeline_slot(slot_name: str) -> _SlotPipelineResult:
+            slot_chunks = chunks_by_slot.get(slot_name, [])
+            async with self._verify_sem:
+                return await self._run_slot_pipeline(
+                    request=request, ctx=ctx, spec_block=spec_block,
+                    slot_name=slot_name,
+                    slot_query=slot_query_by_name.get(slot_name, request.query_text),
+                    slot_chunks=slot_chunks,
+                )
 
-            # === 결정성 병합 — 슬롯 원순서대로 순차(완료순 X). 모든 변이는 여기서만 ===
-            necessary_by_id: dict[str, RetrievedChunk] = {}
-            second_by_id: dict[str, RetrievedChunk] = {}
-            verify_pins: list[dict[str, Any]] = []
-            fq_all: list[dict[str, Any]] = []
-            fq_summary_lines: list[str] = []
-            # UI thinking 노출용 — 슬롯별 Node2 검증/재검증 근거(B2: rationale 까지). task
-            # 내부가 아니라 여기서 버퍼만 하고, base run() 이 단계 종료 후 emit(순서·race 안전).
-            verify_reason_lines: list[str] = []
-            total_multihop = 0
-            total_second_pass = 0
-            total_second_necessary = 0
-            slots_with_multihop = 0
-            for slot_name, res in zip(slot_order, slot_results):
-                if isinstance(res, BaseException):
-                    # 슬롯 파이프라인 전체 실패 → 그 슬롯은 기여 없음(graceful). 핀에 남긴다.
-                    verify_pins.append({"slot": slot_name, "method": "error",
-                                        "num_first_pass": len(chunks_by_slot.get(slot_name, [])),
-                                        "num_necessary": 0, "num_multihop": 0,
-                                        "num_second_pass": 0, "num_second_necessary": 0,
-                                        "second_method": "error"})
-                    verify_reason_lines.append(f"- [{slot_name}] 검증 실패(graceful skip)")
-                    continue
-                for r in res.tool_results:  # record 는 race 방지 위해 여기서만(순차)
-                    record(r)
-                for c in res.necessary:
-                    if c.chunk_id not in necessary_by_id:
-                        necessary_by_id[c.chunk_id] = c
-                for c in res.second_pass:
-                    if c.chunk_id not in necessary_by_id and c.chunk_id not in second_by_id:
-                        second_by_id[c.chunk_id] = c
-                total_multihop += len(res.multihop_ids)
-                if res.multihop_ids:
-                    slots_with_multihop += 1
-                total_second_pass += res.num_second_pass
-                total_second_necessary += len(res.second_pass)
-                for fq in res.fq_list:
-                    fq_all.append(fq)
-                    fq_summary_lines.append(
-                        f"- [{slot_name}] {fq.get('query_text')} → "
-                        f"{fq.get('target_source_ids', [])}"
-                    )
-                verify_pins.append({
-                    "slot": slot_name, "method": res.method,
-                    "num_first_pass": res.num_first_pass,
-                    "num_necessary": len(res.necessary),
-                    "num_multihop": len(res.multihop_ids),
-                    "rationale_present": bool(res.rationale),
-                    "num_second_pass": res.num_second_pass,
-                    "num_second_necessary": len(res.second_pass),
-                    "second_method": res.second_method,
-                })
-                # 슬롯 검증 근거 라인(1차 검증) — 카운트 + Node2 rationale.
-                line = (f"- [{slot_name}] 1차 {res.num_first_pass}개 → 필요 "
-                        f"{len(res.necessary)}개, 멀티홉 {len(res.multihop_ids)}개")
-                if res.rationale:
-                    line += f"\n    근거: {res.rationale}"
-                verify_reason_lines.append(line)
-                # 2차 재검증 근거 라인(Stage 4) — 2차 검색이 있었던 슬롯만.
-                if res.num_second_pass > 0:
-                    sline = (f"  · 2차 검색 {res.num_second_pass}개 → 채택 "
-                             f"{len(res.second_pass)}개")
-                    if res.rationale2:
-                        sline += f"\n    근거: {res.rationale2}"
-                    verify_reason_lines.append(sline)
+        # 배리어 없는 동시 실행 — task 로 띄워 slot 들이 두 노드에서 겹쳐 돈다.
+        slot_results = await asyncio.gather(
+            *(asyncio.create_task(_pipeline_slot(n)) for n in slot_order),
+            return_exceptions=True,
+        )
 
-            verify_span.set_attribute("verify.total_necessary", len(necessary_by_id))
-            verify_span.set_attribute("verify.total_multihop", total_multihop)
-            verify_span.set_attribute("verify.added_second_pass", len(second_by_id))
-            verify_span.set_attribute("verify.second_pass_total", total_second_pass)
-            verify_span.set_attribute("verify.second_necessary_total", total_second_necessary)
-            follow_up_span.set_attribute("follow_up.num_queries", len(fq_all))
-            follow_up_span.set_attribute("follow_up.num_slots_multihop", slots_with_multihop)
-            second_span.set_attribute("second_search.total", total_second_pass)
-            second_span.set_attribute("second_search.added", len(second_by_id))
-        finally:
-            # 세 span 모두 여기서만 종료 — stage 들은 use_span(end_on_exit=False) 로 빌려 썼다.
-            verify_span.end()
-            follow_up_span.end()
-            second_span.end()
+        # === 결정성 병합 — 슬롯 원순서대로 순차(완료순 X). 모든 변이는 여기서만 ===
+        necessary_by_id: dict[str, RetrievedChunk] = {}
+        second_by_id: dict[str, RetrievedChunk] = {}
+        verify_pins: list[dict[str, Any]] = []
+        fq_all: list[dict[str, Any]] = []
+        fq_summary_lines: list[str] = []
+        # UI thinking 노출용 — 슬롯별 Node1 검증/재검증 근거(B2: rationale 까지). task
+        # 내부가 아니라 여기서 버퍼만 하고, base run() 이 단계 종료 후 emit(순서·race 안전).
+        verify_reason_lines: list[str] = []
+        total_multihop = 0
+        total_second_pass = 0
+        total_second_necessary = 0
+        slots_with_multihop = 0
+        for slot_name, res in zip(slot_order, slot_results):
+            if isinstance(res, BaseException):
+                # 슬롯 파이프라인 전체 실패 → 그 슬롯은 기여 없음(graceful). 핀에 남긴다.
+                verify_pins.append({"slot": slot_name, "method": "error",
+                                    "num_first_pass": len(chunks_by_slot.get(slot_name, [])),
+                                    "num_necessary": 0, "num_multihop": 0,
+                                    "num_second_pass": 0, "num_second_necessary": 0,
+                                    "second_method": "error"})
+                verify_reason_lines.append(f"- [{slot_name}] 검증 실패(graceful skip)")
+                continue
+            for r in res.tool_results:  # record 는 race 방지 위해 여기서만(순차)
+                record(r)
+            for c in res.necessary:
+                if c.chunk_id not in necessary_by_id:
+                    necessary_by_id[c.chunk_id] = c
+            for c in res.second_pass:
+                if c.chunk_id not in necessary_by_id and c.chunk_id not in second_by_id:
+                    second_by_id[c.chunk_id] = c
+            total_multihop += len(res.multihop_ids)
+            if res.multihop_ids:
+                slots_with_multihop += 1
+            total_second_pass += res.num_second_pass
+            total_second_necessary += len(res.second_pass)
+            for fq in res.fq_list:
+                fq_all.append(fq)
+                fq_summary_lines.append(
+                    f"- [{slot_name}] {fq.get('query_text')} → "
+                    f"{fq.get('target_source_ids', [])}"
+                )
+            verify_pins.append({
+                "slot": slot_name, "method": res.method,
+                "num_first_pass": res.num_first_pass,
+                "num_necessary": len(res.necessary),
+                "num_multihop": len(res.multihop_ids),
+                "rationale_present": bool(res.rationale),
+                "num_second_pass": res.num_second_pass,
+                "num_second_necessary": len(res.second_pass),
+                "second_method": res.second_method,
+            })
+            # 슬롯 검증 근거 라인(1차 검증) — 카운트 + Node1 rationale. method=fallback
+            # 은 검증 LLM 호출 실패(또는 도구 실패) → 그 슬롯 청크 전량 보존이므로 실패
+            # 마커를 붙여 UI thinking 에 명시한다(adapter 가 채운 rationale 도 근거로 노출).
+            line = (f"- [{slot_name}] 1차 {res.num_first_pass}개 → 필요 "
+                    f"{len(res.necessary)}개, 멀티홉 {len(res.multihop_ids)}개")
+            if res.method == "fallback":
+                line += " ⚠ 검증 호출 실패 → 전량 보존"
+            if res.rationale:
+                line += f"\n    근거: {res.rationale}"
+            verify_reason_lines.append(line)
+            # 2차 재검증 근거 라인(Stage 4) — 2차 검색이 있었던 슬롯만.
+            if res.num_second_pass > 0:
+                sline = (f"  · 2차 검색 {res.num_second_pass}개 → 채택 "
+                         f"{len(res.second_pass)}개")
+                if res.second_method == "fallback":
+                    sline += " ⚠ 검증 호출 실패 → 전량 보존"
+                if res.rationale2:
+                    sline += f"\n    근거: {res.rationale2}"
+                verify_reason_lines.append(sline)
+
+        # 전역 집계 속성 — 버킷 span 제거 후 현재 span(=base run() 의 agent.run)에 단다.
+        run_span = trace.get_current_span()
+        run_span.set_attribute("verify.num_slots", len(slot_order))
+        run_span.set_attribute("verify.total_necessary", len(necessary_by_id))
+        run_span.set_attribute("verify.total_multihop", total_multihop)
+        run_span.set_attribute("verify.added_second_pass", len(second_by_id))
+        run_span.set_attribute("verify.second_pass_total", total_second_pass)
+        run_span.set_attribute("verify.second_necessary_total", total_second_necessary)
+        run_span.set_attribute("follow_up.num_queries", len(fq_all))
+        run_span.set_attribute("follow_up.num_slots_multihop", slots_with_multihop)
+        run_span.set_attribute("second_search.total", total_second_pass)
+        run_span.set_attribute("second_search.added", len(second_by_id))
         await emit_step("slot_verify", "ok",
                         necessary=len(necessary_by_id),
                         multihop=total_multihop,
@@ -250,10 +244,10 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
                             necessary_dropped=necessary_dropped)
 
         fq_summary = "\n".join(fq_summary_lines) if fq_summary_lines else None
-        # UI thinking — Node2 슬롯 검증/재검증 근거 블록(B2). base run() 이 단계 종료 후
+        # UI thinking — Node1 슬롯 검증/재검증 근거 블록(B2). base run() 이 단계 종료 후
         # emit_reasoning 으로 한 번 방출한다(fq_summary 앞).
         extra_reasoning = (
-            "\n**슬롯 검증 (Node2)**\n" + "\n".join(verify_reason_lines) + "\n"
+            "\n**슬롯 검증 (Node1)**\n" + "\n".join(verify_reason_lines) + "\n"
             if verify_reason_lines else None
         )
 
@@ -271,7 +265,7 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
                 "merged": len(v2_merged),
                 "budget": self._max_context_chunks,
                 "fetch_k": per_query_k,
-                # v2 는 1차 전량 보존을 폐기 — Node2 가 고른 필요 청크 수가 always-include 기준.
+                # v2 는 1차 전량 보존을 폐기 — Node1 이 고른 필요 청크 수가 always-include 기준.
                 "necessary_kept": len(necessary_ids),
                 "first_pass_total": len(first_pass_ids),
                 "per_query_counts": per_query_counts,
@@ -282,12 +276,12 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
                 "uncovered_required_slots": coverage["uncovered_required"],
             },
             "verify": {
-                "node2": True,
+                "node1": True,
                 "num_slots": len(slot_order),
                 "total_necessary": len(necessary_ids),
                 "total_multihop": total_multihop,
                 "added_second_pass": len(second_by_id),
-                # Stage 4 — 2차 검색 결과 Node2 재검증(검색 후 항상 relevance).
+                # Stage 4 — 2차 검색 결과 Node1 재검증(검색 후 항상 relevance).
                 "second_pass_total": total_second_pass,
                 "second_necessary_total": total_second_necessary,
                 "slots": verify_pins,
@@ -322,33 +316,36 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
     async def _run_slot_pipeline(
         self, *, request, ctx: ToolExecutionContext, spec_block: str,
         slot_name: str, slot_query: str, slot_chunks: list[RetrievedChunk],
-        verify_span: trace.Span, follow_up_span: trace.Span,
-        second_span: trace.Span,
     ) -> _SlotPipelineResult:
-        """한 슬롯: Node2 검증 → (멀티홉 청크에 대해) Node1 외부참조 선별 → 2차 검색.
+        """한 슬롯: Node1 검증 → (멀티홉 청크에 대해) Node2 외부참조 선별 → 2차 검색.
         tool 결과는 record 하지 않고 모아서 반환한다(병합 단계가 슬롯 원순서로 순차 record →
         결정성·race 방지). 어떤 단계든 실패/미배선이면 안전 degrade(necessary=전량, 멀티홉
         없음 → 단일노드 동작과 동형).
 
-        stage 별 도구 호출은 _post_retrieval 이 띄운 세 span(verify/follow_up/second_search)
-        에 trace.use_span(end_on_exit=False) 로 re-parent 한다 — Phoenix 에서 단계별로 도구
-        span 이 분리돼 보인다. span 종료는 _post_retrieval 의 finally 가 전담."""
+        슬롯의 4 stage 도구 호출은 여기서 연 `agent.slot.<name>` span 하나의 자식으로 묶인다
+        — gather task 마다 contextvars 가 독립이라 슬롯끼리 섞이지 않는다(Phoenix 에서
+        agent.run > agent.slot.<name> > {도구} 로 슬롯 단위로 읽힌다)."""
         tool_results: list[Any] = []
         if not slot_chunks:
-            # 0건 슬롯 — verify 호출 낭비 방지(빈 기여).
+            # 0건 슬롯 — verify 호출 낭비 방지(빈 기여). span 도 열지 않는다.
             return _SlotPipelineResult(
                 slot_name=slot_name, method="empty", num_first_pass=0,
                 necessary=[], multihop_ids=[], rationale="",
             )
 
-        by_id = {c.chunk_id: c for c in slot_chunks}
-        # === Stage 1 — Node2 verify ===
-        method = "fallback"
-        necessary_ids: list[str] = list(by_id)   # fallback 기본 = 전량 필요
-        multihop_ids: list[str] = []
-        rationale = ""
-        try:
-            with trace.use_span(verify_span, end_on_exit=False):
+        with _TRACER.start_as_current_span(f"agent.slot.{slot_name}") as slot_span:
+            oi.set_kind(slot_span, oi.KIND_CHAIN)
+            oi.set_io(slot_span, input_value=slot_query)
+            slot_span.set_attribute("slot.name", slot_name)
+            slot_span.set_attribute("slot.num_first_pass", len(slot_chunks))
+
+            by_id = {c.chunk_id: c for c in slot_chunks}
+            # === Stage 1 — Node1 verify ===
+            method = "fallback"
+            necessary_ids: list[str] = list(by_id)   # fallback 기본 = 전량 필요
+            multihop_ids: list[str] = []
+            rationale = ""
+            try:
                 v = await self._tools.invoke(
                     _VERIFY_TOOL,
                     {
@@ -360,27 +357,28 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
                     },
                     ctx,
                 )
-            tool_results.append(v)
-            if v.status == "success" and v.output:
-                method = str(v.output.get("method", "llm"))
-                nids = [i for i in (v.output.get("necessary_chunk_ids") or []) if i in by_id]
-                mids = [i for i in (v.output.get("multihop_chunk_ids") or []) if i in by_id]
-                necessary_ids = nids
-                multihop_ids = mids
-                rationale = str(v.output.get("rationale", ""))
-        except Exception:  # noqa: BLE001 — ToolUnknown/실패 → 단일노드 degrade(전량 필요).
-            method = "fallback"
-            necessary_ids = list(by_id)
-            multihop_ids = []
+                tool_results.append(v)
+                if v.status == "success" and v.output:
+                    method = str(v.output.get("method", "llm"))
+                    nids = [i for i in (v.output.get("necessary_chunk_ids") or []) if i in by_id]
+                    mids = [i for i in (v.output.get("multihop_chunk_ids") or []) if i in by_id]
+                    necessary_ids = nids
+                    multihop_ids = mids
+                    rationale = str(v.output.get("rationale", ""))
+            except Exception:  # noqa: BLE001 — ToolUnknown/실패 → 단일노드 degrade(전량 필요).
+                method = "fallback"
+                necessary_ids = list(by_id)
+                multihop_ids = []
+                # adapter fallback 과 일관 — 빈 근거 대신 실패 사유를 실어 UI thinking 노출.
+                rationale = "⚠ 검증 도구 호출 실패 → 이 슬롯 청크 전량 보존"
 
-        necessary = [by_id[i] for i in necessary_ids if i in by_id]
-        multihop = [by_id[i] for i in multihop_ids if i in by_id]
+            necessary = [by_id[i] for i in necessary_ids if i in by_id]
+            multihop = [by_id[i] for i in multihop_ids if i in by_id]
 
-        # === Stage 2 — Node1 외부참조 선별(enhanced follow_up, necessity_only) ===
-        fq_list: list[dict[str, Any]] = []
-        if multihop:
-            try:
-                with trace.use_span(follow_up_span, end_on_exit=False):
+            # === Stage 2 — Node2 외부참조 선별(enhanced follow_up, necessity_only) ===
+            fq_list: list[dict[str, Any]] = []
+            if multihop:
+                try:
                     fu = await self._tools.invoke(
                         _FOLLOW_UP_TOOL,
                         {
@@ -392,19 +390,18 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
                         },
                         ctx,
                     )
-                tool_results.append(fu)
-                if fu.status == "success" and fu.output:
-                    fq_list = fu.output.get("follow_up_queries", []) or []
-            except Exception:  # noqa: BLE001 — graceful skip(2차 검색 없음).
-                fq_list = []
+                    tool_results.append(fu)
+                    if fu.status == "success" and fu.output:
+                        fq_list = fu.output.get("follow_up_queries", []) or []
+                except Exception:  # noqa: BLE001 — graceful skip(2차 검색 없음).
+                    fq_list = []
 
-        # === Stage 3 — Node1 2차 검색(참조 문서 내부, score 게이트 keep_k) ===
-        second_pass_raw: list[RetrievedChunk] = []
-        searchable = [fq for fq in fq_list if fq.get("target_source_ids")]
-        if searchable:
-            # gather 의 자식 search span 들은 task 생성 시점 context 를 캡처하므로 이 with
-            # 안에서 띄우면 모두 second_span 의 자식으로 nesting 된다(v1 follow_up 동일 패턴).
-            with trace.use_span(second_span, end_on_exit=False):
+            # === Stage 3 — Node2 2차 검색(참조 문서 내부, score 게이트 keep_k) ===
+            second_pass_raw: list[RetrievedChunk] = []
+            searchable = [fq for fq in fq_list if fq.get("target_source_ids")]
+            if searchable:
+                # gather 의 자식 search span 들은 task 생성 시점 context(=이 슬롯 span)를
+                # 캡처하므로 모두 슬롯 span 의 자식으로 nesting 된다.
                 sub_results = await asyncio.gather(
                     *(
                         self._tools.invoke(
@@ -424,32 +421,31 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
                     ),
                     return_exceptions=True,
                 )
-            seen: set[str] = set()
-            for sub_res in sub_results:
-                if isinstance(sub_res, BaseException):
-                    continue
-                tool_results.append(sub_res)
-                found = _parse_chunks(
-                    sub_res.output if sub_res.status == "success" else None
-                )
-                for c in found[: self._follow_up_keep_k]:
-                    if c.chunk_id not in by_id and c.chunk_id not in seen:
-                        seen.add(c.chunk_id)
-                        second_pass_raw.append(c)
+                seen: set[str] = set()
+                for sub_res in sub_results:
+                    if isinstance(sub_res, BaseException):
+                        continue
+                    tool_results.append(sub_res)
+                    found = _parse_chunks(
+                        sub_res.output if sub_res.status == "success" else None
+                    )
+                    for c in found[: self._follow_up_keep_k]:
+                        if c.chunk_id not in by_id and c.chunk_id not in seen:
+                            seen.add(c.chunk_id)
+                            second_pass_raw.append(c)
 
-        # === Stage 4 — 2차 검색 결과 Node2 재검증("검색 후엔 항상 relevance") ===
-        # 2차 청크를 동일 retrieval.verify_slot 도구로 한 번 더 검증해 *답변에 필요한* 청크만
-        # N4 로 보낸다. 멀티홉 출력은 무시한다(3차 홉 없음 — 두번째 Node2 호출 후 바로 N4).
-        # 미배선/실패/fallback → 2차 전량 보존(단일노드 degrade). 빈 2차는 스킵(호출 낭비 방지).
-        second_pass = second_pass_raw
-        num_second_pass = len(second_pass_raw)
-        second_method = "skip"
-        rationale2 = ""
-        if second_pass_raw:
-            sp_by_id = {c.chunk_id: c for c in second_pass_raw}
-            second_method = "fallback"  # 기본 = 검증 실패 시 전량 보존
-            try:
-                with trace.use_span(verify_span, end_on_exit=False):
+            # === Stage 4 — 2차 검색 결과 Node1 재검증("검색 후엔 항상 relevance") ===
+            # 2차 청크를 동일 retrieval.verify_slot 도구로 한 번 더 검증해 *답변에 필요한* 청크만
+            # N4 로 보낸다. 멀티홉 출력은 무시한다(3차 홉 없음 — 두번째 Node1 호출 후 바로 N4).
+            # 미배선/실패/fallback → 2차 전량 보존(단일노드 degrade). 빈 2차는 스킵(호출 낭비 방지).
+            second_pass = second_pass_raw
+            num_second_pass = len(second_pass_raw)
+            second_method = "skip"
+            rationale2 = ""
+            if second_pass_raw:
+                sp_by_id = {c.chunk_id: c for c in second_pass_raw}
+                second_method = "fallback"  # 기본 = 검증 실패 시 전량 보존
+                try:
                     v2 = await self._tools.invoke(
                         _VERIFY_TOOL,
                         {
@@ -461,18 +457,33 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
                         },
                         ctx,
                     )
-                tool_results.append(v2)
-                if v2.status == "success" and v2.output:
-                    second_method = str(v2.output.get("method", "llm"))
-                    keep = [i for i in (v2.output.get("necessary_chunk_ids") or [])
-                            if i in sp_by_id]
-                    rationale2 = str(v2.output.get("rationale", ""))
-                    if second_method != "fallback":
-                        # 검증 통과 청크만 보존(원순서 유지). fallback 이면 전량 유지.
-                        second_pass = [sp_by_id[i] for i in keep if i in sp_by_id]
-            except Exception:  # noqa: BLE001 — ToolUnknown/실패 → 2차 전량 보존(degrade).
-                second_method = "fallback"
-                second_pass = second_pass_raw
+                    tool_results.append(v2)
+                    if v2.status == "success" and v2.output:
+                        second_method = str(v2.output.get("method", "llm"))
+                        keep = [i for i in (v2.output.get("necessary_chunk_ids") or [])
+                                if i in sp_by_id]
+                        rationale2 = str(v2.output.get("rationale", ""))
+                        if second_method != "fallback":
+                            # 검증 통과 청크만 보존(원순서 유지). fallback 이면 전량 유지.
+                            second_pass = [sp_by_id[i] for i in keep if i in sp_by_id]
+                except Exception:  # noqa: BLE001 — ToolUnknown/실패 → 2차 전량 보존(degrade).
+                    second_method = "fallback"
+                    second_pass = second_pass_raw
+                    # adapter fallback 과 일관 — 빈 근거 대신 실패 사유를 실어 UI thinking 노출.
+                    rationale2 = "⚠ 검증 도구 호출 실패 → 2차 검색 청크 전량 보존"
+
+            # slot span output — CHAIN span 은 자식 처리 후 자기 output 을 구조화 summary 로
+            # 단다(intake 노드 패턴). 미설정 시 Phoenix 가 자식 LLM 의 assistant 메시지를
+            # 끌어와 표시하므로, 슬롯 처리 결과 요약을 명시한다(verify_pins 와 동일 출처).
+            oi.set_io(slot_span, output_value={
+                "method": method,
+                "num_necessary": len(necessary),
+                "num_multihop": len(multihop_ids),
+                "num_second_pass": num_second_pass,
+                "num_second_necessary": len(second_pass),
+                "second_method": second_method,
+                "rationale": rationale,
+            })
 
         return _SlotPipelineResult(
             slot_name=slot_name, method=method, num_first_pass=len(slot_chunks),
@@ -487,8 +498,8 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
 def _build_spec_driven_v2(spec: VariantSpec, deps: AgentDeps) -> "SpecDrivenV2Runner":
     """spec_driven_v2 팩토리 — `_build_spec_driven`(v1) 미러. v2 전용 프롬프트 source
     (deps.spec_driven_v2_*)를 주입하되, 미배선이면 v1 source 로 폴백(부트 누락 방어).
-    Node2 검증은 retrieval.verify_slot 도구(profiles.py 가 SECONDARY_LLM 에 배선)로
-    호출하므로 러너에 LLM 을 직접 주입하지 않는다(D1 — Node2 는 도구 안에만 존재)."""
+    Node1 검증은 retrieval.verify_slot 도구(profiles.py 가 utility_llm 에 배선)로
+    호출하므로 러너에 LLM 을 직접 주입하지 않는다(D1 — 검증은 도구 안에만 존재)."""
     t = deps.tunables
     return SpecDrivenV2Runner(
         verify_concurrency=t.get("spec_driven_v2_verify_concurrency", 10),

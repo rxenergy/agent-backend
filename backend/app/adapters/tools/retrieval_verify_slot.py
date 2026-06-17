@@ -1,13 +1,13 @@
-"""retrieval.verify_slot — 슬롯 1개의 1차 검색 결과를 Node2 LLM 으로 검증(spec_driven_v2).
+"""retrieval.verify_slot — 슬롯 1개의 1차 검색 결과를 Node1 LLM 으로 검증(spec_driven_v2).
 
 Hexagonal 구조:
   - Tool 프로토콜 구현 (RetrievalVerifySlotTool)
-  - Port 의존: SlotVerifierPort (DI로 주입 — 구현체는 Node2 LLMPort 기반)
+  - Port 의존: SlotVerifierPort (DI로 주입 — 구현체는 Node1 LLMPort 기반)
   - Domain I/O: VerifySlotInput → VerifySlotResult
 
 이 도구는 슬롯 **1개**를 처리한다(per-slot fan-out 은 러너 spec_driven_v2 가 수행).
-동시성 캡(_MAX_CONCURRENCY)은 러너가 슬롯들을 동시에 invoke 할 때 단일 Node2 vLLM 의
-KV-cache 경쟁을 막는다(retrieval.follow_up 과 동일 취지 — 단, 여기선 Node2 보호).
+동시성 캡(_MAX_CONCURRENCY)은 러너가 슬롯들을 동시에 invoke 할 때 단일 Node1 vLLM 의
+KV-cache 경쟁을 막는다(retrieval.follow_up 과 동일 취지 — 단, 여기선 Node1 보호).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ class RetrievalVerifySlotTool:
     name = "retrieval.verify_slot"
     version = "v1"
 
-    # 동시 검증 슬롯 수 상한. 러너가 슬롯별로 이 도구를 동시 invoke 할 때 단일 Node2
+    # 동시 검증 슬롯 수 상한. 러너가 슬롯별로 이 도구를 동시 invoke 할 때 단일 Node1
     # vLLM 의 KV-cache 경쟁을 막는다(follow_up 과 동일 — 무제한 동시 발사 시 청크당
     # 디코딩이 느려져 per-call 타임아웃·재시도 캐스케이드). ceil(슬롯수/conc) 라운드로 직렬화.
     _MAX_CONCURRENCY = 3

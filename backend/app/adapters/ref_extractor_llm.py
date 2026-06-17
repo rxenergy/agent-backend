@@ -2,9 +2,9 @@
 쿼리 생성.
 
 app.adapters.ref_postprocess (chunking.postprocess 이식본)의 rule-base 해소 로직을
-재사용한다. LLM 호출은 주입된 LLMPort(메인 경로와 동일한 HttpLLM)를 통해 수행하므로
-이 어댑터는 외부 LLM SDK 를 직접 import 하지 않는다(원칙 #4). catalog 파일은 생성
-시점에 한 번만 로드된다.
+재사용한다. LLM 호출은 주입된 LLMPort(HttpLLM — spec_driven_v2 에선 sub 노드 =
+SECONDARY_LLM)를 통해 수행하므로 이 어댑터는 외부 LLM SDK 를 직접 import 하지 않는다
+(원칙 #4). catalog 파일은 생성 시점에 한 번만 로드된다.
 """
 
 from __future__ import annotations

@@ -1,11 +1,12 @@
-"""retrieval.verify_slot — 실 vLLM(Node2) 통합 테스트(spec_driven_v2 Phase 2).
+"""retrieval.verify_slot — 실 vLLM 통합 테스트(spec_driven_v2 Phase 2).
 
-Node2(SECONDARY_LLM = gemma-4-26b-sub)가 실제로 서빙 중인 환경을 전제로 한다. 환경변수로
-엔드포인트를 받아 실제 `HttpLLM` 을 만들고, 미설정 시 모듈 전체 skip(opt-in).
+검증은 swap 후 Node1(main = utility_llm) 업무지만, 이 테스트는 verify 도구가 실 vLLM 에서
+도는지만 단독 확인하므로 별도 엔드포인트 vLLM 을 주입한다(엔드포인트 분리 ≠ 논리 노드 분리).
+환경변수로 엔드포인트를 받아 실제 `HttpLLM` 을 만들고, 미설정 시 모듈 전체 skip(opt-in).
 
-  SPEC_DRIVEN_V2_NODE2_ENDPOINT — Node2 vLLM OpenAI-compat 엔드포인트
+  SPEC_DRIVEN_V2_NODE2_ENDPOINT — verify 용 vLLM OpenAI-compat 엔드포인트
                                   (예: http://192.168.100.11:8001/v1)
-  SPEC_DRIVEN_V2_NODE2_MODEL    — Node2 모델 id (예: gemma-4-26b-a4b-it)
+  SPEC_DRIVEN_V2_NODE2_MODEL    — verify 모델 id (예: gemma-4-26b-a4b-it)
 
 검증: 실 vLLM 응답으로 verify 가 (a) 입력 chunk_id 의 부분집합만 산출(환각 id 차단),
 (b) guided_json 파싱 성공·method=="llm", (c) 잘못된 엔드포인트 → method=="fallback"·
@@ -22,7 +23,7 @@ import pytest
 from app.adapters.llm.http import HttpLLM
 from app.adapters.slot_verifier_llm import SlotVerifierLlm
 from app.adapters.tools.retrieval_verify_slot import RetrievalVerifySlotTool
-from app.application.prompting.spec_driven_source import SpecDrivenVerifyChunkSource
+from app.application.prompting.spec_driven_source import SpecDrivenVerifySource
 from app.domain.retrieval import RetrievedChunk, VerifySlotInput, VerifySlotResult
 from app.ports.tool import ToolExecutionContext
 
@@ -36,8 +37,8 @@ def _node2_endpoint() -> str | None:
 
 
 @pytest.fixture(scope="session")
-def verify_source() -> SpecDrivenVerifyChunkSource:
-    return SpecDrivenVerifyChunkSource(_REPO_PROMPTS)
+def verify_source() -> SpecDrivenVerifySource:
+    return SpecDrivenVerifySource(_REPO_PROMPTS)
 
 
 @pytest.fixture(scope="session")

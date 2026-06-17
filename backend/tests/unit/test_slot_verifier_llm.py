@@ -1,9 +1,9 @@
-"""SlotVerifierLlm — 청크별 fan-out 검증 단위 테스트(spec_driven_v2 Node2).
+"""SlotVerifierLlm — 슬롯당 단일 호출 검증 단위 테스트(spec_driven_v2 Node1 = main).
 
-검증이 청크마다 독립 LLM 호출을 asyncio.gather 로 동시 발사하고(continuous batch), boolean
-판정을 모아 necessary/multihop 식별자 리스트로 집계하는지 — vLLM 컨테이너 없이 fake LLMPort
-+ duck-typed source 로(원칙: tests use fake ports). 동시성 캡(semaphore)·청크별 실패 보존·
-전 청크 실패 fallback 도 함께 검증한다.
+검증이 슬롯 1개의 청크 전체를 한 프롬프트로 합쳐 **단일 LLM 호출**로 판정하고, 모델이 낸
+necessary/multihop 식별자 리스트를 입력 부분집합으로 필터하는지 — vLLM 컨테이너 없이 fake
+LLMPort + duck-typed source 로(원칙: tests use fake ports). LLM 미가용/파싱 실패 시 슬롯
+단위 fallback(전량 보존 + 실패 사유 rationale)·동시 슬롯 캡(semaphore)도 함께 검증한다.
 """
 
 from __future__ import annotations
@@ -14,26 +14,27 @@ import json
 import pytest
 
 from app.adapters.slot_verifier_llm import SlotVerifierLlm
-from app.ports.llm import ChatMessage, GrammarSpec, LLMResult, LLMUnavailableError
+from app.ports.llm import LLMResult, LLMUnavailableError
 
 
 class _FakeSource:
     """SlotVerifierLlm 이 읽는 source 계약(prompt_body/schema/model_options)만 갖춘 duck."""
 
-    prompt_body = "system verify chunk"
+    prompt_body = "system verify slot"
     schema = {"type": "object"}
     model_options = {"temperature": 0.0}
 
 
 class _ScriptedLLM:
-    """chunk_id → {necessary, multihop, rationale} 매핑으로 응답하는 fake LLMPort.
+    """슬롯 단위 JSON(`{rationale, necessary_chunk_ids, multihop_chunk_ids}`) 1개를 반환하는
+    fake LLMPort. `fail=True` 면 LLMUnavailableError, `raw` 가 주어지면 그 문자열을 그대로
+    반환(파싱 실패 케이스). 동시 호출 수(in-flight)의 관측 최댓값을 기록한다(동시 슬롯 캡 검증)."""
 
-    chunk_id 가 fail 집합에 있으면 LLMUnavailableError 를 던진다. user 메시지에서 `[<cid>]`
-    를 뽑아 어떤 청크 호출인지 식별한다. 동시 호출 수(in-flight)의 관측 최댓값을 기록한다."""
-
-    def __init__(self, verdicts: dict, *, fail: set[str] | None = None) -> None:
-        self._verdicts = verdicts
-        self._fail = fail or set()
+    def __init__(self, verdict: dict | None = None, *, fail: bool = False,
+                 raw: str | None = None) -> None:
+        self._verdict = verdict or {}
+        self._fail = fail
+        self._raw = raw
         self.calls = 0
         self._inflight = 0
         self.max_inflight = 0
@@ -47,15 +48,13 @@ class _ScriptedLLM:
         self.max_inflight = max(self.max_inflight, self._inflight)
         try:
             self.calls += 1
-            # user 메시지에서 `[<cid>]` 추출(THE CHUNK 라인의 id).
-            user = next(m.content for m in messages if m.role == "user")
-            cid = user.split("[", 1)[1].split("]", 1)[0]
-            if cid in self._fail:
-                raise LLMUnavailableError(f"node2 down for {cid}")
+            if self._fail:
+                raise LLMUnavailableError("node1 down")
             # 동시성 관측이 의미 있도록 한 틱 양보.
             await asyncio.sleep(0.01)
+            text = self._raw if self._raw is not None else json.dumps(self._verdict)
             return LLMResult(
-                text=json.dumps(self._verdicts[cid]),
+                text=text,
                 token_usage={"prompt_tokens": 0, "completion_tokens": 0},
                 model_id=self.model_id,
             )
@@ -75,76 +74,109 @@ async def _verify(verifier: SlotVerifierLlm, chunks: list[dict]) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_per_chunk_fanout_and_aggregation() -> None:
+async def test_per_slot_single_call_and_filter() -> None:
+    # 슬롯의 청크 전체가 한 번의 호출로 판정되고, 모델의 id 리스트가 그대로 반영된다.
     llm = _ScriptedLLM({
-        "c1": {"necessary": True, "multihop": True, "rationale": "on-point + cites RG"},
-        "c2": {"necessary": True, "multihop": False, "rationale": "definition"},
-        "c3": {"necessary": False, "multihop": False, "rationale": "toc noise"},
+        "rationale": "c1 cites RG and is on-point; c2 is the definition; c3 toc noise",
+        "necessary_chunk_ids": ["c1", "c2"],
+        "multihop_chunk_ids": ["c1"],
     })
     verifier = SlotVerifierLlm(llm=llm, source=_FakeSource())
     out = await _verify(verifier, _chunks("c1", "c2", "c3"))
 
-    # 청크마다 1회씩 호출(슬롯 일괄 1회가 아니라 fan-out).
-    assert llm.calls == 3
+    # 슬롯당 1회 호출(청크별 fan-out 아님).
+    assert llm.calls == 1
     assert out["method"] == "llm"
     assert out["necessary_chunk_ids"] == ["c1", "c2"]
     assert out["multihop_chunk_ids"] == ["c1"]
-    # rationale 은 청크별로 줄바꿈 결합(c1·c2·c3 각각 한 줄).
-    assert out["rationale"].count("\n") == 2
-    assert "[c1]" in out["rationale"] and "[c3]" in out["rationale"]
+    # rationale 은 모델의 단일 문자열(청크별 결합 아님).
+    assert out["rationale"].startswith("c1 cites RG")
 
 
 @pytest.mark.asyncio
-async def test_per_chunk_failure_preserves_as_necessary() -> None:
-    # c2 만 Node2 미가용 → 그 청크는 necessary 로 보존(전량 보존 degrade), 멀티홉 제외.
-    # 나머지 성공이므로 method 는 "llm".
-    llm = _ScriptedLLM(
-        {
-            "c1": {"necessary": True, "multihop": False, "rationale": "x"},
-            "c3": {"necessary": False, "multihop": True, "rationale": "y"},
-        },
-        fail={"c2"},
-    )
+async def test_hallucinated_ids_filtered() -> None:
+    # 모델이 입력에 없는 id(ghost)를 내면 부분집합 필터로 제거된다(계약: 두 집합 ⊆ 입력).
+    llm = _ScriptedLLM({
+        "rationale": "keeps c1, hallucinates ghost",
+        "necessary_chunk_ids": ["c1", "ghost"],
+        "multihop_chunk_ids": ["ghost"],
+    })
+    verifier = SlotVerifierLlm(llm=llm, source=_FakeSource())
+    out = await _verify(verifier, _chunks("c1", "c2"))
+
+    assert out["method"] == "llm"
+    assert out["necessary_chunk_ids"] == ["c1"]   # ghost 제거
+    assert "ghost" not in out["multihop_chunk_ids"]
+    assert out["multihop_chunk_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_empty_necessary_is_not_fallback() -> None:
+    # 성공 호출이 necessary 를 비워 내는 것은 *유효*(프롬프트 허용) — fallback 으로 바꾸지 않는다.
+    llm = _ScriptedLLM({
+        "rationale": "none of the chunks help",
+        "necessary_chunk_ids": [],
+        "multihop_chunk_ids": [],
+    })
+    verifier = SlotVerifierLlm(llm=llm, source=_FakeSource())
+    out = await _verify(verifier, _chunks("c1", "c2"))
+
+    assert out["method"] == "llm"
+    assert out["necessary_chunk_ids"] == []
+    assert out["multihop_chunk_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_is_fallback_superset() -> None:
+    # 호출 실패 → 슬롯 단위 degrade: 청크 전량 necessary 보존, 멀티홉 비움, 실패 사유 rationale.
+    llm = _ScriptedLLM(fail=True)
     verifier = SlotVerifierLlm(llm=llm, source=_FakeSource())
     out = await _verify(verifier, _chunks("c1", "c2", "c3"))
 
-    assert out["method"] == "llm"
-    assert "c2" in out["necessary_chunk_ids"]      # 실패 → 보존
-    assert "c2" not in out["multihop_chunk_ids"]   # 실패 → 멀티홉 제외
-    assert out["multihop_chunk_ids"] == ["c3"]
+    assert out["method"] == "fallback"
+    assert set(out["necessary_chunk_ids"]) == {"c1", "c2", "c3"}
+    assert out["multihop_chunk_ids"] == []
+    # UI thinking 노출용 실패 사유(러너가 marker 와 함께 노출).
+    assert "전량 보존" in out["rationale"]
+    assert "LLMUnavailableError" in out["rationale"]
 
 
 @pytest.mark.asyncio
-async def test_all_chunks_fail_is_fallback() -> None:
-    # 전 청크 실패 → 기존 fallback 계약과 byte-identical(necessary=전량, multihop=없음).
-    llm = _ScriptedLLM({}, fail={"c1", "c2"})
+async def test_malformed_json_is_fallback() -> None:
+    # 비 JSON 응답 → 파싱 실패 → 동일 fallback(전량 보존 + 실패 사유).
+    llm = _ScriptedLLM(raw="not a json object at all")
     verifier = SlotVerifierLlm(llm=llm, source=_FakeSource())
     out = await _verify(verifier, _chunks("c1", "c2"))
 
     assert out["method"] == "fallback"
     assert set(out["necessary_chunk_ids"]) == {"c1", "c2"}
     assert out["multihop_chunk_ids"] == []
+    assert "전량 보존" in out["rationale"]
 
 
 @pytest.mark.asyncio
 async def test_concurrency_cap_is_respected() -> None:
-    # 청크 5개·캡 2 → 동시 in-flight 가 2 를 넘지 않아야 한다(전역 semaphore).
-    verdicts = {
-        f"c{i}": {"necessary": True, "multihop": False, "rationale": "x"}
-        for i in range(5)
-    }
-    llm = _ScriptedLLM(verdicts)
+    # 슬롯 5개를 한 verifier(캡 2)로 동시 검증 → 동시 in-flight 가 2 를 넘지 않아야 한다
+    # (슬롯당 1회 호출이므로 동시 호출 = 동시 슬롯 수, 전역 semaphore 가 묶는다).
+    llm = _ScriptedLLM({
+        "rationale": "keep", "necessary_chunk_ids": ["c0"], "multihop_chunk_ids": [],
+    })
     verifier = SlotVerifierLlm(llm=llm, source=_FakeSource(), max_concurrency=2)
-    out = await _verify(verifier, _chunks(*verdicts.keys()))
+    results = await asyncio.gather(
+        *(verifier.verify_slot(query_text="q", answer_spec="spec",
+                               slot_name=f"s{i}", slot_query="sq",
+                               chunks=_chunks("c0"))
+          for i in range(5))
+    )
 
     assert llm.calls == 5
     assert llm.max_inflight <= 2
-    assert len(out["necessary_chunk_ids"]) == 5
+    assert all(r["method"] == "llm" for r in results)
 
 
 @pytest.mark.asyncio
 async def test_empty_chunks_is_fallback_noop() -> None:
-    llm = _ScriptedLLM({})
+    llm = _ScriptedLLM()
     verifier = SlotVerifierLlm(llm=llm, source=_FakeSource())
     out = await _verify(verifier, [])
 
