@@ -177,9 +177,10 @@ spec_driven_generation_prompts:
 composer_slot_prompts:
   composer_slot_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/composer_slot_v1.md, version: v1, sha256: "2e99ac95becd18ff32e6beb232fc4438ba726914f65b88527016b810e4be472a"}
-    # max_tokens — 슬롯 1구획이라 단일 N4(16384)보다 작게. 슬롯당 폭주 방지·지연 단축.
-    model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 3000, seed: 7}
+    prompt:        {path: spec_driven/composer_slot_v1.md, version: v1, sha256: "b29152094b3ab51c3ce77a4c971f53179b0084da0f047778d885ca9465639b6f"}
+    # max_tokens — 슬롯 1구획이라 단일 N4(16384)보다 작되, 슬롯 CONTEXT(귀속 청크) + 이전
+    # 섹션 *전문* PRIOR + 4축 다층 전개를 한 구획에 담으므로 3000 에선 절단 위험 → 8192.
+    model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 8192, seed: 7}
 
 composer_synthesize_prompts:
   composer_synthesize_v1:

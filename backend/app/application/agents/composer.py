@@ -17,6 +17,7 @@ from app.application.agents.spec_driven_v1 import (
     SpecDrivenRunner,
     _assemble_final_chunks,
     _parse_chunks,
+    _render_spec_block,
     _scope_summary,
     _select_with_slot_floor,
     _sha16,
@@ -85,10 +86,11 @@ class ComposerRunner(SpecDrivenRunner):
         slot_source: Any = None,
         synthesize_source: Any = None,
         slot_verify_source: Any = None,
-        slot_max_tokens: int = 3000,
+        slot_max_tokens: int = 8192,
         slot_verify: str = "off",  # "off"(기본, 현재 비활성) | "l0" | "l1"
         synthesize: bool = True,
-        slot_context_k: int = 6,
+        slot_context_k: int = 12,
+        prior_full_k: int | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -101,8 +103,13 @@ class ComposerRunner(SpecDrivenRunner):
         self._slot_max_tokens = slot_max_tokens
         self._slot_verify = slot_verify
         self._synthesize = synthesize
-        # 슬롯에 귀속 청크가 없을 때 결정론 fallback 으로 배정할 상위 K(슬롯 굶음 방지, §3.3).
+        # 슬롯 CONTEXT 상한(슬롯당 최대 청크 수). 슬롯은 *자기 귀속 청크*만 본다 — 무관한
+        # 청크를 억지로 채우면 오인용·환각을 부르므로 점수상위 보충은 하지 않는다(사용자 결정).
+        # 귀속 0(굶음)일 때만 결정론 fallback(score 상위 K)로 빈 슬롯을 막는다(§3.3).
         self._slot_context_k = slot_context_k
+        # PRIOR SECTIONS 전달 폭(설계 §3.4) — 직전 K개 슬롯은 *전문*, 그 이전은 요지로 떨어뜨려
+        # 토큰 폭주를 막는 안전판. None=전체 전문(사용자 결정 — 기본은 전체).
+        self._prior_full_k = prior_full_k
 
     # ------------------------------------------------------------------
     # run() 오버라이드 — N0~N3.5 는 base 와 동형(헬퍼 재사용), N4 만 슬롯 파이프라인.
@@ -525,9 +532,9 @@ class ComposerRunner(SpecDrivenRunner):
         # 없다 — 화면에 흐른 원문이 answer_text 의 기록값이고, verdict 는 검수가 무엇을
         # 지적했는지를 핀에 남긴다(streamed_before_verify 로 분기 명시 — 재현 가능성 보존).
         slot_outputs: list[dict[str, Any]] = []
-        digest_lines: list[str] = []
         slot_pins: list[dict[str, Any]] = []
         streamed_parts: list[str] = []  # 이미 화면에 흘린 본문(최종 answer_text 재구성용).
+        num_slots = len(plan)
         for idx, p in enumerate(plan):
             slot: SpecSlot = p["slot"]
             sub_chunks: list[RetrievedChunk] = p["chunks"]
@@ -544,13 +551,17 @@ class ComposerRunner(SpecDrivenRunner):
                 ss.set_attribute("slot.num_chunks", len(sub_chunks))
                 rendered = self._render_slot_prompt(
                     request.query_text, spec, slot, sub_chunks, pack,
-                    prior_digest="\n".join(digest_lines),
+                    prior_sections=self._prior_sections_block(slot_outputs),
+                    stage_index=idx, stage_total=num_slots,
                 )
                 slot_prompt_hash = _sha16(rendered)
                 ss.set_attribute("slot.rendered_prompt_hash", slot_prompt_hash)
                 try:
                     # 헤더를 본문 *앞*에 prefix 로 한 번 흘리고(answer_structure 기반),
                     # 이후 본문 토큰을 라이브로 흘린다. 슬롯 사이 빈 줄은 헤더에 포함.
+                    # 헤더는 결정론으로 *여기서만* 붙고(`p["header"]` = `## {label}`), 본문은
+                    # 헤더를 내지 않는다(프롬프트 금지 + 아래 _strip_leading_heading backstop)
+                    # — 전체 답의 헤더 레벨을 `##` 로 통일해 위계·가독성을 보존(사용자 보고).
                     result = await self._slot_generate_stream(
                         llm, rendered, span=ss, prefix=p["header"],
                         model_options_override=self._slot_model_options(),
@@ -571,12 +582,15 @@ class ComposerRunner(SpecDrivenRunner):
                         error_code="llm_unavailable", query_understanding=qu_pin,
                     )
 
-            # 화면에 흐른 원문이 기록값. 검수는 이후 verdict 기록용으로만 돈다(사후 교정은
-            # 화면을 되돌릴 수 없으므로 text 는 스트리밍된 원문 유지).
-            text = result.text.strip()
+            # 본문 선두에 모델이 낸 헤더(`#`/`##`)는 결정론 헤더(p["header"])와 중복돼 위계·
+            # 가독성을 해친다. 1차 방어는 프롬프트(헤더 출력 금지). 라이브 스트리밍이라 화면은
+            # 되돌릴 수 없으므로, 기록 answer_text·PRIOR 전달에서는 선두 헤더를 결정론으로
+            # 제거한다(strip). 모델이 헤더를 안 내면 화면=기록 일치(통상). 낸 경우만 기록이
+            # 화면보다 깔끔해지는 divergence — 프롬프트 금지가 그 경우를 최소화한다.
+            text = self._strip_leading_heading(result.text.strip())
             _, verdict = await self._verify_slot(
                 llm, slot, text, allowed_cites, sub_chunks, pack,
-                request, spec, prior_digest="\n".join(digest_lines),
+                request, spec, prior_sections=self._prior_sections_block(slot_outputs),
             )
             verdict["streamed_before_verify"] = True
 
@@ -586,11 +600,6 @@ class ComposerRunner(SpecDrivenRunner):
             streamed_parts.append(section)
 
             slot_outputs.append({"slot": slot, "header": p["header"], "text": text})
-            used_cites = sorted(set(_CITE_N_RE.findall(text)), key=int)
-            digest_lines.append(
-                f"- [{slot.name}] {self._first_sentence(text)} "
-                f"(cites: {', '.join('cite-' + n for n in used_cites) or '-'})"
-            )
             slot_pins.append({
                 "name": slot.name, "facet": slot.facet,
                 "expected_authority": slot.expected_authority,
@@ -598,6 +607,7 @@ class ComposerRunner(SpecDrivenRunner):
                 "allowed_cites": sorted(allowed_cites),
                 "rendered_prompt_hash": slot_prompt_hash,
                 "fallback_context": p["fallback"],
+                "attributed_chunks": p["attributed"],  # 귀속 청크 수(보충 없음 — 진단·재현).
                 "verdict": verdict,
                 "completion_tokens": int(result.token_usage.get("completion_tokens", 0)),
             })
@@ -846,17 +856,22 @@ class ComposerRunner(SpecDrivenRunner):
         by_score = sorted(chunks, key=lambda c: c.score, reverse=True)
         plan: list[dict[str, Any]] = []
         for i, s in enumerate(ordered):
+            # 슬롯은 *자기 귀속 청크*만 본다(억지 보충 없음 — 무관 청크는 오인용을 부른다,
+            # 사용자 결정). 귀속이 전무할 때만 빈 CONTEXT 를 막는 결정론 fallback(score 상위).
             owned = [c for c in by_score
                      if s.name in slots_by_chunk.get(c.chunk_id, set())]
-            fallback = False
-            if not owned:
+            attributed = len(owned)
+            fallback = not owned
+            if fallback:
                 owned = by_score[: self._slot_context_k]
-                fallback = True
             else:
                 owned = owned[: self._slot_context_k]
             label = stages[i] if i < len(stages) else (s.facet or s.name)
+            # 헤더는 여기서만 결정론으로 붙는다(`## {label}`) — 전체 답의 헤더 레벨을 ## 로
+            # 통일해 위계·가독성 보존. 슬롯 본문은 헤더를 내지 않는다(프롬프트 금지 + strip).
             plan.append({"slot": s, "name": s.name, "chunks": owned,
-                         "fallback": fallback, "header": f"## {label}\n\n"})
+                         "fallback": fallback, "attributed": attributed,
+                         "header": f"## {label}\n\n"})
         return plan
 
     @staticmethod
@@ -871,25 +886,37 @@ class ComposerRunner(SpecDrivenRunner):
 
     # ------------------------------------------------------------------
     # N4.1 — 슬롯 1개 생성 프롬프트. slot_source 미배선이면 계승한 generation_source(단일
-    # N4 본문)를 쓰고 슬롯 trailer 만 덧댄다(graceful). 배치: [본문][이전 요지][# CONTEXT
-    # 서브셋][이 슬롯 지시][QUERY][lang] — 핵심 지시·질의를 CONTEXT 뒤(recency §6.1).
+    # N4 본문)를 쓰고 슬롯 trailer 만 덧댄다(graceful). 배치(recency §6.1 — 핵심 지시·질의를
+    # CONTEXT 뒤): [본문][CITATION][# ANSWER SPEC 전역][# PRIOR SECTIONS 전문][# CONTEXT
+    # 서브셋][# THIS SECTION 위계][QUERY][lang].
+    #   - # ANSWER SPEC: 전역 spec(intent·answer_structure·전체 슬롯). 슬롯이 *전체 답의 어느
+    #     단계*인지 알아 위계·중복 회피(§3.2).
+    #   - # PRIOR SECTIONS: 앞 구획 *전문*(요지 아님 — §3.4). 자연스러운 연결·중복 회피.
+    #   - # THIS SECTION: 단계 N/총 M 위계 + facet + 헤더 금지(가독성 — 헤더는 결정론으로만).
     # ------------------------------------------------------------------
     def _render_slot_prompt(
         self, query_text: str, spec: AnswerSpec, slot: SpecSlot,
-        sub_chunks: list[RetrievedChunk], pack, *, prior_digest: str,
+        sub_chunks: list[RetrievedChunk], pack, *, prior_sections: str,
+        stage_index: int = 0, stage_total: int = 1,
     ) -> str:
         body = (self._slot_source.prompt_body if self._slot_source
                 else self._generation_source.prompt_body).strip()
         parts = [body]
         if self._citation_contract:
             parts.append("# CITATION CONTRACT\n" + self._citation_contract.strip())
-        if prior_digest.strip():
-            # 프롬프트(composer_slot_v1.md)가 기대하는 섹션명 — 이전 슬롯 요지(연속성·중복
-            # 회피용 맥락이지 근거 아님). 슬롯명·첫 문장·사용 cite-ID 만(전문 아님 §3.2).
+        # 전역 답변 사양 — 슬롯이 전체 구조 안에서 자기 위치를 알게 한다(_render_spec_block
+        # 재사용, 단일-경로 동형). 위계·단계 심도·중복 회피의 기준.
+        parts.append("# ANSWER SPEC (전체 답변의 설계 — 이 구획은 그 중 한 단계)\n"
+                     + _render_spec_block(spec))
+        if prior_sections.strip():
+            # 앞 구획 *전문*(이미 사용자에게 보인 본문) — 연결용 맥락이지 근거가 아니다.
+            # 프롬프트(composer_slot_v1.md)가 이 섹션명을 기대한다(§3.4).
             parts.append(
-                "# PRIOR SECTIONS (앞서 작성돼 사용자에게 이미 보인 구획의 요지 — 이어쓰되\n"
-                "중복하지 말고, 여기 적힌 내용을 근거로 재사용하지 말고 이 섹션 CONTEXT 로만 근거하라)\n"
-                + prior_digest.strip()
+                "# PRIOR SECTIONS (앞서 작성돼 사용자에게 이미 보인 구획들의 *전문* — 이 흐름을\n"
+                "이어 자연스럽게 연결하되, 이미 확립된 사실을 재서술·재인용하지 말고 이 구획\n"
+                "facet 의 새 substance 를 전개하라. PRIOR 는 근거가 아니다 — 모든 [cite-N] 은 이\n"
+                "구획 # CONTEXT 에서만 끌어오고, PRIOR 의 cite 를 그대로 베끼지 마라)\n"
+                + prior_sections.strip()
             )
         sub_ids = {c.chunk_id for c in sub_chunks}
         parts.append("# CONTEXT\n" + self._render_context_subset(pack, sub_ids))
@@ -898,12 +925,15 @@ class ComposerRunner(SpecDrivenRunner):
                 if slot.expected_authority else "")
         parts.append(
             f"# THIS SECTION{tag}\n"
+            f"단계: {stage_index + 1} / 총 {stage_total} 구획 중\n"
             f"slot: {slot.name}\n"
             f"answer_structure: {spec.answer_structure or '-'}\n"
             f"governing_normative_class: {spec.governing_normative_class or '-'}{auth}\n"
             f"무엇을 확립할 것인가: {slot.description or slot.name}\n"
             "위 CONTEXT 근거만으로 이 구획을 전문가 깊이로 작성하라. 다른 구획이 다룰 내용은\n"
-            "겹쳐 쓰지 마라. CONTEXT 가 이 구획을 뒷받침하지 못하면 그 한계를 명시하라."
+            "겹쳐 쓰지 마라. CONTEXT 가 이 구획을 뒷받침하지 못하면 그 한계를 명시하라.\n"
+            "**제목/헤더(`#`,`##`,`###`)를 출력하지 마라** — 구획 제목은 시스템이 붙인다. 본문만,\n"
+            "선행 빈 줄·구획명 반복 없이 곧바로 시작하라."
         )
         parts.append("# QUERY\n" + query_text)
         parts.append(
@@ -996,7 +1026,7 @@ class ComposerRunner(SpecDrivenRunner):
     async def _verify_slot(
         self, llm: LLMPort, slot: SpecSlot, text: str, allowed_cites: set[str],
         sub_chunks: list[RetrievedChunk], pack, request: AgentRequest,
-        spec: AnswerSpec, *, prior_digest: str,
+        spec: AnswerSpec, *, prior_sections: str,
     ) -> tuple[str, dict[str, Any]]:
         verdict: dict[str, Any] = {"l0": "pass", "l1": None, "regen": 0}
         if self._slot_verify == "off":
@@ -1018,7 +1048,7 @@ class ComposerRunner(SpecDrivenRunner):
             verdict["l1"] = await self._l1_entailment(llm, text, sub_chunks, pack)
             if verdict["l1"] == "unsupported":
                 regen = await self._regenerate_slot(
-                    llm, slot, sub_chunks, pack, request, spec, prior_digest)
+                    llm, slot, sub_chunks, pack, request, spec, prior_sections)
                 if regen is not None:
                     verdict["regen"] = 1
                     text = regen
@@ -1064,18 +1094,18 @@ class ComposerRunner(SpecDrivenRunner):
 
     async def _regenerate_slot(
         self, llm: LLMPort, slot: SpecSlot, sub_chunks: list[RetrievedChunk],
-        pack, request: AgentRequest, spec: AnswerSpec, prior_digest: str,
+        pack, request: AgentRequest, spec: AnswerSpec, prior_sections: str,
     ) -> str | None:
         prompt = self._render_slot_prompt(
             request.query_text, spec, slot, sub_chunks, pack,
-            prior_digest=prior_digest)
+            prior_sections=prior_sections)
         prompt += ("\n\n# CORRECTION\n이전 초안이 CONTEXT 밖 주장을 포함했다. CONTEXT 가 "
                    "직접 뒷받침하는 사실만 남기고 추론·일반론을 제거해 다시 작성하라.")
         try:
             with _TRACER.start_as_current_span("llm.slot_regenerate") as ss:
                 ss.set_attribute("slot.name", slot.name)
                 res = await self._slot_generate(llm, prompt, span=ss)
-            return res.text
+            return self._strip_leading_heading(res.text)
         except LLMUnavailableError:
             return None
 
@@ -1151,6 +1181,37 @@ class ComposerRunner(SpecDrivenRunner):
             return dict(self._synthesize_source.model_options)
         return dict(self._generation_source.model_options or {})
 
+    def _prior_sections_block(self, slot_outputs: list[dict[str, Any]]) -> str:
+        """앞 슬롯들의 *전문*을 PRIOR SECTIONS 본문으로 조립(§3.4 — 요지 아님). 다음 슬롯이
+        앞 내용에 자연스럽게 이어쓰도록 헤더+본문을 그대로 싣는다. `prior_full_k` 가 설정되면
+        직전 K개만 전문, 그 이전은 한 줄 요지로 떨어뜨려 토큰 폭주를 막는다(기본 None=전체)."""
+        if not slot_outputs:
+            return ""
+        k = self._prior_full_k
+        if k is None or k >= len(slot_outputs):
+            full, summarized = slot_outputs, []
+        else:
+            full, summarized = slot_outputs[-k:], slot_outputs[:-k]
+        lines: list[str] = []
+        for o in summarized:
+            # 오래된 구획은 한 줄 요지(슬롯명 + 첫 문장)로 압축 — 연결 맥락만 남긴다.
+            lines.append(f"- [{o['slot'].name}] {self._first_sentence(o['text'])}")
+        for o in full:
+            # 헤더(결정론)는 빼고 본문 전문만 — PRIOR 는 연결용이지 화면 재현이 아니므로
+            # 슬롯명으로 라벨링해 어느 구획인지만 표시한다.
+            lines.append(f"### [{o['slot'].name}]\n{o['text'].strip()}")
+        return "\n\n".join(lines)
+
+    # 본문 선두에 모델이 낸 제목/헤더 라인을 제거(가독성 backstop — 헤더는 _plan_slots 가
+    # 결정론으로 `## {label}` 한 번만 붙인다. 슬롯 본문이 또 헤더를 내면 중복돼 위계가 깨짐).
+    # 선두 공백·빈 줄, 그리고 선두 연속 헤더 라인(`#`~`######`)만 제거 — 본문 중간 헤더는
+    # 건드리지 않는다(드물지만 모델이 하위 소제목을 의도했을 수 있음).
+    _LEADING_HEADING_RE = re.compile(r"^(?:\s*#{1,6}[^\n]*\n+)+")
+
+    @classmethod
+    def _strip_leading_heading(cls, text: str) -> str:
+        return cls._LEADING_HEADING_RE.sub("", text.lstrip()).lstrip()
+
     @staticmethod
     def _first_sentence(text: str, *, limit: int = 200) -> str:
         t = _CITE_RE.sub("", re.sub(r"\s+", " ", text.strip()))
@@ -1199,8 +1260,9 @@ def _build_composer(spec: VariantSpec, deps: AgentDeps) -> "ComposerRunner":
         slot_source=getattr(deps, "composer_slot_source", None),
         synthesize_source=getattr(deps, "composer_synthesize_source", None),
         slot_verify_source=getattr(deps, "composer_slot_verify_source", None),
-        slot_max_tokens=t.get("composer_slot_max_tokens", 3000),
+        slot_max_tokens=t.get("composer_slot_max_tokens", 8192),
         slot_verify=t.get("composer_slot_verify", "off"),
         synthesize=t.get("composer_synthesize", True),
-        slot_context_k=t.get("composer_slot_context_k", 6),
+        slot_context_k=t.get("composer_slot_context_k", 12),
+        prior_full_k=t.get("composer_prior_full_k", None),
     )
