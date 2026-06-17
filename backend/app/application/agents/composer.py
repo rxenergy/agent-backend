@@ -965,7 +965,8 @@ class ComposerRunner(SpecDrivenRunner):
             "**제목/헤더(`#`,`##`,`###`)를 출력하지 마라** — 구획 제목은 시스템이 붙인다. 본문만,\n"
             "선행 빈 줄·구획명 반복 없이 곧바로 시작하라."
         )
-        parts.append("# QUERY\n" + query_text)
+        parts.append("### (refrence) USER QUERY\n" + query_text)
+
         parts.append(
             "# RESPONSE LANGUAGE\n"
             "Write this section in the same language as the QUERY above "

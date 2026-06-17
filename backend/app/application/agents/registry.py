@@ -61,6 +61,13 @@ class AgentDeps:
     composer_slot_source: Any = None
     composer_synthesize_source: Any = None
     composer_slot_verify_source: Any = None
+    # composer v2 — 책임 재분배(answer_spec_query_responsibility_split.design.v1): N1 답변
+    # 설계(검색지식 제거)·N2 검색설계(address map 흡수)·슬롯 role 소비. composer 만 쓴다
+    # (spec_driven_v1/v2 의 N1/N2 source 불변 — A/B). None 이면 _build_composer 가 계승한
+    # base v1 source 로 graceful fallback(tunable composer_prompts_v2 토글).
+    composer_answer_spec_source: Any = None
+    composer_query_source: Any = None
+    composer_slot_v2_source: Any = None
     # spec_driven_v2 — 2-노드(DGX Spark) 분산 변형 전용 프롬프트 source(registry 호스팅,
     # sha 핀). v1 과 격리된 `*_v2` profile_id 를 읽는다(초기엔 v1 fragment 재사용 → 동일
     # sha). None 이면 v2 변형이 run() 에서 부트 배선 오류로 처리(프롬프트 인라인 금지).
