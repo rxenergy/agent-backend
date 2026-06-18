@@ -1,13 +1,41 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "spec_driven_verify_v2",
-  "description": "spec_driven_v2 Node2 slot-verification output. Identifiers only (address-not-content): which retrieved chunks are necessary to answer this slot, and which need a multi-hop external-document search. Both lists must be a subset of the chunk ids shown in the prompt.",
+  "description": "spec_driven_v2 Node2 slot-verification output. Identifiers only (address-not-content): which retrieved chunks are necessary to answer this slot, which of those need their adjacent (before/after) chunks fetched for context, and which point to an external document that must be searched (multi-hop) along with the direction that follow-up search should take. All chunk ids must be a subset of the chunk ids shown in the prompt.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["rationale", "necessary_chunk_ids", "multihop_chunk_ids"],
+  "required": ["necessary_chunk_ids", "neighbor_requests", "multihop"],
   "properties": {
-    "rationale": {"type": "string", "description": "1-2 sentence reasoning written *before* the id lists (decoded first → leading CoT): which chunks carry on-point evidence for this slot's facet and which cite an external document that must be searched."},
-    "necessary_chunk_ids": {"type": "array", "items": {"type": "string"}, "description": "Chunk ids needed to answer the question for this slot. Selective — drop off-topic/redundant/noise chunks. May be empty if none help."},
-    "multihop_chunk_ids": {"type": "array", "items": {"type": "string"}, "description": "Subset of retrieved chunks that point to an external document which must itself be searched (multi-hop). May be empty."}
+    "necessary_chunk_ids": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Chunk ids needed to answer the question for this slot. Selective — drop off-topic/redundant/noise chunks. May be empty if none help."
+    },
+    "neighbor_requests": {
+      "type": "array",
+      "description": "Subset of necessary_chunk_ids whose content is cut off and needs the adjacent passage(s) of the SAME document fetched to be complete. Empty when every necessary chunk is self-contained.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["chunk_id", "direction"],
+        "properties": {
+          "chunk_id": {"type": "string", "description": "A chunk id that also appears in necessary_chunk_ids."},
+          "direction": {"type": "string", "enum": ["before", "after", "both"], "description": "Which adjacent passage is needed: the one before this chunk, after it, or both."}
+        }
+      }
+    },
+    "multihop": {
+      "type": "array",
+      "description": "Chunks that point to an external document which must itself be searched (multi-hop). Each carries a search_direction telling the follow-up step what to look for in that external document. May be empty.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["chunk_id", "search_direction"],
+        "properties": {
+          "chunk_id": {"type": "string", "description": "A retrieved chunk id that cites an external document needing search."},
+          "search_direction": {"type": "string", "description": "One sentence: what to look for, and from which angle, when searching the cited external document so the slot's facet can be answered."}
+        }
+      }
+    }
   }
 }

@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from app.domain.errors import RetrievalTimeoutError, RetrievalUnavailableError
 from app.domain.retrieval import (
+    DocumentFetchChunksInput,
     DocumentFetchSectionInput,
     RetrievedChunk,
     RetrieverSearchOutput,
@@ -237,6 +238,101 @@ class OpenSearchDocumentFetchSectionTool:
                 ) from exc
             # 매핑 일관성: retriever 의 _hit_to_chunk 재사용. ordinal 로 본문순 정렬.
             chunks = [OpenSearchRetrieverTool._hit_to_chunk(h) for h in hits]
+            chunks.sort(key=lambda c: _chunk_ordinal(c.chunk_id))
+
+        output = RetrieverSearchOutput(chunks=chunks)
+        return ToolResult(
+            tool_name=self.name,
+            tool_version=self.version,
+            status="success",
+            output=output.model_dump(mode="json"),
+            latency_ms=0,
+            input_hash="",
+            trace_id=context.trace_id,
+        )
+
+
+class OpenSearchDocumentFetchChunksTool:
+    """`document.fetch_chunks` — chunk_id 의 *정확한* 집합을 id 조회로 일괄 fetch.
+
+    relevance 검색이 아니라 메타 표적 조회다: `{"terms": {"chunk_id": [...]}}` 로 주어진
+    id 의 full chunk 를 가져온다(document.resolve_citation 의 terms 쿼리 + fetch_section 의
+    _hit_to_chunk 매핑을 합친 형태). verify_slot 의 neighbor_requests(앞/뒤 문맥 보강)에서
+    러너가 이웃 chunk_id 를 `..._cNNNN` ordinal 로 계산해 넘기면, 그 본문(text/snippet)을
+    실어 N4 CONTEXT 에 합칠 수 있게 한다. 결과는 chunk_id ordinal 순으로 정렬한다(본문 순서).
+    """
+
+    name = "document.fetch_chunks"
+    version = "v1-opensearch"
+
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        index: str,
+        username: str | None = None,
+        password: str | None = None,
+        timeout_s: float = 5.0,
+        verify_certs: bool = False,
+        snippet_chars: int = 2048,
+    ) -> None:
+        if not endpoint:
+            raise ValueError("OpenSearchDocumentFetchChunksTool requires endpoint")
+        self._endpoint = endpoint.rstrip("/")
+        self._index = index
+        self._auth = (username, password) if username else None
+        self._timeout_s = timeout_s
+        self._verify = verify_certs
+        self._snippet_chars = snippet_chars
+
+    async def invoke(
+        self,
+        tool_input: DocumentFetchChunksInput | dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        from app.adapters.tools.retriever_opensearch import OpenSearchRetrieverTool
+
+        if isinstance(tool_input, dict):
+            tool_input = DocumentFetchChunksInput.model_validate(tool_input)
+
+        unique_chunks = sorted({c for c in tool_input.chunk_ids if c})
+        chunks: list[RetrievedChunk] = []
+        if unique_chunks:
+            url = f"{self._endpoint}/{self._index}/_search"
+            body = {
+                "size": len(unique_chunks),
+                "query": {"terms": {"chunk_id": unique_chunks}},
+                "_source": {"excludes": ["dense_e5", "sparse_fermi"]},
+            }
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self._timeout_s, verify=self._verify, auth=self._auth
+                ) as client:
+                    resp = await client.post(
+                        url, json=body, headers={"Content-Type": "application/json"}
+                    )
+                if resp.status_code >= 500:
+                    raise RetrievalUnavailableError(
+                        f"opensearch fetch_chunks {resp.status_code}: {resp.text[:200]}"
+                    )
+                resp.raise_for_status()
+                hits = (resp.json().get("hits") or {}).get("hits") or []
+            except httpx.TimeoutException as exc:
+                raise RetrievalTimeoutError(
+                    f"opensearch fetch_chunks timeout: {exc}"
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                raise RetrievalUnavailableError(
+                    f"opensearch fetch_chunks http error: {exc}"
+                ) from exc
+            except httpx.RequestError as exc:
+                raise RetrievalUnavailableError(
+                    f"opensearch fetch_chunks unreachable: {exc}"
+                ) from exc
+            chunks = [
+                OpenSearchRetrieverTool._hit_to_chunk(h, snippet_chars=self._snippet_chars)
+                for h in hits
+            ]
             chunks.sort(key=lambda c: _chunk_ordinal(c.chunk_id))
 
         output = RetrieverSearchOutput(chunks=chunks)

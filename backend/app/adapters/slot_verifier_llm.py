@@ -11,11 +11,14 @@ Node2 vLLM 에 나가는 호출 총량을 전역으로 묶는다(`max_num_seqs` 
 캐스케이드 방지). verify·follow_up 이 같은 Node2 를 공유하므로 두 도구의 동시 호출이 같은
 vLLM 예산을 두고 경쟁한다. RetrievalVerifySlotTool 의 도구 레벨 캡과 중복이나, 어댑터 경계의 안전판.
 
-출력은 청크 *식별자*다(address-not-content 불변): 답변에 꼭 필요한 청크 + 멀티홉(재검색)
-필요 청크. 모델이 입력에 없는 id 를 내면 입력 부분집합으로 필터한다(hallucinated id 제거).
+출력은 청크 *식별자*다(address-not-content 불변): 답변에 꼭 필요한 청크 + 그중 앞/뒤 문맥
+보강이 필요한 청크(neighbor_requests: chunk_id→before/after/both) + 멀티홉(재검색) 필요 청크
+(multihop: chunk_id + search_direction). 모델이 입력에 없는 id 를 내면 입력 부분집합으로
+필터한다(hallucinated id 제거). verify_slot_v2 는 더 이상 자유 rationale 을 내지 않으므로
+rationale 은 어댑터가 구조화 필드(필요/이웃/멀티홉 수)에서 합성해 핀·UI thinking 연속성을 유지한다.
 LLM 미가용/파싱 실패는 슬롯 단위로 안전 degrade — 그 슬롯 청크를 *전량* necessary 로 보존하고
-멀티홉을 비워(재검색 안 함 → 단일노드 동작과 동형) method="fallback" 을 낸다. 이때 rationale 에
-실패 사유를 실어 러너가 UI thinking 에 "검증 호출 실패 → 전량 보존" 을 노출하게 한다.
+멀티홉·이웃을 비워(재검색·보강 안 함 → 단일노드 동작과 동형) method="fallback" 을 낸다. 이때
+rationale 에 실패 사유를 실어 러너가 UI thinking 에 "검증 호출 실패 → 전량 보존" 을 노출하게 한다.
 """
 
 from __future__ import annotations
@@ -50,6 +53,26 @@ _RATIONALE_CHARS_CAP = 4000
 # 함께 노출). 예외 메시지를 일부 덧붙여 어떤 실패였는지 추적 가능하게 한다.
 _FALLBACK_RATIONALE_PREFIX = "⚠ Node2 검증 호출 실패 — 이 슬롯 청크 전량 보존"
 
+# neighbor_requests 의 허용 방향(스키마 enum 과 동일). 이외 값은 파싱에서 drop.
+_NEIGHBOR_DIRECTIONS = frozenset({"before", "after", "both"})
+
+
+def _synthesize_rationale(
+    *, num_necessary: int, num_neighbor: int, multihop_directions: dict[str, str]
+) -> str:
+    """verify_slot_v2 는 더 이상 자유 rationale 을 내지 않으므로, 구조화 산출에서 핀·UI
+    thinking 연속성용 요약 문장을 합성한다. 멀티홉 search_direction 은 방향 텍스트까지
+    실어 "어느 각도로 재검색하려는지"가 근거에 남게 한다(cap 안에서)."""
+    parts = [f"필요 {num_necessary}개"]
+    if num_neighbor:
+        parts.append(f"이웃 보강 {num_neighbor}개")
+    if multihop_directions:
+        dirs = "; ".join(
+            f"{cid}: {sd}" for cid, sd in multihop_directions.items()
+        )
+        parts.append(f"멀티홉 {len(multihop_directions)}개 — {dirs}")
+    return ", ".join(parts)
+
 
 class SlotVerifierLlm:
     """SlotVerifierPort 구현체 — Node2 LLMPort 주입형(async, 슬롯당 단일 호출).
@@ -80,6 +103,7 @@ class SlotVerifierLlm:
         all_ids = [str(c.get("chunk_id")) for c in verifiable]
         if not all_ids:
             return {"necessary_chunk_ids": [], "multihop_chunk_ids": [],
+                    "multihop_search_directions": {}, "neighbor_requests": {},
                     "rationale": "", "method": "fallback"}
 
         model_options = dict(self._source.model_options or {})
@@ -114,12 +138,14 @@ class SlotVerifierLlm:
                     )
             parsed = self._parse_ids(content, all_ids)
         except Exception as exc:  # noqa: BLE001 — LLM 미가용/파싱 실패 → 슬롯 단위 degrade.
-            # 그 슬롯 청크를 전량 necessary 로 보존(재검색 안 함). rationale 에 실패 사유를
-            # 실어 러너가 UI thinking 에 "검증 호출 실패 → 전량 보존" 을 노출하게 한다.
+            # 그 슬롯 청크를 전량 necessary 로 보존(재검색·이웃 보강 안 함). rationale 에 실패
+            # 사유를 실어 러너가 UI thinking 에 "검증 호출 실패 → 전량 보존" 을 노출하게 한다.
             reason = f"{_FALLBACK_RATIONALE_PREFIX} ({type(exc).__name__}: {str(exc)[:200]})"
             return {
                 "necessary_chunk_ids": list(all_ids),
                 "multihop_chunk_ids": [],
+                "multihop_search_directions": {},
+                "neighbor_requests": {},
                 "rationale": reason[:_RATIONALE_CHARS_CAP],
                 "method": "fallback",
             }
@@ -127,6 +153,8 @@ class SlotVerifierLlm:
         return {
             "necessary_chunk_ids": parsed["necessary_chunk_ids"],
             "multihop_chunk_ids": parsed["multihop_chunk_ids"],
+            "multihop_search_directions": parsed["multihop_search_directions"],
+            "neighbor_requests": parsed["neighbor_requests"],
             "rationale": parsed["rationale"][:_RATIONALE_CHARS_CAP],
             "method": "llm",
         }
@@ -156,23 +184,64 @@ class SlotVerifierLlm:
         ])
 
     def _parse_ids(self, content: str, all_ids: list[str]) -> dict[str, Any]:
-        """슬롯 모델 JSON → {necessary_chunk_ids, multihop_chunk_ids, rationale}. 두 id
-        리스트는 입력 id 의 *부분집합*으로 필터한다(hallucinated id 제거, 입력 순서 보존 —
-        계약: 두 집합 ⊆ 입력 chunk_id). 파싱 실패·형식 불일치는 raise(ValueError) 해
-        호출부가 포착(슬롯 단위 fallback degrade)."""
+        """슬롯 모델 JSON(verify_slot_v2) → {necessary_chunk_ids, multihop_chunk_ids,
+        multihop_search_directions, neighbor_requests, rationale}.
+
+        스키마: necessary_chunk_ids(id 리스트) + neighbor_requests([{chunk_id,direction}]) +
+        multihop([{chunk_id,search_direction}]). 모든 id 는 입력 id 의 *부분집합*으로 필터한다
+        (hallucinated id 제거, 입력 순서 보존 — 결정성). neighbor 는 necessary 의 부분집합으로
+        한 번 더 제한하고 direction enum(before/after/both)을 검증한다(이외 값 drop). rationale
+        은 모델이 안 내므로 구조화 필드에서 합성한다. 파싱 실패·형식 불일치는 raise(ValueError)
+        해 호출부가 포착(슬롯 단위 fallback degrade)."""
         try:
             data = json.loads(content)
         except json.JSONDecodeError as e:
             raise ValueError("verify_slot JSON parse failed") from e
         if not isinstance(data, dict):
             raise ValueError("verify_slot output not an object")
+        id_set = set(all_ids)
+
         raw_necessary = {str(i) for i in (data.get("necessary_chunk_ids") or [])}
-        raw_multihop = {str(i) for i in (data.get("multihop_chunk_ids") or [])}
         # 입력 순서 보존 + 부분집합 필터(입력 id 순회로 hallucinated id 제거·결정성 확보).
         necessary = [i for i in all_ids if i in raw_necessary]
-        multihop = [i for i in all_ids if i in raw_multihop]
+        necessary_set = set(necessary)
+
+        # multihop: [{chunk_id, search_direction}] — id 부분집합 필터 + 방향 dict.
+        multihop: list[str] = []
+        directions: dict[str, str] = {}
+        seen_mh: set[str] = set()
+        for item in data.get("multihop") or []:
+            if not isinstance(item, dict):
+                continue
+            cid = str(item.get("chunk_id", "")).strip()
+            if cid not in id_set or cid in seen_mh:
+                continue
+            seen_mh.add(cid)
+            sd = str(item.get("search_direction", "")).strip()
+            if sd:
+                directions[cid] = sd
+        # 입력 순서 보존(결정성).
+        multihop = [i for i in all_ids if i in seen_mh]
+
+        # neighbor_requests: [{chunk_id, direction}] — necessary 부분집합 + 방향 enum 검증.
+        neighbor: dict[str, str] = {}
+        for item in data.get("neighbor_requests") or []:
+            if not isinstance(item, dict):
+                continue
+            cid = str(item.get("chunk_id", "")).strip()
+            direction = str(item.get("direction", "")).strip().lower()
+            if cid in necessary_set and direction in _NEIGHBOR_DIRECTIONS:
+                neighbor[cid] = direction
+
+        rationale = _synthesize_rationale(
+            num_necessary=len(necessary),
+            num_neighbor=len(neighbor),
+            multihop_directions=directions,
+        )
         return {
             "necessary_chunk_ids": necessary,
             "multihop_chunk_ids": multihop,
-            "rationale": str(data.get("rationale", "")).strip(),
+            "multihop_search_directions": directions,
+            "neighbor_requests": neighbor,
+            "rationale": rationale,
         }

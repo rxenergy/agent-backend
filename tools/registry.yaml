@@ -115,6 +115,16 @@ tools:
     retry: 0
     required: false
 
+  # verify_slot neighbor_requests(앞/뒤 문맥 보강) — chunk_id 집합 id 조회(terms).
+  # 러너가 이웃 chunk_id 를 ordinal 로 계산해 넘긴다. required:false — 보강용이라 실패해도
+  # 답변을 막지 않는다(이웃 없이 진행). document.fetch_section 과 동형.
+  document.fetch_chunks:
+    version: v1
+    adapter: env:RETRIEVER_BACKEND   # opensearch | local — wired in profiles.py
+    timeout_ms: 3000
+    retry: 0
+    required: false
+
   memory.session_load:
     version: v1
     adapter: postgres

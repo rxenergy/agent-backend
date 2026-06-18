@@ -21,5 +21,12 @@ class SlotVerifierPort(Protocol):
         chunks: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """반환: {"necessary_chunk_ids": [str], "multihop_chunk_ids": [str],
-        "rationale": str, "method": "llm"|"fallback"}. 두 id 집합 ⊆ 입력 chunk_id."""
+        "multihop_search_directions": {chunk_id: str}, "neighbor_requests":
+        {chunk_id: "before"|"after"|"both"}, "rationale": str,
+        "method": "llm"|"fallback"}.
+
+        necessary/multihop id 집합 ⊆ 입력 chunk_id. multihop_search_directions 키 ⊆
+        multihop_chunk_ids(그 외부 문서를 어느 방향으로 재검색할지 1문장). neighbor_requests
+        키 ⊆ necessary_chunk_ids(앞/뒤 문맥 보강 필요 청크와 방향). rationale 은 LLM 산출이
+        아니라 구현체가 구조화 필드에서 합성한 요약(핀·UI 연속성)."""
         ...

@@ -16,10 +16,12 @@ from app.adapters.llm.http import HttpLLM
 from app.adapters.postgres.client import create_pool
 from app.adapters.postgres.session_state_store import PostgresSessionStateStore
 from app.adapters.tools.document_local import (
+    LocalDocumentFetchChunksTool,
     LocalDocumentFetchSectionTool,
     LocalDocumentResolverTool,
 )
 from app.adapters.tools.document_opensearch import (
+    OpenSearchDocumentFetchChunksTool,
     OpenSearchDocumentFetchSectionTool,
     OpenSearchDocumentResolverTool,
 )
@@ -409,6 +411,7 @@ async def build_container(settings: Settings) -> AppContainer:
                 retriever_tool = LocalRetrieverTool()
                 document_tool = LocalDocumentResolverTool()
                 fetch_section_tool = LocalDocumentFetchSectionTool()
+                fetch_chunks_tool = LocalDocumentFetchChunksTool()
                 reranker_tool = LocalRerankerTool()  # 임베딩 미가용 폴백 → fake rerank.
                 dense_encoder = None  # type: ignore[assignment]
 
@@ -445,10 +448,19 @@ async def build_container(settings: Settings) -> AppContainer:
                     password=settings.opensearch_password or None,
                     verify_certs=settings.opensearch_verify_certs,
                 )
+                fetch_chunks_tool = OpenSearchDocumentFetchChunksTool(
+                    endpoint=settings.opensearch_endpoint,
+                    index=settings.opensearch_index,
+                    username=settings.opensearch_username or None,
+                    password=settings.opensearch_password or None,
+                    verify_certs=settings.opensearch_verify_certs,
+                    snippet_chars=settings.opensearch_snippet_chars,
+                )
         else:
             retriever_tool = LocalRetrieverTool()
             document_tool = LocalDocumentResolverTool()
             fetch_section_tool = LocalDocumentFetchSectionTool()
+            fetch_chunks_tool = LocalDocumentFetchChunksTool()
             reranker_tool = LocalRerankerTool()  # local 프로필 → 결정론 lexical fake.
 
         # 검색-검증 도구(verify_slot/follow_up)가 구조화 출력(JSON)을 낼 수 있는 provider.
@@ -583,6 +595,7 @@ async def build_container(settings: Settings) -> AppContainer:
             "retriever.rerank": reranker_tool,
             "document.resolve_citation": document_tool,
             "document.fetch_section": fetch_section_tool,
+            "document.fetch_chunks": fetch_chunks_tool,
             "memory.session_load": SessionLoadTool(session_store),
             "memory.session_update": SessionUpdateTool(
                 session_store, ttl_days=settings.memory_session_ttl_days

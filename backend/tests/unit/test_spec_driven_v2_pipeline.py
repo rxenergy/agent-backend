@@ -116,6 +116,34 @@ class _MultiChunkRetriever:
                           latency_ms=0, input_hash="x", trace_id="")
 
 
+class _OrdinalRetriever:
+    """1차 검색이 ordinal-형식 id(S1_c0001..)를 반환 — 이웃 계산(compute_neighbor_ids)이
+    동작하는 형식. source_id 필터가 걸린 2차는 hop1/hop2 반환."""
+
+    name = "retriever.search"
+    version = "v1"
+
+    async def invoke(self, tool_input, context) -> ToolResult:
+        is_second = bool((getattr(tool_input, "filters", None) or {}).get("source_id")
+                         if not isinstance(tool_input, dict)
+                         else (tool_input.get("filters") or {}).get("source_id"))
+        if is_second:
+            chunks = [{"chunk_id": "hop1", "document_id": "EXT", "score": 0.7,
+                       "snippet": "external ref body", "source_id": "ML_T"},
+                      {"chunk_id": "hop2", "document_id": "EXT", "score": 0.6,
+                       "snippet": "irrelevant", "source_id": "ML_T"}]
+        else:
+            chunks = [
+                {"chunk_id": "S1_c0001", "document_id": "D1", "score": 0.9,
+                 "snippet": "ECCS governing clause body", "source_id": "S1"},
+                {"chunk_id": "S1_c0003", "document_id": "D1", "score": 0.7,
+                 "snippet": "noise toc", "source_id": "S1"},
+            ]
+        return ToolResult(tool_name="retriever.search", tool_version="v1",
+                          status="success", output={"chunks": chunks},
+                          latency_ms=0, input_hash="x", trace_id="")
+
+
 class _FakeVerifyTool:
     """Node2 — 입력 청크 id 에 따라 분기(Stage1 1차 / Stage4 2차 모두 처리).
     - 1차(c1/c2/c3): c1 만 necessary, c1 은 멀티홉도 필요(외부 참조). c2/c3 drop.
@@ -144,7 +172,13 @@ class _FakeFollowUpTool:
     name = "retrieval.follow_up"
     version = "v2"
 
+    def __init__(self) -> None:
+        self.seen_search_directions: list[dict] = []
+
     async def invoke(self, tool_input, context) -> ToolResult:
+        sd = (tool_input.get("search_directions") if isinstance(tool_input, dict)
+              else getattr(tool_input, "search_directions", {})) or {}
+        self.seen_search_directions.append(dict(sd))
         return ToolResult(
             tool_name="retrieval.follow_up", tool_version="v2", status="success",
             output={"follow_up_queries": [
@@ -155,12 +189,62 @@ class _FakeFollowUpTool:
         )
 
 
+class _NeighborVerifyTool:
+    """Node2 verify — 1차에서 c1(necessary)+c1 멀티홉(방향 부여)+c1 이웃 보강(after) 요청.
+    2차(hop1/hop2) 재검증은 hop1 만 necessary. neighbor/search_direction 신규 필드 검증용."""
+
+    name = "retrieval.verify_slot"
+    version = "v1"
+
+    async def invoke(self, tool_input, context) -> ToolResult:
+        chunks = (tool_input.get("chunks") if isinstance(tool_input, dict)
+                  else getattr(tool_input, "chunks", [])) or []
+        ids = {(c.get("chunk_id") if isinstance(c, dict) else c.chunk_id) for c in chunks}
+        if "hop1" in ids or "hop2" in ids:
+            out = {"necessary_chunk_ids": ["hop1"], "multihop_chunk_ids": [],
+                   "multihop_search_directions": {}, "neighbor_requests": {},
+                   "rationale": "hop1 relevant", "method": "llm"}
+        else:
+            out = {"necessary_chunk_ids": ["S1_c0001"],
+                   "multihop_chunk_ids": ["S1_c0001"],
+                   "multihop_search_directions": {"S1_c0001": "find RG 1.68 limits"},
+                   "neighbor_requests": {"S1_c0001": "after"},
+                   "rationale": "c1 only", "method": "llm"}
+        return ToolResult(
+            tool_name="retrieval.verify_slot", tool_version="v1", status="success",
+            output=out, latency_ms=0, input_hash="x", output_hash="y", trace_id="",
+        )
+
+
+class _FakeFetchChunksTool:
+    """document.fetch_chunks fake — 요청받은 이웃 id 를 기록하고 S1_c0002 만 반환."""
+
+    name = "document.fetch_chunks"
+    version = "v1"
+
+    def __init__(self) -> None:
+        self.seen_ids: list[list[str]] = []
+
+    async def invoke(self, tool_input, context) -> ToolResult:
+        ids = (tool_input.get("chunk_ids") if isinstance(tool_input, dict)
+               else getattr(tool_input, "chunk_ids", [])) or []
+        self.seen_ids.append(list(ids))
+        chunks = [{"chunk_id": "S1_c0002", "document_id": "D1", "score": 0.85,
+                   "snippet": "continuation of governing clause", "source_id": "S1"}]
+        return ToolResult(
+            tool_name="document.fetch_chunks", tool_version="v1", status="success",
+            output={"chunks": chunks}, latency_ms=0, input_hash="x", trace_id="",
+        )
+
+
 def _tool_registry_yaml(root: Path, *, with_verify: bool) -> Path:
     tools: dict[str, Any] = {
         "retrieval.search": {"version": "v1", "adapter": "reranked",
                              "timeout_ms": 6000, "retry": 0, "required": False},
         "retrieval.follow_up": {"version": "v2", "adapter": "vllm_ref",
                                 "timeout_ms": 6000, "retry": 0, "required": False},
+        "document.fetch_chunks": {"version": "v1", "adapter": "local",
+                                  "timeout_ms": 3000, "retry": 0, "required": False},
     }
     if with_verify:
         tools["retrieval.verify_slot"] = {"version": "v1", "adapter": "vllm_verify",
@@ -170,17 +254,19 @@ def _tool_registry_yaml(root: Path, *, with_verify: bool) -> Path:
     return p
 
 
-def _deps(tmp: Path, *, llm, with_verify: bool) -> AgentDeps:
+def _deps(tmp: Path, *, llm, with_verify: bool, retriever=None,
+          verify_tool=None, follow_up_tool=None, fetch_chunks_tool=None) -> AgentDeps:
     sink = FilesystemEventSink(root=str(tmp / "events"), prefix="t")
     recorder = EventRecorder(sink, app_profile="local")
     registry = ToolRegistry.from_yaml(_tool_registry_yaml(tmp, with_verify=with_verify))
-    retriever = _MultiChunkRetriever()
+    retriever = retriever or _MultiChunkRetriever()
     tools: dict[str, Any] = {
         "retrieval.search": retriever,
-        "retrieval.follow_up": _FakeFollowUpTool(),
+        "retrieval.follow_up": follow_up_tool or _FakeFollowUpTool(),
+        "document.fetch_chunks": fetch_chunks_tool or _FakeFetchChunksTool(),
     }
     if with_verify:
-        tools["retrieval.verify_slot"] = _FakeVerifyTool()
+        tools["retrieval.verify_slot"] = verify_tool or _FakeVerifyTool()
     executor = ToolExecutor(registry=registry, tools=tools, event_sink=sink)
     llm_router = LLMRouter(pool={"fake": llm}, default_id="fake")
     return AgentDeps(
@@ -264,6 +350,38 @@ async def test_node2_verify_rationale_surfaces_in_thinking() -> None:
         assert "**슬롯 검증 (Node2)**" in reasoning
         assert "c1 only" in reasoning                    # 1차 검증 근거
         assert "hop1 relevant, hop2 not" in reasoning    # 2차 재검증 근거(Stage 4)
+
+
+@pytest.mark.asyncio
+async def test_neighbor_fetch_merges_into_context_and_search_direction_threaded() -> None:
+    # verify 가 neighbor_requests(after)+search_direction 을 내면: (1) 코드가 이웃 id 를
+    # 계산해 fetch_chunks 호출, (2) 가져온 이웃 청크가 N4 컨텍스트(necessary 동급)에 합쳐지고,
+    # (3) search_direction 이 follow_up 까지 전달된다.
+    with tempfile.TemporaryDirectory() as tmp:
+        fetch_tool = _FakeFetchChunksTool()
+        follow_tool = _FakeFollowUpTool()
+        deps = _deps(Path(tmp), llm=_script(), with_verify=True,
+                     retriever=_OrdinalRetriever(),
+                     verify_tool=_NeighborVerifyTool(),
+                     follow_up_tool=follow_tool, fetch_chunks_tool=fetch_tool)
+        runner = VariantRegistry.build(SPEC_DRIVEN_V2_VARIANT_ID, _SPEC, deps)
+        resp = await runner.run(_req())
+        assert resp.refusal_reason is None
+
+        # (1) 이웃 id 계산 — S1_c0001 after → S1_c0002 fetch 요청.
+        assert fetch_tool.seen_ids and "S1_c0002" in fetch_tool.seen_ids[0]
+        # (3) search_direction 이 follow_up 으로 전달.
+        assert any("S1_c0001" in sd for sd in follow_tool.seen_search_directions)
+
+        event = _event(tmp)
+        ret_ids = set(event["retrieved_chunk_ids"])
+        # (2) 이웃 청크가 컨텍스트에 합쳐진다(necessary c1 + 이웃 c2 + 2차 hop1).
+        assert "S1_c0001" in ret_ids
+        assert "S1_c0002" in ret_ids
+        assert "hop1" in ret_ids
+        pin = event["query_understanding"]["spec_driven"]
+        assert pin["verify"]["total_neighbor"] == 1
+        assert pin["verify"]["slots"][0]["num_neighbor"] == 1
 
 
 @pytest.mark.asyncio

@@ -94,11 +94,12 @@ class _FakeRefExtractor:
     async def extract_follow_ups(self, query_text, chunk_text,
                                  current_source_id=None, min_score=0.6,
                                  answer_spec=None, slot_query=None,
-                                 necessity_only=False):
+                                 necessity_only=False, search_direction=None):
         self.seen_chunks.append(chunk_text)
         self.seen_kwargs.append({"answer_spec": answer_spec,
                                  "slot_query": slot_query,
-                                 "necessity_only": necessity_only})
+                                 "necessity_only": necessity_only,
+                                 "search_direction": search_direction})
         # 두 청크가 같은 query_text 를 내도록 해 dedup 도 함께 검증.
         return [{"query_text": "shared-query",
                  "target_source_ids": [current_source_id or "s"],
@@ -128,9 +129,10 @@ async def test_follow_up_tool_awaits_async_extractor_and_dedupes() -> None:
     queries = result.output["follow_up_queries"]
     assert len(queries) == 1
     assert queries[0]["query_text"] == "shared-query"
-    # 하위호환 — 새 필드를 안 넘기면 추출기에 v1 기본값(None/None/False)이 전달된다.
+    # 하위호환 — 새 필드를 안 넘기면 추출기에 v1 기본값(None/None/False/None)이 전달된다.
     assert extractor.seen_kwargs[0] == {
-        "answer_spec": None, "slot_query": None, "necessity_only": False
+        "answer_spec": None, "slot_query": None, "necessity_only": False,
+        "search_direction": None,
     }
 
 
@@ -153,7 +155,46 @@ async def test_follow_up_tool_passes_necessity_inputs_to_extractor() -> None:
         "answer_spec": "intent: compliance\nrequired_slots:\n- governing_clause",
         "slot_query": "10 CFR 50.46 ECCS",
         "necessity_only": True,
+        "search_direction": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_follow_up_tool_passes_per_chunk_search_direction() -> None:
+    # verify 의 search_directions(chunk_id → 방향)가 청크별로 추출기에 전달되는지 검증.
+    extractor = _FakeRefExtractor()
+    tool = RetrievalFollowUpTool(ref_extractor=extractor, max_concurrency=2)
+    tool_input = FollowUpInput(
+        query_text="q",
+        chunks=[
+            RetrievedChunk(chunk_id="c1", document_id="d", score=0.9,
+                           snippet="RG 1.68", source_id="s1"),
+            RetrievedChunk(chunk_id="c2", document_id="d", score=0.8,
+                           snippet="RG 1.70", source_id="s2"),
+        ],
+        necessity_only=True,
+        search_directions={"c1": "find the acceptance criteria in RG 1.68"},
+    )
+    result = await tool.invoke(tool_input, _CTX)
+    assert result.status == "success"
+    # c1 은 방향이 전달되고, 방향 없는 c2 는 None(기존 동작).
+    by_dir = {kw["search_direction"] for kw in extractor.seen_kwargs}
+    assert "find the acceptance criteria in RG 1.68" in by_dir
+    assert None in by_dir
+
+
+@pytest.mark.asyncio
+async def test_necessity_prompt_includes_search_direction_block() -> None:
+    # search_direction 이 주어지면 user content 에 SEARCH DIRECTION 블록이 실린다.
+    llm = _SchemaEchoLLM({"references": [], "follow_up_queries": []})
+    await extract_refs_with_follow_up(
+        query_text="q", chunk_text="see RG 1.68",
+        settings=RefSettings.from_env(), llm=llm,
+        answer_spec="SPEC", slot_query="SLOT", necessity_only=True,
+        search_direction="DIRECTION-X",
+    )
+    user_msg = llm.last_messages[1].content
+    assert "SEARCH DIRECTION: DIRECTION-X" in user_msg
 
 
 @pytest.mark.asyncio
