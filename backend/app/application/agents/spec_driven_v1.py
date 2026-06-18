@@ -57,7 +57,7 @@ SPEC_DRIVEN_VARIANT_ID = "spec_driven_v1"
 class _PostRetrievalOutcome:
     """N3.5(follow-up/검증) + 최종 조립 단계의 산출. `_post_retrieval` 시임(seam)이
     돌려주고 run() 이 소비한다 — v1 은 follow-up 2차 검색, v2(SpecDrivenV2Runner)는
-    per-slot Node1 검증→Node2 외부참조 선별→2차 검색 파이프라인으로 *동일 계약*을 채운다.
+    per-slot Node2 검증→Node2 외부참조 선별→2차 검색 파이프라인으로 *동일 계약*을 채운다.
 
     `chunks` 는 최종 N4 컨텍스트 청크(score desc), `evidence_gap` 은 0건 여부,
     `qu_sections` 는 query_understanding 핀의 retrieval/follow_up/context_budget(+v2 의
@@ -493,7 +493,7 @@ class SpecDrivenRunner:
 
             # === N3.5 + 최종 조립 (overridable seam) =====================
             # v1: follow-up 2차 검색(외부 참조 추출 → 참조 문서 내 재검색). v2
-            # (SpecDrivenV2Runner)는 per-slot Node1 검증 → Node2 외부참조 선별 → 2차 검색
+            # (SpecDrivenV2Runner)는 per-slot Node2 검증 → Node2 외부참조 선별 → 2차 검색
             # 파이프라인으로 *동일* _PostRetrievalOutcome 계약을 채운다. 둘 다 최종 N4
             # 컨텍스트 청크·evidence_gap·재현 핀 섹션(retrieval/follow_up/context_budget
             # [+v2 verify])·reasoning 요약을 돌려준다.
@@ -510,7 +510,7 @@ class SpecDrivenRunner:
             # 루프(tool 프레임)가 모두 끝난 *뒤* reasoning 을 단 한 번 방출 → 다음에 오는
             # 것은 context_build(step, 사이드채널) · generation 본문 토큰뿐이라 Thought
             # 블록과 본문이 연속된다(#24295, 정상 렌더되는 `**질의 분류**` 패턴과 동일).
-            # extra_reasoning(v2 Node1 검증 근거)을 먼저, fq_summary(외부참조 재검색)를 다음.
+            # extra_reasoning(v2 Node2 검증 근거)을 먼저, fq_summary(외부참조 재검색)를 다음.
             if post_outcome.extra_reasoning:
                 await emit_reasoning(post_outcome.extra_reasoning)
             if post_outcome.fq_summary:
@@ -692,7 +692,7 @@ class SpecDrivenRunner:
 
     # ------------------------------------------------------------------
     # N3.5 + 최종 조립 시임(seam) — v1 은 follow-up 2차 검색. v2 는 오버라이드해 per-slot
-    # Node1 검증→Node2 외부참조 선별→2차 검색 파이프라인으로 동일 _PostRetrievalOutcome 을
+    # Node2 검증→Node2 외부참조 선별→2차 검색 파이프라인으로 동일 _PostRetrievalOutcome 을
     # 채운다(run() 의 N4 입력·재현 핀·N5 source_id 가 변형과 무관하게 동작 — 원칙 1).
     # ------------------------------------------------------------------
     async def _post_retrieval(

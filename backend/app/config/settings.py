@@ -62,13 +62,13 @@ class Settings(BaseSettings):
     spec_driven_max_queries: int = 10
     spec_driven_max_context_chunks: int = 10
 
-    # spec_driven_v2 — Node1(main) 슬롯 검증 토글 + 동시 검증 슬롯 상한.
+    # spec_driven_v2 — Node2(sub) 슬롯 검증 토글 + 동시 검증 슬롯 상한.
     # enabled=False 면 검증 도구 미배선 → 단일노드(v1식 전량 보존).
     # verify_concurrency: 동시에 도는 슬롯 수 캡(러너 _verify_sem). 최대 슬롯 수(≤10)와 맞춤.
     # 청크별 동시 호출(SlotVerifierLlm 소유) *전역* 캡은 별도 튜너블 없이
-    # spec_driven_max_queries 를 재사용한다(profiles.py) — N2 슬롯×쿼리 규모와 Node1 검증의
-    # 청크 fan-out 규모를 같은 손잡이로 함께 키운다. Node1 노드 max_num_seqs 여유
-    # 안에서 잡아 continuous batching 을 살리되 큐 적체·타임아웃 캐스케이드를 막는다.
+    # spec_driven_max_queries 를 재사용한다(profiles.py) — N2 슬롯×쿼리 규모와 Node2 검증의
+    # 청크 fan-out 규모를 같은 손잡이로 함께 키운다. verify·follow_up 이 같은 Node2
+    # max_num_seqs 여유 안에서 잡아 continuous batching 을 살리되 큐 적체·타임아웃 캐스케이드를 막는다.
     spec_driven_v2_verify_enabled: bool = True
     spec_driven_v2_verify_concurrency: int = 10
 
