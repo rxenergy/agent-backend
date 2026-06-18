@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.domain.retrieval import DocumentFetchSectionInput
+from app.domain.retrieval import DocumentFetchChunksInput, DocumentFetchSectionInput
 from app.domain.tools import ToolResult
 from app.ports.tool import ToolExecutionContext
 
@@ -64,6 +64,32 @@ class LocalDocumentFetchSectionTool:
     ) -> ToolResult:
         if isinstance(tool_input, dict):
             tool_input = DocumentFetchSectionInput.model_validate(tool_input)
+        return ToolResult(
+            tool_name=self.name,
+            tool_version=self.version,
+            status="success",
+            output={"chunks": []},
+            latency_ms=0,
+            input_hash="",
+            trace_id=context.trace_id,
+        )
+
+
+class LocalDocumentFetchChunksTool:
+    """`document.fetch_chunks` local fake. 이웃 보강(neighbor_requests)은 인덱스 id 조회라
+    fake 코퍼스엔 이웃 문단이 없다. 빈 결과를 돌려 워크플로가 graceful no-op 되게 한다
+    (이웃 보강 없이 정상 응답 — make smoke·로컬 dev 무영향, LocalDocumentFetchSectionTool 동형)."""
+
+    name = "document.fetch_chunks"
+    version = "v1"
+
+    async def invoke(
+        self,
+        tool_input: DocumentFetchChunksInput | dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        if isinstance(tool_input, dict):
+            tool_input = DocumentFetchChunksInput.model_validate(tool_input)
         return ToolResult(
             tool_name=self.name,
             tool_version=self.version,

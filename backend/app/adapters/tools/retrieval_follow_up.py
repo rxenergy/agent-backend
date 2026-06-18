@@ -74,6 +74,8 @@ class RetrievalFollowUpTool:
             # OpenSearch 어댑터가 `snippet`(text[:512]) 만 싣는다. 참조 추출은 본문이
             # 있어야 동작하므로 text → snippet 순으로 폴백한다(둘 다 없으면 빈 문자열).
             chunk_text = chunk.text or chunk.snippet or ""
+            # verify_slot 이 이 청크에 부여한 재검색 방향(없으면 None → 기존 동작).
+            search_direction = tool_input.search_directions.get(chunk.chunk_id)
             async with self._sem:
                 return await self._extractor.extract_follow_ups(
                     query_text=tool_input.query_text,
@@ -85,6 +87,7 @@ class RetrievalFollowUpTool:
                     answer_spec=tool_input.answer_spec,
                     slot_query=tool_input.slot_query,
                     necessity_only=tool_input.necessity_only,
+                    search_direction=search_direction,
                 )
 
         results = await asyncio.gather(

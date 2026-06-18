@@ -145,6 +145,14 @@ class VerifySlotResult(BaseModel):
 
     necessary_chunk_ids: list[str] = Field(default_factory=list)  # 답변에 꼭 필요한 청크
     multihop_chunk_ids: list[str] = Field(default_factory=list)   # 멀티홉(재검색) 필요 청크
+    # multihop 청크 chunk_id → search_direction(그 외부 문서를 어느 방향/각도로 재검색할지
+    # 1문장). follow_up 이 재검색 쿼리를 만들 때 이 방향을 우선 반영한다. 키 ⊆ multihop_chunk_ids.
+    multihop_search_directions: dict[str, str] = Field(default_factory=dict)
+    # necessary 청크 중 본문이 잘려 앞/뒤 문맥 보강이 필요한 것 → chunk_id → "before"|"after"|"both".
+    # 러너가 이웃 chunk_id 를 계산해 document.fetch_chunks 로 가져온다. 키 ⊆ necessary_chunk_ids.
+    neighbor_requests: dict[str, str] = Field(default_factory=dict)
+    # LLM 산출이 아니라 러너/어댑터가 구조화 필드(neighbor/multihop 수·fallback 사유)에서
+    # 합성한 요약 — 핀/ UI thinking 연속성용(verify_slot_v2 는 더 이상 자유 rationale 을 내지 않음).
     rationale: str = ""
     method: str = "llm"  # "llm" | "fallback"
 
@@ -174,6 +182,9 @@ class FollowUpInput(BaseModel):
     answer_spec: str | None = None   # 렌더된 답변 사양 블록(v2). None → v1 동작.
     slot_query: str | None = None    # 이 슬롯의 N2 검색 쿼리(v2). None → v1 동작.
     necessity_only: bool = False     # True → 필요-판정 선별(v2). False → 전체 추출(v1).
+    # verify_slot 이 멀티홉 청크별로 산출한 search_direction(chunk_id → 방향 1문장). 추출기가
+    # 그 청크의 재검색 쿼리를 만들 때 우선 반영한다. 빈 dict → 기존 동작 byte-identical.
+    search_directions: dict[str, str] = Field(default_factory=dict)
 
 
 class FollowUpResult(BaseModel):
@@ -209,6 +220,18 @@ class DocumentFetchSectionOutput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     chunks: list[RetrievedChunk] = Field(default_factory=list)
+
+
+class DocumentFetchChunksInput(BaseModel):
+    """`document.fetch_chunks` 입력 — chunk_id 의 *정확한* 집합을 메타 표적으로 일괄 fetch.
+
+    relevance 검색이 아니라 id 조회다(document.resolve_citation 의 terms 쿼리와 동형).
+    verify_slot 의 neighbor_requests(앞/뒤 문맥 보강)에서 러너가 이웃 chunk_id 를
+    `..._cNNNN` ordinal 로 계산해 넘긴다. 출력은 RetrieverSearchOutput(chunks) 재사용."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chunk_ids: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

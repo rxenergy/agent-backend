@@ -280,7 +280,8 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 )
                 return SlotSearchResult(
                     slot_name=slot_name, necessary=res.necessary,
-                    second_pass=res.second_pass, pipeline=res,
+                    second_pass=res.second_pass, neighbor=res.neighbor_chunks,
+                    pipeline=res,
                 )
 
         tasks: dict[str, asyncio.Task[SlotSearchResult]] = {
@@ -336,6 +337,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         total_multihop = 0
         total_second_pass = 0
         total_second_necessary = 0
+        total_neighbor = 0
 
         num_slots = len(ordered)
         for idx, slot in enumerate(ordered):
@@ -352,6 +354,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 "slot": slot.name, "method": pipe.method,
                 "num_first_pass": pipe.num_first_pass,
                 "num_necessary": len(pipe.necessary),
+                "num_neighbor": len(pipe.neighbor_chunks),
                 "num_multihop": len(pipe.multihop_ids),
                 "num_second_pass": pipe.num_second_pass,
                 "num_second_necessary": len(pipe.second_pass),
@@ -362,6 +365,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             for fq in pipe.fq_list:
                 fq_all.append(fq)
             total_multihop += len(pipe.multihop_ids)
+            total_neighbor += len(pipe.neighbor_chunks)
             total_second_pass += pipe.num_second_pass
             total_second_necessary += len(pipe.second_pass)
 
@@ -437,7 +441,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                             triage_pin, spec, formulation_method, queries, truncated,
                             verify_pins, fq_all, slot_pins, sess, post,
                             total_multihop, total_second_pass, total_second_necessary,
-                            cites.all_chunk_ids,
+                            cites.all_chunk_ids, total_neighbor=total_neighbor,
                         ),
                     )
 
@@ -512,7 +516,8 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             triage_pin, spec, formulation_method, queries, truncated,
             verify_pins, fq_all, slot_pins, sess, post,
             total_multihop, total_second_pass, total_second_necessary,
-            cites.all_chunk_ids, evidence_gap=evidence_gap,
+            cites.all_chunk_ids, total_neighbor=total_neighbor,
+            evidence_gap=evidence_gap,
             synth_mode=synth_mode, synth_hash=synth_hash,
         )
         combined_hash = _sha16(
@@ -561,7 +566,8 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         fq_all: list[dict[str, Any]], slot_pins: list[dict[str, Any]],
         sess: dict[str, Any], post,
         total_multihop: int, total_second_pass: int, total_second_necessary: int,
-        global_chunk_ids: list[str], *, evidence_gap: bool = False,
+        global_chunk_ids: list[str], *, total_neighbor: int = 0,
+        evidence_gap: bool = False,
         synth_mode: str = "off", synth_hash: str | None = None,
     ) -> dict[str, Any]:
         from app.application.agents.spec_driven_v1 import _scope_summary
@@ -608,6 +614,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                     "node1": True,
                     "num_slots": len(spec.required_slots),
                     "total_necessary": len(global_chunk_ids),
+                    "total_neighbor": total_neighbor,
                     "total_multihop": total_multihop,
                     "second_pass_total": total_second_pass,
                     "second_necessary_total": total_second_necessary,

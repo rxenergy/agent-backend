@@ -217,10 +217,11 @@ spec_driven_generation_prompts:
 spec_driven_verify_prompts:
   spec_driven_verify_v2:
     profile_version: v1
-    prompt:        {path: spec_driven/verify_slot_v2.md,            version: v1, sha256: "58660326291cb7cbfca5441d7c1462cc175f3a1e7837aa42625f4a2306cac072"}
-    output_schema: {path: spec_driven/schemas/verify_slot_v2.json,  version: v1, sha256: "ed002717f910bca6467fadab0f192478adcdc75bf222c27b4a44f0d3b4123298"}
-    # max_tokens — rationale + 두 id 리스트만. 슬롯당 청크 ≤ 20 라 짧다.
-    model_options: {temperature: 0.0, max_tokens: 600}
+    prompt:        {path: spec_driven/verify_slot_v2.md,            version: v2, sha256: "489e43b3ef4505b51969f45bbe12b4012b5702f62a28ebd504588c9d9b4b39c2"}
+    output_schema: {path: spec_driven/schemas/verify_slot_v2.json,  version: v2, sha256: "c7b8216e49ad2448c84664bcd66b9f4e0d783fda2c7497da678d1a68e6e8a4ad"}
+    # max_tokens — necessary id 리스트 + neighbor_requests(id+방향) + multihop(id+search_direction
+    # 1문장)/슬롯당 청크 ≤ 20. search_direction 문장이 추가돼 기존 600 대비 상향(→900).
+    model_options: {temperature: 0.0, max_tokens: 900}
 
 # composer — spec_driven_v1 N0~N3.5 를 계승하고 N4 만 슬롯 단위로 대체한 variant 의 N4
 # 프롬프트(설계 docs/plans/spec_driven_slotwise_generation.design.v1.md).
