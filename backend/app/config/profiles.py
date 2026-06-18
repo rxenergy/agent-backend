@@ -451,19 +451,26 @@ async def build_container(settings: Settings) -> AppContainer:
             fetch_section_tool = LocalDocumentFetchSectionTool()
             reranker_tool = LocalRerankerTool()  # local 프로필 → 결정론 lexical fake.
 
+        # 검색-검증 도구(verify_slot/follow_up)가 구조화 출력(JSON)을 낼 수 있는 provider.
+        # - openai_compat(내부망 vLLM): guided_json(JSON-schema guided decoding)으로 강제.
+        # - bedrock/anthropic(Claude Haiku 등): guided decoding 은 없으나 프롬프트가 JSON 출력을
+        #   지시하고 어댑터가 json.loads 로 파싱한다(Haiku 가 JSON 지시를 잘 따름). second 노드를
+        #   사내망 vLLM 대신 AWS Bedrock Haiku 로 둘 때(vLLM 서브 미연결) 검증/외부참조가 실제로
+        #   돌게 한다. fake 엔트리만 비대상(구조화 출력 불가 → graceful skip → 단일노드 degrade).
+        _STRUCTURED_PROVIDERS = ("openai_compat", "bedrock", "anthropic")
+
         # retrieval.follow_up — 1차 검색 청크에서 외부 참조 추출 + 재검색 쿼리 생성.
-        # spec_driven_v2 의 **sub 노드**(Node2 = SECONDARY_LLM = secondary_llm, 없으면
-        # default_llm 폴백) HttpLLM 을 그대로 주입해 재사용한다 — 단, openai_compat(내부망
-        # vLLM) 엔트리일 때만. 참조 추출은 vLLM guided_json(JSON-schema structured output)에
-        # 의존하므로 anthropic/fake 엔트리와는 호환되지 않아 비활성(graceful skip)한다. 연결
-        # 정보(endpoint/model/api_key/timeout·재시도·에러매핑)는 HttpLLM 이 단독 소유하고,
-        # RefSettings 는 추출 knob(max_output_tokens·schema 경로)만 from_env 기본값으로
-        # 쓴다 — 더 이상 DOCUMENTS_REF_VLLM_* 연결 env 를 이중 구성하지 않는다.
+        # spec_driven_v2/composer_pipelined 의 **sub 노드**(Node2 = SECONDARY_LLM =
+        # secondary_llm, 없으면 default_llm 폴백) HttpLLM 을 그대로 주입해 재사용한다 — 구조화
+        # 출력 가능 provider(_STRUCTURED_PROVIDERS) 엔트리일 때만. 연결 정보(endpoint/model/
+        # api_key/timeout·재시도·에러매핑)는 HttpLLM 이 단독 소유하고, RefSettings 는 추출 knob
+        # (max_output_tokens·schema 경로)만 from_env 기본값으로 쓴다 — 더 이상 DOCUMENTS_REF_VLLM_*
+        # 연결 env 를 이중 구성하지 않는다.
         follow_up_tool = None
         _follow_up_entry = next(
             (e for e in settings.llm_pool if e.id == secondary_llm_id), None
         )
-        if _follow_up_entry is not None and _follow_up_entry.provider == "openai_compat":
+        if _follow_up_entry is not None and _follow_up_entry.provider in _STRUCTURED_PROVIDERS:
             try:
                 from app.adapters.ref_extractor_llm import LlmRefExtractor
                 from app.adapters.tools.retrieval_follow_up import RetrievalFollowUpTool
@@ -494,16 +501,17 @@ async def build_container(settings: Settings) -> AppContainer:
                     "follow_up_tool_disabled",
                     error=str(_exc),
                     llm_id=secondary_llm_id,
-                    hint="secondary_llm is openai_compat but tool init failed; graceful degrade",
+                    hint="secondary_llm provider supports structured output but tool init "
+                         "failed; graceful degrade",
                 )
 
         # retrieval.verify_slot — spec_driven_v2/composer_pipelined 슬롯 검증(relevance)을
         # **worker 노드**(SECONDARY_LLM = secondary_llm, 없으면 default_llm 폴백)에서 돈다.
         # relevance·multihop 을 둘 다 worker(secondary)로 보내 main(생성)과 물리 분리한다
         # (지연 단축 — 검증 fan-out 이 생성 디코딩 큐와 안 경쟁). follow_up 과 동일 가드:
-        # secondary_llm pool 엔트리가 openai_compat(내부망 vLLM)일 때만 배선한다(verify 는 vLLM
-        # guided_json 에 의존 — anthropic/fake 비호환 → graceful skip). 토글
-        # (spec_driven_v2_verify_enabled)이 꺼져 있어도 미배선(단일노드 degrade). 연결 정보
+        # secondary_llm 이 구조화 출력 가능 provider(_STRUCTURED_PROVIDERS — vLLM guided_json
+        # 또는 Bedrock/Anthropic Haiku 의 프롬프트-JSON)일 때만 배선한다(fake 만 graceful skip).
+        # 토글(spec_driven_v2_verify_enabled)이 꺼져 있어도 미배선(단일노드 degrade). 연결 정보
         # (endpoint/model/timeout·재시도)는 secondary_llm(HttpLLM)이 단독 소유한다.
         verify_slot_tool = None
         _verify_entry = next(
@@ -512,7 +520,7 @@ async def build_container(settings: Settings) -> AppContainer:
         if (
             settings.spec_driven_v2_verify_enabled
             and _verify_entry is not None
-            and _verify_entry.provider == "openai_compat"
+            and _verify_entry.provider in _STRUCTURED_PROVIDERS
         ):
             try:
                 from app.adapters.slot_verifier_llm import SlotVerifierLlm
@@ -539,7 +547,8 @@ async def build_container(settings: Settings) -> AppContainer:
                     "verify_slot_tool_disabled",
                     error=str(_exc),
                     llm_id=secondary_llm_id,
-                    hint="secondary_llm is openai_compat but tool init failed; single-node degrade",
+                    hint="secondary_llm provider supports structured output but tool init "
+                         "failed; single-node degrade",
                 )
 
         # 검색·범위·용어 도구. retrieval.search = 내부 retriever 재사용 + Reranker 정렬

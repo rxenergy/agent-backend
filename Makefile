@@ -6,6 +6,13 @@ COMPOSE := docker compose --env-file infra/env/local.env --profile local \
 COMPOSE_ONPREM := docker compose --env-file infra/env/onprem.env --profile onprem \
   -f infra/compose/compose.yml -f infra/compose/compose.onprem.yml
 
+# onprem 변형 — second 노드를 AWS Bedrock Haiku 로 두는 구성(서브 vLLM 미연결).
+# compose 토폴로지는 메인 스택과 동일(서브 vLLM 없음)하고 env 만 onprem.bedrock-sub.env.
+# 단일 호스트 기동(원격 서브 데몬 불필요 — relevance/multihop 이 Bedrock 으로 나간다).
+# ⚠ Bedrock 아웃바운드 필요(완전 air-gapped 아님) + AWS_BEARER_TOKEN_BEDROCK 환경 주입.
+COMPOSE_ONPREM_BEDROCK := docker compose --env-file infra/env/onprem.bedrock-sub.env \
+  --profile onprem -f infra/compose/compose.yml -f infra/compose/compose.onprem.yml
+
 # 서브 노드(2번째 vLLM) — standalone compose. 메인 스택과 독립.
 #
 # Docker Compose 는 단일 호스트만 제어하므로, 서브 노드는 Docker Context(ssh://)로
@@ -25,6 +32,7 @@ COMPOSE_ONPREM_SUB := docker -c $(SUB_CTX) compose \
 .PHONY: help build up-local down logs ps test test-integration smoke smoke-stream seed seed-encode opensearch-init os-snapshot os-restore os-snapshots verify-w1 fmt clean migrate psql prompts-validate \
   build-onprem up-onprem up-onprem-main up-onprem-sub down-onprem down-onprem-main down-onprem-sub \
   logs-onprem logs-onprem-sub ps-onprem ps-onprem-sub clean-onprem export-onprem _onprem-sub-ctx _guard-local-only \
+  build-onprem-bedrock up-onprem-bedrock down-onprem-bedrock logs-onprem-bedrock ps-onprem-bedrock \
   aws-ecr-login aws-build aws-push aws-deploy aws-setup aws-destroy aws-ssh aws-logs aws-status aws-secrets-put
 
 help:
@@ -53,6 +61,10 @@ help:
 	@echo "  logs-onprem-sub  Tail sub node vLLM logs (remote)"
 	@echo "  ps-onprem        Show main node stack status"
 	@echo "  ps-onprem-sub    Show sub node vLLM status (remote)"
+	@echo "  up-onprem-bedrock   Bring up main stack with second=AWS Bedrock Haiku (no sub vLLM)"
+	@echo "  down-onprem-bedrock Tear down the Bedrock-sub onprem stack"
+	@echo "  logs-onprem-bedrock Tail agent-api logs (Bedrock-sub variant)"
+	@echo "  ps-onprem-bedrock   Show Bedrock-sub onprem stack status"
 	@echo "  clean-onprem     Tear down main node stack and remove volumes"
 	@echo "  export-onprem    Collect run data (events/traces/memory) → analysis dataset"
 
@@ -217,6 +229,24 @@ down-onprem-main:
 
 down-onprem-sub: _onprem-sub-ctx
 	$(COMPOSE_ONPREM_SUB) down
+
+# onprem(Bedrock-sub) — 단일 호스트. second(relevance/multihop)는 AWS Bedrock Haiku.
+# 서브 vLLM 원격 기동 불필요 → up-onprem-sub 없이 메인 스택만 띄운다.
+build-onprem-bedrock:
+	$(COMPOSE_ONPREM_BEDROCK) build agent-api open-webui
+
+up-onprem-bedrock:
+	@echo "==> [메인] onprem 스택 기동 (second=AWS Bedrock Haiku)"
+	$(COMPOSE_ONPREM_BEDROCK) up -d
+
+down-onprem-bedrock:
+	$(COMPOSE_ONPREM_BEDROCK) down
+
+logs-onprem-bedrock:
+	$(COMPOSE_ONPREM_BEDROCK) logs -f agent-api
+
+ps-onprem-bedrock:
+	$(COMPOSE_ONPREM_BEDROCK) ps
 
 logs-onprem:
 	$(COMPOSE_ONPREM) logs -f agent-api
