@@ -265,13 +265,13 @@ composer_synthesize_prompts:
 composer_persona_prompts:
   composer_persona_reviewer_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/persona/reviewer_v1.md, version: v1, sha256: "fb838abe82bcf54dcbd060a8124b25d20823468b97e9f7a047ec253239edd9d2"}
+    prompt:        {path: spec_driven/persona/reviewer_v1.md, version: v1, sha256: "2325926dda3d11780a7ccc46c3c035d6d5c5a465040733b4965e8cb9a700f8f9"}
   composer_persona_designer_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/persona/designer_v1.md, version: v1, sha256: "90c38316b539d0c1c48db3659d798722bf4cb0ba07c0487d7bd501497e97e215"}
+    prompt:        {path: spec_driven/persona/designer_v1.md, version: v1, sha256: "fbd3d6543450fe8e97e6920e6e9591b8af2b3c2ee8fd6a1a7d0548d177fff931"}
   composer_persona_operator_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/persona/operator_v1.md, version: v1, sha256: "4722f0e391121b3baf04a1181d9646a7000f11e6247dceff44bc98aa1ae77586"}
+    prompt:        {path: spec_driven/persona/operator_v1.md, version: v1, sha256: "a696d9cf2971b51ff384256f3634a13aeeb30ed2be44417a29e66fd8664d39b5"}
 
 composer_slot_verify_prompts:
   composer_slot_verify_v1:
