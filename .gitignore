@@ -45,3 +45,5 @@ infra/opensearch/snapshots/*
 !infra/opensearch/snapshots/.gitkeep
 
 export/*
+
+docs/adr

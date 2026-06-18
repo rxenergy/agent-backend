@@ -187,27 +187,28 @@ owned = (by_score if fallback else owned)[: self._slot_context_k]   # 상한 12.
    `# ANSWER SPEC`(전역, §3.2)으로 전체 구조를 보여 슬롯이 *독립 문서가 아니라 한 단계*임을
    인지시킨다.
 
-### 3.4 PRIOR SECTIONS — 이전 섹션 *전문* 통째 전달 (C2, 사용자 결정)
+### 3.4 PRIOR SECTIONS — hybrid sliding-window (직전 K개 전문 + 그 이전 요지) (C2)
 
-현행 요지 digest(슬롯명+첫 문장+cite-ID 한 줄) 대신 **앞 슬롯들의 *전문 텍스트*** (이미 화면에
-스트리밍된 본문, 헤더 제외)를 PRIOR SECTIONS 로 전달해, 다음 슬롯이 앞 내용에 자연스럽게
-이어쓰게 한다(분할감 해소 — 증상 3).
+현행 요지 digest(슬롯명+첫 문장 한 줄) 대신 앞 슬롯들을 PRIOR SECTIONS 로 전달해 다음 슬롯이
+자연스럽게 이어쓰게 한다(분할감 해소 — 증상 3). 단 **전체 전문 누적은 O(N²) 토큰**이라 마지막
+슬롯이 비대해지고 지연·비용이 뒤로 갈수록 폭증한다(사용자 보고). → **hybrid sliding-window**.
 
-- `_generate_slotwise` 의 슬롯 루프에서 `digest_lines` 대신 `slot_outputs` 의 *헤더+전문*을
-  누적해 다음 슬롯 `_render_slot_prompt(prior_sections=...)` 로 넘긴다(이미 화면에 스트리밍된 그
-  본문과 동일 텍스트 — `streamed_parts` 와 동형).
-- `_render_slot_prompt` 의 PRIOR SECTIONS 블록 문구를 *전문 동봉* 에 맞게 갱신:
-  - **연결**: "앞 구획 전문이다 — 이 흐름을 이어 자연스럽게 연결하라."
-  - **중복 금지**: "단, 앞 구획이 이미 확립한 사실을 *재서술·재인용* 하지 말고, 이 구획의
-    facet 이 책임지는 *새 substance* 를 전개하라."
-  - **근거 격리 불변(P1)**: "PRIOR 는 연결용 맥락이지 *근거가 아니다* — 모든 [cite-N] 은 이
-    구획 CONTEXT 에서만. PRIOR 의 cite 를 그대로 베끼지 말 것."
-- 구현: 신규 헬퍼 `_prior_sections_block(slot_outputs)` 가 헤더를 뺀 본문 전문을 `### [슬롯명]`
-  라벨로 조립(요지 아님). 슬롯 루프·`_verify_slot`·`_regenerate_slot` 의 `prior_digest`
-  파라미터를 `prior_sections` 로 교체.
-- **토큰**: 전문 누적이라 뒤 슬롯일수록 프롬프트↑ → §3.5 max_tokens 상향과 짝. 긴 답이면
-  PRIOR 가 과대해질 수 있어, *직전 K개 전문 + 그 이전은 한 줄 요지* 로 떨어뜨리는
-  `prior_full_k` tunable 을 둔다(기본 None=전체 — 사용자 결정. 폭주 시 K 하향 안전판).
+**패턴 근거(LLM 컨텍스트 관리 사례).** 멀티턴/에이전트에서 누적 히스토리를 다루는 정석:
+- **Sliding-window** (대화형 에이전트 기본) — 최근 K개만 유지. 연결은 *최근 맥락*이 좌우.
+- **Recursive summary / buffer-summary hybrid** (LangChain `ConversationSummaryBufferMemory`,
+  MemGPT/Letta) — 오래된 것은 *요약*으로 압축, 최근 K개는 원문. 토큰 상한 고정.
+
+→ 둘의 hybrid 를 채택: **직전 `prior_full_k`(기본 2)개는 전문(`###`), 그 이전은 한 줄 요지
+(`-` facet·첫 문장·사용 cite)**. 최근 구획의 자연스러운 연결(전문)과 오래된 구획의 연속성·
+중복 회피(요지)를 둘 다 얻고, 토큰은 O(K)로 상한된다.
+
+- 구현: 신규 헬퍼 `_prior_sections_block(slot_outputs)` 가 `prior_full_k` 로 분할 —
+  최근 K개는 헤더 뺀 본문 전문(`### [슬롯명]`), 그 이전은 요지(`- [슬롯명] [facet] 첫문장
+  (cites: …)`, **LLM 콜 없는 결정론 압축**). `k=None`=전체 전문(긴 답 비권장), `k=0`=요지만.
+- 슬롯 루프·`_verify_slot`·`_regenerate_slot` 의 `prior_digest`→`prior_sections` 교체.
+- 프롬프트(`composer_slot_v1.md` §"Continue from prior"·`_render_slot_prompt` PRIOR 블록)는
+  **혼합 형식**(최근=`###` 전문, 이전=`-` 요지)을 명시 + 연결·중복금지·근거격리(P1) 규약.
+- tunable `composer_prior_full_k`(기본 **2**). 슬롯 多·긴 답일수록 K 작게, 짧으면 크게.
 - 재현: PRIOR 전문이 rendered_prompt_hash 에 들어가므로(`composer.py:549`) 슬롯 핀 해시가
   앞 슬롯 출력에 의존 — 순차 실행이므로 결정론 유지(같은 입력 → 같은 체인).
 
@@ -270,9 +271,10 @@ CONTEXT 확대(§3.3) + 이전 섹션 전문 PRIOR(§3.4)로 입출력이 함께
 - **굶은 슬롯의 근거 부족은 앞단 문제** — 억지 보충을 안 하므로(사용자 결정), 귀속이 0~2개인
   슬롯은 여전히 얕다. 근본 해소는 *N1 슬롯 분해 정밀화·N2 쿼리·N3 검색*에서 그 슬롯에 맞는
   청크를 더 건지는 것 — 본 변경 범위 밖. 검증서 굶은 슬롯이 잦으면 앞단 후속 계획으로.
-- **전문 PRIOR 토큰 폭주** — 슬롯 多 + 각 구획 긴 답이면 뒤 슬롯 프롬프트가 누적 전문으로
-  비대. `prior_full_k`(직전 K개만 전문, 그 외 한 줄 요지)로 안전판 — 기본은 전체(사용자 결정),
-  폭주 관측 시 K 하향.
+- **PRIOR window 크기(`prior_full_k`) 튜닝** — 기본 2(직전 2개 전문)는 hybrid sliding-window
+  시작값. 너무 작으면 연결이 끊기고(요지로 압축된 직전 구획에 이어쓰기 어려움), 너무 크면
+  토큰 폭주 재발. 검증서 구획 연결이 매끄러운지 vs 마지막 슬롯 프롬프트 크기를 보고 조정.
+  요지 압축이 "첫 문장"이라 거칠면 모델 1콜 요약으로 올리는 것도 옵션이나 지연·비용 trade-off.
 - **라이브 스트리밍 헤더 divergence** — 모드 A(라이브)라 모델이 본문 선두 헤더를 내면 화면은
   못 되돌리고 기록만 정리된다(`_strip_leading_heading`). 프롬프트 금지가 빈도를 줄이지만 0은
   아님 — 검증서 화면에 중복 헤더가 남으면 모드 B(검수 후 스트리밍) 전환 검토.
