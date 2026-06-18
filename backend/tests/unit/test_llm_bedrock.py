@@ -16,7 +16,7 @@ import pytest
 from app.adapters.llm.http import HttpLLM
 from app.config.profiles import _build_llm_pool
 from app.config.settings import LLMPoolEntry, Settings
-from app.ports.llm import ChatMessage, ToolSpec
+from app.ports.llm import ChatMessage, GrammarSpec, ToolSpec
 
 
 @pytest.fixture(autouse=True)
@@ -243,6 +243,105 @@ async def test_bedrock_tools_path_and_parse(monkeypatch):
     # dotted registry name restored from the wire name
     assert result.tool_calls[0].name == "retrieval.search"
     assert result.tool_calls[0].arguments == {"q": "smr"}
+
+
+# ── structured output (json_schema grammar → forced tool, 설계 A) ────────────
+
+_VERIFY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "necessary_chunk_ids": {"type": "array", "items": {"type": "string"}},
+        "multihop_chunk_ids": {"type": "array", "items": {"type": "string"}},
+        "rationale": {"type": "string"},
+    },
+    "required": ["necessary_chunk_ids", "multihop_chunk_ids"],
+}
+
+
+async def test_bedrock_generate_messages_json_schema_forces_tool_and_serializes(monkeypatch):
+    # json_schema grammar → 단일 강제 도구로 변환(tool_choice={type:tool}), Claude 의
+    # tool_use.input 을 JSON 문자열로 직렬화해 text 로 반환(verify_slot json.loads 호환).
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "content": [
+                    # 산문 text 블록은 무시되고, tool_use.input 이 정본이 된다.
+                    {"type": "text", "text": "Here is the JSON:"},
+                    {
+                        "type": "tool_use",
+                        "id": "tu_1",
+                        "name": "structured_output",
+                        "input": {"necessary_chunk_ids": ["c1"],
+                                  "multihop_chunk_ids": [], "rationale": "c1 only"},
+                    },
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 12, "output_tokens": 5},
+            },
+        )
+
+    llm = HttpLLM(provider="bedrock", endpoint="",
+                  model="anthropic.claude-haiku-4-5", region="us-east-1")
+    _patch_async_client(monkeypatch, _mock_transport(handler))
+    result = await llm.generate_messages(
+        [ChatMessage(role="system", content="judge"),
+         ChatMessage(role="user", content="chunks...")],
+        grammar=GrammarSpec(kind="json_schema", value=_VERIFY_SCHEMA),
+    )
+    # 강제 도구가 payload 에 실렸다(스키마 = input_schema, tool_choice 강제).
+    assert captured["body"]["tools"][0]["name"] == "structured_output"
+    assert captured["body"]["tools"][0]["input_schema"] == _VERIFY_SCHEMA
+    assert captured["body"]["tool_choice"] == {"type": "tool", "name": "structured_output"}
+    # 반환 text 는 tool_use.input 의 JSON 직렬화 → json.loads 로 그대로 파싱된다.
+    parsed = json.loads(result.text)
+    assert parsed["necessary_chunk_ids"] == ["c1"]
+    assert parsed["rationale"] == "c1 only"
+    assert result.token_usage == {"prompt_tokens": 12, "completion_tokens": 5}
+
+
+async def test_bedrock_generate_messages_no_grammar_returns_text(monkeypatch):
+    # grammar 없으면 일반 text 응답 그대로(도구 미주입 — 회귀 가드).
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"content": [{"type": "text", "text": "plain answer"}],
+                  "usage": {"input_tokens": 3, "output_tokens": 2}},
+        )
+
+    llm = HttpLLM(provider="bedrock", endpoint="",
+                  model="anthropic.claude-haiku-4-5", region="us-east-1")
+    _patch_async_client(monkeypatch, _mock_transport(handler))
+    result = await llm.generate_messages([ChatMessage(role="user", content="hi")])
+    assert "tools" not in captured["body"]
+    assert "tool_choice" not in captured["body"]
+    assert result.text == "plain answer"
+
+
+async def test_bedrock_generate_messages_json_schema_no_tool_use_falls_back_to_text(monkeypatch):
+    # 모델이 강제 도구를 안 내고 text 만 냈을 때(거부 등) — text 폴백(json.loads 는 호출부가
+    # 처리). 어댑터는 빈 structured 면 text 블록을 합쳐 돌려준다(silent 손실 방지).
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"content": [{"type": "text", "text": "I cannot comply"}],
+                  "usage": {}},
+        )
+
+    llm = HttpLLM(provider="bedrock", endpoint="",
+                  model="anthropic.claude-haiku-4-5", region="us-east-1")
+    _patch_async_client(monkeypatch, _mock_transport(handler))
+    result = await llm.generate_messages(
+        [ChatMessage(role="user", content="x")],
+        grammar=GrammarSpec(kind="json_schema", value=_VERIFY_SCHEMA),
+    )
+    assert result.text == "I cannot comply"
 
 
 # ── streaming (AWS event-stream framing) ─────────────────────────────────────

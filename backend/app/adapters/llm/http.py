@@ -40,6 +40,10 @@ _BEDROCK_SERVICE = "bedrock"
 # (a `bedrock-api-key-...` bearer token). Used as the fallback when a bedrock pool
 # entry sets no explicit api_key_env.
 _BEDROCK_BEARER_TOKEN_ENV = "AWS_BEARER_TOKEN_BEDROCK"
+# Anthropic/Bedrock 구조화 출력용 강제 도구 이름 — json_schema grammar 를 단일 도구의
+# input_schema 로 주입해 Claude 가 스키마 준수 JSON(tool_use.input)을 내게 한다. vLLM
+# guided_json 의 Anthropic/Bedrock 대응물(generate_messages 비-openai_compat 경로).
+_STRUCTURED_TOOL_NAME = "structured_output"
 
 
 class HttpLLM(LLMPort):
@@ -261,7 +265,7 @@ class HttpLLM(LLMPort):
                             messages, max_tokens, temperature, grammar, extra
                         )
                     return await self._call_anthropic_messages(
-                        messages, max_tokens, temperature
+                        messages, max_tokens, temperature, grammar
                     )
         except (httpx.HTTPError, RetryError, _Retry5xx) as exc:
             raise LLMUnavailableError(str(exc)) from exc
@@ -479,10 +483,18 @@ class HttpLLM(LLMPort):
 
     async def _call_anthropic_messages(
         self, messages: list[ChatMessage], max_tokens: int, temperature: float,
+        grammar: GrammarSpec | None = None,
     ) -> LLMResult:
-        """도구 없는 멀티메시지 경로의 Anthropic 변형. system 은 top-level 필드로
-        승격한다(`_call_anthropic_tools` 와 동형). grammar(guided decoding)는
-        Anthropic 미지원이라 무시된다 — 시그니처상 받지 않는다."""
+        """도구 없는 멀티메시지 경로의 Anthropic/Bedrock 변형. system 은 top-level 필드로
+        승격한다(`_call_anthropic_tools` 와 동형).
+
+        **구조화 출력(json_schema grammar):** Anthropic/Bedrock 은 vLLM `guided_json` 이
+        없으므로, json_schema grammar 를 **단일 강제 도구**(`tool_choice={type:"tool"}`)로
+        변환해 그 도구의 `input_schema` 로 스키마를 강제한다 — Claude 가 그 스키마에 맞는
+        `tool_use.input` 을 내고, 어댑터가 그 input 을 JSON 문자열로 직렬화해 `text` 로
+        돌려준다(호출부 `json.loads` 가 그대로 파싱). 이로써 verify_slot/ref_extract 등
+        guided decoding 의존 호출이 Bedrock 에서도 유효 JSON 을 받는다(설계 A — bedrock
+        구조화 출력). grammar 가 없거나 json_schema 가 아니면 일반 text 응답 그대로."""
         url = self._anthropic_url()
         headers = self._anthropic_base_headers()
         system_text = "\n\n".join(
@@ -500,18 +512,41 @@ class HttpLLM(LLMPort):
             payload["system"] = system_text
         if not _rejects_sampling_params(self._model):
             payload["temperature"] = temperature
+        # json_schema → 단일 강제 도구로 스키마 주입(Bedrock/Anthropic 구조화 출력).
+        forced_json = grammar is not None and grammar.kind == "json_schema" \
+            and isinstance(grammar.value, dict)
+        if forced_json:
+            payload["tools"] = [{
+                "name": _STRUCTURED_TOOL_NAME,
+                "description": "Return the answer strictly as this JSON object.",
+                "input_schema": grammar.value,
+            }]
+            payload["tool_choice"] = {"type": "tool", "name": _STRUCTURED_TOOL_NAME}
+
         resp = await self._post_anthropic(
             url, self._finalize_anthropic_payload(payload), headers
         )
         _raise_for_status(resp)
         data = resp.json()
         text_parts: list[str] = []
+        structured: dict[str, Any] | None = None
         for block in data.get("content") or []:
-            if isinstance(block, dict) and block.get("type") == "text":
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
                 text_parts.append(block.get("text", ""))
+            elif block.get("type") == "tool_use" and block.get("name") == _STRUCTURED_TOOL_NAME:
+                # 강제 도구의 input 이 스키마 준수 JSON 객체 — 이것을 정본으로 쓴다.
+                inp = block.get("input")
+                if isinstance(inp, dict):
+                    structured = inp
         usage = data.get("usage") or {}
+        # 강제 JSON 이면 tool_use.input 을 직렬화해 text 로(호출부 json.loads 호환). 산문
+        # text 블록은 무시한다(스키마 정본이 input). tool_use 가 없으면(거부 등) text 폴백.
+        text = json.dumps(structured, ensure_ascii=False) if structured is not None \
+            else "".join(text_parts)
         return LLMResult(
-            text="".join(text_parts),
+            text=text,
             token_usage={
                 "prompt_tokens": int(usage.get("input_tokens", 0)),
                 "completion_tokens": int(usage.get("output_tokens", 0)),
