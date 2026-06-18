@@ -163,9 +163,13 @@ spec_driven_answer_spec_prompts:
   # scope_hint)만 남긴 v2 프롬프트·스키마. spec_driven_v1/v2 variant 는 불변(A/B 비교) —
   # composer 만 이 profile 을 쓴다. max_tokens — 검색토큰 제거로 슬롯 JSON 이 가벼워졌으나
   # role/scope_hint/reasoning 이 추가돼 비슷 → 3000 유지(truncate→fallback 강등 방지).
+  # v3(persona_framework.design.v1 §10) — hidden-intent 단락을 페르소나 인지형으로 일반화
+  # (# PERSONA 블록이 앞서면 그 spine 이 분해를 주도, 없으면 검토자 기본 읽기로 net-neutral).
+  # 답변 설계 골격·스키마는 v2 동형 — 기존 answer_spec_v2.md 는 base spec_driven_v2 가 계속
+  # 쓰므로 불변, composer 만 v3 로 업그레이드(프롬프트 수정=새 버전 — 사용자 규약).
   composer_answer_spec_v1:
-    profile_version: v1
-    prompt:        {path: spec_driven/answer_spec_v2.md,            version: v2, sha256: "6831bb0a0bcf8806332ef29e4179a763b657abe9f2b935e1e5e31b2179481296"}
+    profile_version: v3
+    prompt:        {path: spec_driven/answer_spec_v3.md,            version: v3, sha256: "f42e12f0fc2afee872a1d888207eb2f7214a0567eec68a01d7bd3e55c6139cee"}
     output_schema: {path: spec_driven/schemas/answer_spec_v2.json,  version: v2, sha256: "b594a4449b289516a6488e72ca82170475805f2bf0bc704b20b0264ab4ac2ce4"}
     model_options: {temperature: 0.0, max_tokens: 3000}
 
@@ -253,6 +257,21 @@ composer_synthesize_prompts:
     prompt:        {path: spec_driven/composer_synthesize_v1.md, version: v1, sha256: "ccc23b1780572f7d11394965d79a1d679019c4b60d846f55902436656ed4e56f"}
     # 닫음 블록(정리+다음액션)이라 짧다 — 본문 재출력 금지.
     model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 1500, seed: 7}
+
+# composer 다중 페르소나(composer_persona_framework.design.v1 §10) — N1/N2/N4 앞에 prepend
+# 되는 페르소나 프로필 fragment(자유 텍스트, 스키마 없음). 페르소나별 1파일, profile_id 가
+# Persona.profile_source_id 와 일치(composer_{reviewer,designer,operator} variant 가 자기
+# id 로 조회). 답변설계(N1) 지침 중심 — 검색목적·답 척추·facet 해석을 산문으로 담는다.
+composer_persona_prompts:
+  composer_persona_reviewer_v1:
+    profile_version: v1
+    prompt:        {path: spec_driven/persona/reviewer_v1.md, version: v1, sha256: "fb838abe82bcf54dcbd060a8124b25d20823468b97e9f7a047ec253239edd9d2"}
+  composer_persona_designer_v1:
+    profile_version: v1
+    prompt:        {path: spec_driven/persona/designer_v1.md, version: v1, sha256: "90c38316b539d0c1c48db3659d798722bf4cb0ba07c0487d7bd501497e97e215"}
+  composer_persona_operator_v1:
+    profile_version: v1
+    prompt:        {path: spec_driven/persona/operator_v1.md, version: v1, sha256: "4722f0e391121b3baf04a1181d9646a7000f11e6247dceff44bc98aa1ae77586"}
 
 composer_slot_verify_prompts:
   composer_slot_verify_v1:

@@ -42,6 +42,34 @@ variants:
     required_scenarios: []
     capability_tags: [spec_driven, retrieval, slotwise, composition, stateless]
 
+  # composer 다중 페르소나 — composer 와 동형이나 검색 목적·답 척추가 다른 사용자 역할
+  # (심사자/설계자/운영자)을 *variant 로 분리* 한다. 설계:
+  # docs/plans/composer_persona_framework.design.v1.md. 선택은 AGENT_VARIANT 결정론(런타임
+  # 추론 없음 — drift·오추론 차단). 동일 ComposerRunner + 동일 프롬프트 source 를 공유하고,
+  # 차이는 바인딩된 Persona(spine_facets·collection_priority·register)+persona profile
+  # fragment 로만 낸다. required_tools/compatible_llms 는 composer 와 동형. 단계 A 는 바인딩·
+  # 등록만(동작 net-neutral); persona 소비는 단계 B~D.
+  composer_reviewer:
+    compatible_llms: ["*"]
+    required_tools:
+      - retrieval.search
+    required_scenarios: []
+    capability_tags: [spec_driven, retrieval, slotwise, composition, stateless, persona]
+
+  composer_designer:
+    compatible_llms: ["*"]
+    required_tools:
+      - retrieval.search
+    required_scenarios: []
+    capability_tags: [spec_driven, retrieval, slotwise, composition, stateless, persona]
+
+  composer_operator:
+    compatible_llms: ["*"]
+    required_tools:
+      - retrieval.search
+    required_scenarios: []
+    capability_tags: [spec_driven, retrieval, slotwise, composition, stateless, persona]
+
   # spec_driven_v2 — spec_driven_v1 의 선형 4-노드 흐름을 상속하되 LLM 업무를 두 DGX
   # Spark vLLM 노드로 분할한다(Node1=요청 LLM: N1/N2/N3.5/N4, Node2=SECONDARY_LLM:
   # 슬롯 단위 1차 검색 결과 검증). 설계: docs/plans/spec_driven_agent.design.v2.md.
