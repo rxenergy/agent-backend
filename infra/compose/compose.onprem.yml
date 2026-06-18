@@ -26,8 +26,12 @@ services:
       context: ../../backend
       dockerfile: Dockerfile
     image: agent-backend:${BACKEND_TAG:-onprem}
+    # 컨테이너 런타임 env 는 이 env_file 이 소유한다(compose 의 --env-file 플래그는 *보간*
+    # 에만 쓰이고 컨테이너 env 엔 주입되지 않는다). 변형(예: second=Bedrock Haiku)은
+    # ONPREM_ENV_FILE 로 다른 env 파일을 지정한다 — Makefile up-onprem-bedrock 이 주입한다.
+    # 기본은 onprem.env(기존 동작 불변).
     env_file:
-      - ../env/onprem.env
+      - ../env/${ONPREM_ENV_FILE:-onprem.env}
       - path: ../env/onprem.secret.env
         required: false
     environment:

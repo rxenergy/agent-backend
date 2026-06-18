@@ -10,7 +10,12 @@ COMPOSE_ONPREM := docker compose --env-file infra/env/onprem.env --profile onpre
 # compose 토폴로지는 메인 스택과 동일(서브 vLLM 없음)하고 env 만 onprem.bedrock-sub.env.
 # 단일 호스트 기동(원격 서브 데몬 불필요 — relevance/multihop 이 Bedrock 으로 나간다).
 # ⚠ Bedrock 아웃바운드 필요(완전 air-gapped 아님) + AWS_BEARER_TOKEN_BEDROCK 환경 주입.
-COMPOSE_ONPREM_BEDROCK := docker compose --env-file infra/env/onprem.bedrock-sub.env \
+#
+# ONPREM_ENV_FILE 를 export 해 compose.onprem.yml 의 agent-api env_file 이 이 파일을
+# 컨테이너 런타임 env 로 *실제* 로 읽게 한다(--env-file 플래그는 보간 전용이라 컨테이너 env
+# 엔 안 들어간다 — 이게 없으면 컨테이너가 기본 onprem.env 를 읽어 bedrock 설정이 무시됨).
+COMPOSE_ONPREM_BEDROCK := ONPREM_ENV_FILE=onprem.bedrock-sub.env \
+  docker compose --env-file infra/env/onprem.bedrock-sub.env \
   --profile onprem -f infra/compose/compose.yml -f infra/compose/compose.onprem.yml
 
 # 서브 노드(2번째 vLLM) — standalone compose. 메인 스택과 독립.
