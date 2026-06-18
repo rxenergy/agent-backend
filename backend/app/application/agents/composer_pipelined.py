@@ -1,0 +1,709 @@
+"""composer_pipelined — 슬롯 검색-생성 파이프라이닝(배리어 제거) Agent.
+
+설계: docs/plans/spec_driven_slot_pipeline_streaming.design.v1.md.
+
+두 변형의 절반씩을 결합한다:
+  - **spec_driven_v2** 의 슬롯별 검색-검증 파이프라인(`_SlotPipelineMixin._run_slot_pipeline`
+    — Node1 검증 → Node2 외부참조 선별 → 2차 검색 → 재검증).
+  - **composer** 의 N4 슬롯 단위 순차 생성 + 즉시 토큰 스트리밍(`ComposerRunner` 의 슬롯
+    프롬프트·검수·종합 머신).
+
+핵심은 **배리어 제거**다. composer 는 N3/N3.5 검색을 *전부* 끝낸 뒤에야 첫 슬롯을 생성하나,
+composer_pipelined 는 N2 직후 슬롯별 검색-검증 task 를 *즉시* 발사하고(`SlotSearchHandle`),
+생성 루프가 슬롯 i 직전 그 슬롯 future 만 `await` 한다 — 나머지 슬롯 검색은 백그라운드 진행
+(검색 대기가 생성 뒤로 숨음). slot i 가 준비되는 즉시(다른 슬롯 대기 없이) slot i 본문을
+스트리밍한다.
+
+**cite-N(전역 배정 — `SlotCitationAllocator`):** 슬롯 CONTEXT 로 넘어가기 *전*(프롬프트 렌더
+전)에 그 슬롯 청크에 **전역 단일 공간**의 cite-N 을 배정한다. 모델은 처음부터 올바른 전역
+[cite-N] 으로 생성하므로 스트리밍 토큰이 곧 최종 번호다(사후 재번호 없음 → 서로 다른 근거가
+같은 [cite-0] 으로 보이던 문제 제거). 생성은 순차라 슬롯 소비 순서대로 번호가 늘어 결정적이고,
+검색은 여전히 병렬(번호 배정은 *생성* 시점이라 검색 병렬성 무관). 슬롯 간 공유 chunk 는 최초
+등장 슬롯의 cite 를 재사용해 References 가 단일화된다(전체 청크 확정 불요 = 완전 배리어 제거).
+
+**결정성(CLAUDE.md #5):** future 완료 순서는 비결정적이나, 소비·record·통합은 전부 생성
+루프의 슬롯 *생성 순서*(depends_on 위상정렬)로 한다(v1 idiom). 같은 입력이면 tool_calls
+순서·해시·답이 future 완료 순서와 무관하게 동일하다.
+
+spec_driven_v1/v2/composer 는 불변 보존(A/B·회귀 control)."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from typing import Any
+
+from app.application.agents.events import emit_reasoning, emit_step, emit_token
+from app.application.agents.composer import ComposerRunner
+from app.application.agents.registry import AgentDeps, register_variant
+from app.application.agents.slot_pipeline import (
+    SlotCitationAllocator,
+    SlotSearchHandle,
+    SlotSearchResult,
+    _SlotPipelineMixin,
+)
+from app.application.agents.spec_driven_v1 import (
+    _render_spec_block,
+    _sha16,
+    _source_ids_of,
+    _to_citations,
+)
+from app.application.intake.spec_driven_answer_spec import (
+    SpecDrivenAnswerSpecInstantiator,
+)
+from app.application.intake.spec_driven_query import QueryFormulator
+from app.application.intake.spec_driven_triage import SpecDrivenTriage
+from app.domain.agents import VariantSpec
+from app.domain.errors import RefusalReason, VerificationStatus
+from app.domain.interaction import AgentRequest, AgentResponse, ToolCallRecord
+from app.domain.memory import MemoryRef, MemoryReviewStatus, StalenessStatus
+from app.domain.retrieval import RetrievedChunk
+from app.domain.spec_driven import AnswerSpec, SpecSlot
+from app.observability import openinference as oi
+from app.observability.logging import get_logger
+from app.observability.metrics import get_metrics
+from app.observability.otel import get_tracer
+from app.ports.llm import LLMPort, LLMUnavailableError
+from app.ports.tool import ToolExecutionContext
+
+_TRACER = get_tracer("agent")
+_LOG = get_logger("agent.composer_pipelined")
+
+COMPOSER_PIPELINED_VARIANT_ID = "composer_pipelined"
+
+
+class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
+    """composer_pipelined 러너 — `_SlotPipelineMixin`(v2 4-stage 검색-검증) + `ComposerRunner`
+    (슬롯 생성/검수/종합)를 결합한다. `run()` 만 새로 짜서 N2 직후 슬롯 검색 future 를 발사하고
+    생성 루프가 슬롯별로 소비한다. 슬롯 프롬프트·헤더·검수·종합·prior_sections·`_finalize_turn`
+    은 ComposerRunner 그대로 재사용한다(생성 토폴로지 불변 — 파이프라이닝은 *지연* 만 바꾼다)."""
+
+    _GENERATION_PROFILE_ID = "spec_driven_generation_pipelined_v1"
+    _GENERAL_PROFILE_ID = "spec_driven_general_pipelined_v1"
+
+    def __init__(self, *args: Any, verify_concurrency: int = 10,
+                 relevance_llm_id: str = "", multihop_llm_id: str = "",
+                 **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # 동시 슬롯 검색-검증 상한(v2 와 동형). 검증 도구 자체 semaphore 와 함께 vLLM 보호.
+        self._verify_sem = asyncio.Semaphore(max(1, verify_concurrency))
+        # 노드 분리 가시화(원칙 5/6) — relevance(verify_slot)=utility_llm, multihop(follow_up)=
+        # secondary_llm 이 *어느 pool id(엔드포인트)* 에서 돌았는지 재현 핀에 남긴다. 부트 핀
+        # 이라 요청별 추종이 아님. 빈 값이면 핀에서 생략(미배선/단일노드).
+        self._relevance_llm_id = relevance_llm_id
+        self._multihop_llm_id = multihop_llm_id
+
+    # ------------------------------------------------------------------
+    # run() — N0~N2 계승(composer 동형), N3 부터 슬롯 future 발사 + 파이프라인 생성.
+    # ------------------------------------------------------------------
+    async def run(self, request: AgentRequest) -> AgentResponse:
+        started = time.monotonic()
+        metrics = get_metrics()
+        tool_calls: list[ToolCallRecord] = []
+        tool_result_refs: list[str] = []
+
+        def record(r) -> None:
+            tool_calls.append(
+                ToolCallRecord(
+                    name=r.tool_name, version=r.tool_version, status=r.status,
+                    latency_ms=r.latency_ms, input_hash=r.input_hash,
+                    output_hash=r.output_hash, error_code=r.error_code,
+                    retry_count=r.retry_count,
+                )
+            )
+            if r.output_hash:
+                tool_result_refs.append(r.output_hash)
+            metrics.record_tool(tool=r.tool_name, status=r.status,
+                                retry_count=r.retry_count)
+            from app.application.agents.events import emit_tool_nowait
+            emit_tool_nowait(
+                r.tool_name, r.status, version=r.tool_version,
+                latency_ms=r.latency_ms, error_code=r.error_code,
+                retry_count=r.retry_count,
+            )
+
+        if self._answer_spec_source is None or self._query_source is None \
+                or self._generation_source is None \
+                or self._triage_source is None or self._general_source is None:
+            raise RuntimeError(
+                "composer_pipelined prompt sources not wired — N0/N1/N2/N4/N4-G prompts "
+                "are registry-hosted (prompts/registry.yaml spec_driven_* blocks)"
+            )
+
+        from app.application.agents.llm_router import UnknownLLMError
+        try:
+            llm_id, llm = self._llm_router.resolve(request.model or None)
+        except UnknownLLMError:
+            llm_id, llm = self._llm_router.resolve(None)
+        util = self._utility_llm or llm
+
+        with _TRACER.start_as_current_span("agent.run") as root:
+            root.set_attribute("interaction_id", request.interaction_id)
+            root.set_attribute("agent.variant", self.spec.variant_id)
+            root.set_attribute("llm_id", llm_id)
+            oi.set_kind(root, oi.KIND_AGENT)
+            oi.set_io(root, input_value=request.query_text)
+
+            ctx = ToolExecutionContext(
+                interaction_id=request.interaction_id, trace_id="",
+                app_profile=self._app_profile, agent_variant=self.spec.variant_id,
+                session_id=request.session_id, user_id=request.user_id,
+                project_id=request.project_id,
+            )
+
+            # === N-1 Session Load + 사전 게이트(계승) ======================
+            sess = await self._session_load(request, ctx, record)
+            prior_context = (
+                self._build_prior_context(sess) if sess["pre_inject"] else None
+            )
+
+            # === N0 Triage(계승) =========================================
+            await emit_step("triage", "started")
+            n0 = SpecDrivenTriage(
+                util,
+                prompt_body=self._triage_source.prompt_body,
+                schema=self._triage_source.schema or None,
+                model_options=self._triage_source.model_options or None,
+                policy_hash=self._triage_source.policy_hash,
+            )
+            triage = await n0.triage(request.query_text, prior_context=prior_context)
+            triage_pin: dict[str, Any] = {
+                "route": triage.route,
+                "references_specifics": triage.references_specifics,
+                "rationale": triage.rationale,
+                "method": triage.triage_method,
+                "policy_hash": triage.policy_hash,
+            }
+            await emit_step("triage", "ok", route=triage.route,
+                            method=triage.triage_method,
+                            references_specifics=triage.references_specifics)
+            root.set_attribute("spec_driven.route", triage.route)
+            if triage.rationale:
+                await emit_reasoning(f"\n**질의 분류**\n{triage.rationale}\n")
+
+            # general 분기(계승) — 슬롯 분해 비대상.
+            if triage.route == "general":
+                return await self._run_general(
+                    request, started, tool_calls, llm=llm, llm_id=llm_id,
+                    triage_pin=triage_pin, ctx=ctx, sess=sess, record=record,
+                )
+
+            # === N1 Define Spec(계승) ====================================
+            await emit_step("define_spec", "started")
+            n1 = SpecDrivenAnswerSpecInstantiator(
+                util,
+                prompt_body=self._answer_spec_source.prompt_body,
+                schema=self._answer_spec_source.schema or None,
+                model_options=self._answer_spec_source.model_options or None,
+                policy_hash=self._answer_spec_source.policy_hash,
+            )
+            spec = await n1.instantiate(request.query_text,
+                                        reasoning_label="답변 사양 정의",
+                                        prior_context=prior_context)
+            await emit_step("define_spec", "ok", method=spec.instantiation_method,
+                            num_slots=len(spec.required_slots),
+                            num_refs=len(spec.explicit_references))
+
+            post = self._post_gate(request, sess, triage, spec)
+
+            # === N2 Query Formulation(계승) ==============================
+            await emit_step("query_formulation", "started")
+            n2 = QueryFormulator(
+                util,
+                prompt_body=self._query_source.prompt_body,
+                schema=self._query_source.schema or None,
+                model_options=self._query_source.model_options or None,
+                policy_hash=self._query_source.policy_hash,
+            )
+            queries, formulation_method = await n2.formulate(
+                request.query_text, spec, reasoning_label="검색 쿼리 생성")
+            truncated = False
+            if len(queries) > self._max_queries:
+                truncated = True
+                queries = queries[: self._max_queries]
+            await emit_step("query_formulation", "ok", method=formulation_method,
+                            num_queries=len(queries), truncated=truncated)
+
+            # === N3+N3.5 — 슬롯별 검색-검증 future 발사(배리어 없음, §2/§3) =========
+            # N2 직후 슬롯별 task 를 즉시 띄운다. 생성 루프가 슬롯 i 직전 그 future 만 await
+            # 하고, 나머지 슬롯 검색은 백그라운드 진행(검색 대기가 생성 뒤로 숨음). 검색·검증
+            # tool_results 는 task 안에서 record 하지 않고 결과에 실어 두고, 생성 루프가 슬롯
+            # 소비 시점에 순차 record 한다(결정성·순서·race — §5.1/§6).
+            await emit_step("slot_search", "started", num_slots=len(spec.required_slots))
+            handle = self._fire_slot_searches(
+                request=request, ctx=ctx, spec=spec, queries=queries)
+
+            # === N4 — 파이프라인 슬롯 생성(또는 검색 0건 시 gap 경로) =================
+            return await self._generate_pipelined(
+                request, started, tool_calls, tool_result_refs,
+                llm=llm, llm_id=llm_id, ctx=ctx, record=record,
+                spec=spec, triage=triage, handle=handle,
+                triage_pin=triage_pin, formulation_method=formulation_method,
+                queries=queries, truncated=truncated,
+                sess=sess, post=post,
+            )
+
+    # ------------------------------------------------------------------
+    # N3 슬롯 검색 발사 — 슬롯별 검색-검증 task 를 즉시 띄운다(SlotSearchHandle).
+    # ------------------------------------------------------------------
+    def _fire_slot_searches(
+        self, *, request: AgentRequest, ctx: ToolExecutionContext,
+        spec: AnswerSpec, queries,
+    ) -> SlotSearchHandle:
+        """슬롯명 → 검색-검증 task. 슬롯별로 그 슬롯에 귀속된 N2 쿼리들만 1차 검색하고
+        (`_slot_first_pass_search`), 이어 4-stage 검증 파이프라인(`_run_slot_pipeline`)을
+        돈다. 배리어 없이 동시 발사 — gather 는 생성 루프가 슬롯별 await 로 대신한다."""
+        spec_block = _render_spec_block(spec)
+        per_query_k = max(self._top_k, self._max_context_chunks)
+        # 슬롯별 N2 쿼리 그룹(슬롯명 일치). 슬롯에 쿼리가 없으면 원질의 1개로 폴백.
+        queries_by_slot: dict[str, list[dict[str, Any]]] = {}
+        for q in queries:
+            queries_by_slot.setdefault(q.slot_name, []).append(
+                {"query_text": q.query_text, "target": q.target, "filters": q.filters}
+            )
+        slot_query_text: dict[str, str] = {}
+        for q in queries:
+            slot_query_text.setdefault(q.slot_name, q.query_text)
+
+        async def _search_slot(slot_name: str) -> SlotSearchResult:
+            async with self._verify_sem:
+                slot_queries = queries_by_slot.get(slot_name) or [
+                    {"query_text": request.query_text, "target": {}, "filters": {}}
+                ]
+                first_pass, pre_results = await self._slot_first_pass_search(
+                    ctx=ctx, slot_queries=slot_queries, per_query_k=per_query_k)
+                res = await self._run_slot_pipeline(
+                    request=request, ctx=ctx, spec_block=spec_block,
+                    slot_name=slot_name,
+                    slot_query=slot_query_text.get(slot_name, request.query_text),
+                    slot_chunks=first_pass, pre_tool_results=pre_results,
+                )
+                return SlotSearchResult(
+                    slot_name=slot_name, necessary=res.necessary,
+                    second_pass=res.second_pass, pipeline=res,
+                )
+
+        tasks: dict[str, asyncio.Task[SlotSearchResult]] = {
+            s.name: asyncio.create_task(_search_slot(s.name))
+            for s in spec.required_slots
+        }
+        return SlotSearchHandle(tasks)
+
+    # ------------------------------------------------------------------
+    # N4 파이프라인 — 슬롯 *생성 순서*(depends_on 위상정렬)로 future 소비 + 즉시 스트리밍.
+    # ------------------------------------------------------------------
+    async def _generate_pipelined(
+        self, request: AgentRequest, started: float,
+        tool_calls: list[ToolCallRecord], tool_result_refs: list[str], *,
+        llm: LLMPort, llm_id: str, ctx: ToolExecutionContext, record,
+        spec: AnswerSpec, triage, handle: SlotSearchHandle,
+        triage_pin: dict[str, Any], formulation_method: str, queries,
+        truncated: bool, sess: dict[str, Any], post,
+    ) -> AgentResponse:
+        metrics = get_metrics()
+
+        # 생성 순서 = depends_on 위상정렬(composer 와 동일). 의존 슬롯이 먼저 생성돼 PRIOR 로 흐른다.
+        ordered: list[SpecSlot] = (
+            list(spec.slot_order()) if spec.required_slots else []
+        )
+        stages = self._answer_structure_stages(spec.answer_structure)
+
+        inject = post.inject and bool(sess["state"])
+        convo_summary = (
+            (sess["state"] or {}).get("running_summary") or None
+        ) if inject else None
+        memory_refs: tuple[MemoryRef, ...] = ()
+        memory_ids_used: list[str] = []
+        if inject and request.session_id:
+            memory_ids_used.append(request.session_id)
+            memory_refs = (
+                MemoryRef(
+                    memory_id=request.session_id, memory_type="session",
+                    review_status=MemoryReviewStatus.APPROVED.value,
+                    staleness_status=StalenessStatus.FRESH.value,
+                ),
+            )
+
+        slot_outputs: list[dict[str, Any]] = []
+        slot_pins: list[dict[str, Any]] = []
+        verify_pins: list[dict[str, Any]] = []
+        verify_reason_lines: list[str] = []
+        fq_all: list[dict[str, Any]] = []
+        streamed_parts: list[str] = []
+        # 전역 citation 관리자 — 슬롯 CONTEXT 로 넘어가기 *전* 에 전역 cite-N 을 배정해 모델이
+        # 처음부터 올바른 전역 번호로 생성하게 한다(사후 재번호 없음 → 스트리밍 토큰=최종 번호).
+        # 중복 chunk 는 최초 등장 슬롯의 cite 재사용(References 단일화). 생성 순차라 결정적.
+        cites = SlotCitationAllocator(self._context_builder)
+        total_multihop = 0
+        total_second_pass = 0
+        total_second_necessary = 0
+
+        num_slots = len(ordered)
+        for idx, slot in enumerate(ordered):
+            # === 슬롯 future 소비(배리어 없음 — 이 슬롯만 await) ===
+            res = await handle.result(slot.name)
+            pipe = res.pipeline
+            # 슬롯 검색-검증 tool_results 를 *여기서* 순차 record(결정성·순서 — §6).
+            for r in pipe.tool_results:
+                record(r)
+            # 슬롯 검증 핀/근거(v2 와 동형 — UI thinking).
+            verify_pins.append({
+                "slot": slot.name, "method": pipe.method,
+                "num_first_pass": pipe.num_first_pass,
+                "num_necessary": len(pipe.necessary),
+                "num_multihop": len(pipe.multihop_ids),
+                "num_second_pass": pipe.num_second_pass,
+                "num_second_necessary": len(pipe.second_pass),
+                "second_method": pipe.second_method,
+            })
+            line = (f"- [{slot.name}] 1차 {pipe.num_first_pass}개 → 필요 "
+                    f"{len(pipe.necessary)}개, 멀티홉 {len(pipe.multihop_ids)}개")
+            if pipe.method == "fallback":
+                line += " ⚠ 검증 호출 실패 → 전량 보존"
+            if pipe.rationale:
+                line += f"\n    근거: {pipe.rationale}"
+            verify_reason_lines.append(line)
+            if pipe.num_second_pass > 0:
+                sline = (f"  · 2차 검색 {pipe.num_second_pass}개 → 채택 "
+                         f"{len(pipe.second_pass)}개")
+                if pipe.second_method == "fallback":
+                    sline += " ⚠ 검증 호출 실패 → 전량 보존"
+                if pipe.rationale2:
+                    sline += f"\n    근거: {pipe.rationale2}"
+                verify_reason_lines.append(sline)
+            for fq in pipe.fq_list:
+                fq_all.append(fq)
+            total_multihop += len(pipe.multihop_ids)
+            total_second_pass += pipe.num_second_pass
+            total_second_necessary += len(pipe.second_pass)
+
+            # === 슬롯 CONTEXT = 검증 통과 1차 ∪ 2차. cite-N 은 *생성 전* 에 전역 배정 ===
+            # SlotCitationAllocator 가 이 슬롯 청크에 전역 cite-N 을 매겨 sub-pack 을 만든다 —
+            # 모델은 처음부터 올바른 전역 [cite-N] 으로 생성하므로 스트리밍 토큰이 곧 최종
+            # 번호다(사후 재번호 없음). 중복 chunk 는 앞선 슬롯의 cite 재사용(References 단일).
+            sub_chunks = res.context_chunks[: self._slot_context_k]
+            attributed = len(sub_chunks)
+            fallback_ctx = not sub_chunks  # 굶음(검증이 전부 비필요) → 빈 CONTEXT.
+            slot_pack = cites.build_slot_pack(
+                chunks=sub_chunks,
+                interaction_id=request.interaction_id,
+                query_text=request.query_text,
+                chat_history=request.chat_history if inject else (),
+                conversation_summary=convo_summary,
+                scenario_object="n_a", scenario_depth="n_a",
+                entities={}, memory_refs=(), tool_result_refs=(),
+            )
+            sub_pack = slot_pack.pack
+            allowed_cites = slot_pack.allowed_cites
+
+            label = stages[idx] if idx < len(stages) else (slot.facet or slot.name)
+            header = f"## {label}\n\n"
+
+            await emit_step("slot_generation", "started", slot=slot.name,
+                            facet=slot.facet or "-", num_chunks=len(sub_chunks),
+                            index=idx)
+            # 슬롯 검증 근거를 *그 슬롯 본문 직전* 에 방출(스트리밍 순서 — §5.1). composer 의
+            # 일괄 reasoning 대신 슬롯별로 흘려 thinking↔본문 인접(#24295).
+            await emit_reasoning(
+                f"\n**슬롯 검증 (Node1) — {slot.name}**\n{verify_reason_lines[-1]}\n"
+            )
+
+            with _TRACER.start_as_current_span("llm.slot_generation") as ss:
+                ss.set_attribute("slot.name", slot.name)
+                ss.set_attribute("slot.facet", slot.facet or "")
+                ss.set_attribute("slot.index", idx)
+                ss.set_attribute("slot.num_chunks", len(sub_chunks))
+                rendered = self._render_slot_prompt(
+                    request.query_text, spec, slot, sub_chunks, sub_pack,
+                    prior_sections=self._prior_sections_block(slot_outputs, slot),
+                    stage_index=idx, stage_total=num_slots,
+                )
+                slot_prompt_hash = _sha16(rendered)
+                ss.set_attribute("slot.rendered_prompt_hash", slot_prompt_hash)
+                try:
+                    result = await self._slot_generate_stream(
+                        llm, rendered, span=ss, prefix=header,
+                        model_options_override=self._slot_model_options(),
+                    )
+                except LLMUnavailableError as exc:
+                    ss.record_exception(exc)
+                    ss.set_attribute("llm.upstream_error", str(exc)[:500])
+                    _LOG.warning(
+                        "llm_unavailable", node=f"slot:{slot.name}",
+                        interaction_id=request.interaction_id,
+                        variant=self.spec.variant_id,
+                        model_id=getattr(llm, "model_id", "unknown"),
+                        upstream_error=str(exc)[:500],
+                        error_type=type(exc).__name__,
+                    )
+                    return await self._refuse(
+                        request, started, tool_calls, RefusalReason.LLM_UNAVAILABLE,
+                        error_code="llm_unavailable",
+                        query_understanding=self._build_qu_pin(
+                            triage_pin, spec, formulation_method, queries, truncated,
+                            verify_pins, fq_all, slot_pins, sess, post,
+                            total_multihop, total_second_pass, total_second_necessary,
+                            cites.all_chunk_ids,
+                        ),
+                    )
+
+            text = self._strip_leading_heading(result.text.strip())
+            _, verdict = await self._verify_slot(
+                llm, slot, text, allowed_cites, sub_chunks, sub_pack,
+                request, spec,
+                prior_sections=self._prior_sections_block(slot_outputs, slot),
+            )
+            verdict["streamed_before_verify"] = True
+
+            # cite-N 은 이미 전역(생성 전 배정) — 사후 재매핑 불필요. 이 슬롯이 *새로* 등장
+            # 시킨 chunk id(References·retrieved_chunk_ids 누적은 allocator 가 전역 보관).
+            sec_global_ids = list(slot_pack.new_chunk_ids)
+
+            section = f"{header}{text}\n\n"
+            await emit_token("\n\n")  # 슬롯 사이 구분.
+            streamed_parts.append(section)
+
+            slot_outputs.append({"slot": slot, "header": header, "text": text})
+            slot_pins.append({
+                "name": slot.name, "facet": slot.facet,
+                "expected_authority": slot.expected_authority,
+                "context_chunk_ids": [c.chunk_id for c in sub_chunks],
+                "global_cite_chunk_ids": sec_global_ids,
+                "rendered_prompt_hash": slot_prompt_hash,
+                "fallback_context": fallback_ctx,
+                "attributed_chunks": attributed,
+                "verdict": verdict,
+                "completion_tokens": int(result.token_usage.get("completion_tokens", 0)),
+            })
+            await emit_step("slot_generation", "ok", slot=slot.name,
+                            l0=verdict["l0"], l1=verdict.get("l1"),
+                            regen=verdict.get("regen", 0))
+
+        await emit_step("slot_search", "ok", necessary=len(cites.all_chunk_ids),
+                        multihop=total_multihop, second_pass=total_second_pass)
+
+        evidence_gap = not slot_outputs or not cites.all_chunk_ids
+
+        body_text = "".join(streamed_parts).strip()
+
+        # === 종합(닫음 블록)만 — composer 동형(본문 재출력 금지) ===
+        synth_hash: str | None = None
+        closing = ""
+        synth_mode = "off"
+        if self._synthesize and len(slot_outputs) >= 1:
+            await emit_step("synthesize", "started", num_slots=len(slot_outputs))
+            with _TRACER.start_as_current_span("llm.synthesize") as sy:
+                sy.set_attribute("synthesize.num_slots", len(slot_outputs))
+                synth_prompt = self._render_synthesize_prompt(
+                    request.query_text, spec, slot_outputs)
+                synth_hash = _sha16(synth_prompt)
+                sy.set_attribute("synthesize.rendered_prompt_hash", synth_hash)
+                try:
+                    synth = await self._slot_generate_stream(
+                        llm, synth_prompt, span=sy, prefix="\n\n",
+                        model_options_override=self._synth_model_options(),
+                    )
+                    closing = synth.text.strip()
+                    synth_mode = "model"
+                except LLMUnavailableError:
+                    synth_mode = "skipped_unavailable"
+            await emit_step("synthesize", "ok", mode=synth_mode)
+
+        answer_text = body_text + (("\n\n" + closing) if closing else "")
+
+        citations = _to_citations(cites.all_candidates)
+        chunk_ids = list(cites.all_chunk_ids)
+
+        qu_pin = self._build_qu_pin(
+            triage_pin, spec, formulation_method, queries, truncated,
+            verify_pins, fq_all, slot_pins, sess, post,
+            total_multihop, total_second_pass, total_second_necessary,
+            cites.all_chunk_ids, evidence_gap=evidence_gap,
+            synth_mode=synth_mode, synth_hash=synth_hash,
+        )
+        combined_hash = _sha16(
+            "|".join(p["rendered_prompt_hash"] for p in slot_pins)
+            + ("|" + synth_hash if synth_hash else "")
+        )
+
+        response = AgentResponse(
+            interaction_id=request.interaction_id,
+            answer_text=answer_text,
+            citations=citations,
+            refusal_reason=None,
+            verification_status=VerificationStatus.SKIPPED.value,
+            scenario_object="n_a", scenario_depth="n_a",
+            latency_ms=int((time.monotonic() - started) * 1000),
+            token_usage={},
+            llm_id=llm_id, model_id=getattr(llm, "model_id", "unknown"),
+            regulatory_grounding="n_a",
+        )
+        metrics.record_terminal(outcome="answer", latency_ms=response.latency_ms,
+                                scenario_object="n_a", scenario_depth="n_a")
+
+        # 최종 마무리 — composer 의 _finalize_turn(N5 세션 업데이트 + event.persist) 재사용.
+        await self._finalize_turn(
+            request, ctx, record, response=response, started=started,
+            spec=spec, triage=triage,
+            chunks=[],  # full pack 없음(slot-local) — source_id 는 fq + 슬롯 청크에서.
+            chunk_ids=chunk_ids,
+            fq_list=fq_all, qu_pin=qu_pin, memory_ids_used=memory_ids_used,
+            sess=sess, tool_calls=tool_calls,
+            prompt_profile_id="composer_pipelined_generation_v1",
+            rendered_prompt_hash=combined_hash,
+            prompt_composition_hash=(
+                self._slot_source.policy_hash if self._slot_source else None
+            ),
+            context_hash=combined_hash,  # slot-local pack 다수 → 슬롯 프롬프트 해시 결합으로 대체.
+        )
+        return response
+
+    # ------------------------------------------------------------------
+    # 재현 핀 — composer 의 spec_driven 핀 + v2 의 verify/follow_up 섹션 통합.
+    # ------------------------------------------------------------------
+    def _build_qu_pin(
+        self, triage_pin, spec: AnswerSpec, formulation_method: str, queries,
+        truncated: bool, verify_pins: list[dict[str, Any]],
+        fq_all: list[dict[str, Any]], slot_pins: list[dict[str, Any]],
+        sess: dict[str, Any], post,
+        total_multihop: int, total_second_pass: int, total_second_necessary: int,
+        global_chunk_ids: list[str], *, evidence_gap: bool = False,
+        synth_mode: str = "off", synth_hash: str | None = None,
+    ) -> dict[str, Any]:
+        from app.application.agents.spec_driven_v1 import _scope_summary
+        return {
+            "spec_driven": {
+                "route": "retrieval",
+                "triage": triage_pin,
+                "spec": {
+                    "intent": spec.intent,
+                    "method": spec.instantiation_method,
+                    "spec_hash": spec.spec_hash,
+                    "policy_hash": spec.policy_hash,
+                    "num_slots": len(spec.required_slots),
+                    "explicit_references": list(spec.explicit_references),
+                    "governing_normative_class": spec.governing_normative_class,
+                },
+                "formulation": {
+                    "method": formulation_method,
+                    "policy_hash": self._query_source.policy_hash,
+                    "num_queries": len(queries),
+                    "truncated": truncated,
+                    "queries": [
+                        {"slot": q.slot_name, "query_text": q.query_text,
+                         "target": q.target, "filters": q.filters,
+                         "scope": _scope_summary(q)}
+                        for q in queries
+                    ],
+                },
+                "retrieval": {
+                    "pipelined": True,  # 배리어 없는 슬롯별 검색-검증(§2).
+                    "necessary_kept": len(global_chunk_ids),
+                    # cite-N 은 SlotCitationAllocator 가 생성 *전* 에 전역 단일 공간으로 배정
+                    # (중복 chunk 재사용). 슬롯 본문이 처음부터 전역 번호로 생성된다.
+                    "cite_scope": "global_allocated",
+                    "min_token_count": self._min_token_count,
+                    # 노드 분리 가시화 — relevance(verify_slot)=utility_llm, multihop
+                    # (follow_up)=secondary_llm 이 돈 pool id(엔드포인트). 빈 값이면 생략.
+                    **({"relevance_llm_id": self._relevance_llm_id}
+                       if self._relevance_llm_id else {}),
+                    **({"multihop_llm_id": self._multihop_llm_id}
+                       if self._multihop_llm_id else {}),
+                },
+                "verify": {
+                    "node1": True,
+                    "num_slots": len(spec.required_slots),
+                    "total_necessary": len(global_chunk_ids),
+                    "total_multihop": total_multihop,
+                    "second_pass_total": total_second_pass,
+                    "second_necessary_total": total_second_necessary,
+                    "slots": verify_pins,
+                },
+                "follow_up": {
+                    "necessity_only": True,
+                    "num_queries": len(fq_all),
+                    "queries": [
+                        {"query_text": fq.get("query_text"),
+                         "target_source_ids": fq.get("target_source_ids", []),
+                         "intent": fq.get("intent")}
+                        for fq in fq_all
+                    ],
+                },
+                "generation": {
+                    "mode": "slotwise_pipelined",
+                    "num_slots": len(slot_pins),
+                    "slots": slot_pins,
+                    "synthesize": {"enabled": self._synthesize, "mode": synth_mode,
+                                   "rendered_prompt_hash": synth_hash},
+                    "slot_verify": self._slot_verify,
+                },
+                "evidence_gap": evidence_gap,
+                "session": self._session_pin(sess, post),
+            }
+        }
+
+
+@register_variant(COMPOSER_PIPELINED_VARIANT_ID)
+def _build_composer_pipelined(
+    spec: VariantSpec, deps: AgentDeps
+) -> "ComposerPipelinedRunner":
+    """composer_pipelined 팩토리 — composer(슬롯 생성) + v2(슬롯 검색-검증) source 를 함께
+    주입한다. composer v2 source(N1 답변설계·N2 검색설계·슬롯 role)를 기본으로, 미배선이면
+    base v1 source 로 graceful. 검증/외부참조는 retrieval.verify_slot/follow_up 도구(profiles.py
+    가 배선)로 호출 — 미배선이면 단일노드 degrade(v2 동형)."""
+    t = deps.tunables
+    use_v2 = t.get("composer_prompts_v2", True)
+    answer_spec_source = (
+        getattr(deps, "composer_answer_spec_source", None) if use_v2 else None
+    ) or deps.spec_driven_answer_spec_source
+    query_source = (
+        getattr(deps, "composer_query_source", None) if use_v2 else None
+    ) or deps.spec_driven_query_source
+    slot_source = (
+        getattr(deps, "composer_slot_v2_source", None) if use_v2 else None
+    ) or getattr(deps, "composer_slot_source", None)
+    # 노드 분리 가시화(원칙 5) — relevance(verify_slot)·multihop(follow_up) 둘 다 worker
+    # (secondary_llm) 노드에서 돈다(profiles.py 배선). main(생성)과 물리 분리. 인스턴스의
+    # model_id(HttpLLM=served-model-name, fake=fake-echo)를 핀에 노출. 미배선 시 빈 값.
+    _worker_id = getattr(deps.secondary_llm, "model_id", "") if deps.secondary_llm else ""
+    relevance_llm_id = _worker_id
+    multihop_llm_id = _worker_id
+    return ComposerPipelinedRunner(
+        verify_concurrency=t.get("spec_driven_v2_verify_concurrency", 10),
+        relevance_llm_id=relevance_llm_id,
+        multihop_llm_id=multihop_llm_id,
+        spec=spec,
+        llm_router=deps.llm_router,
+        tool_executor=deps.tool_executor,
+        context_builder=deps.context_builder,
+        recorder=deps.recorder,
+        event_sink=deps.event_sink,
+        app_profile=deps.app_profile,
+        utility_llm=deps.utility_llm,
+        answer_spec_source=answer_spec_source,
+        query_source=query_source,
+        generation_source=deps.spec_driven_generation_source,
+        triage_source=deps.spec_driven_triage_source,
+        general_source=deps.spec_driven_general_source,
+        citation_contract_path=t.get("citation_contract_path"),
+        retriever_top_k=t.get("retriever_top_k", 3),
+        max_queries=t.get("spec_driven_max_queries", 10),
+        max_context_chunks=t.get("spec_driven_max_context_chunks", 20),
+        min_token_count=t.get("retriever_min_token_count", 0),
+        context_token_budget=t.get("spec_driven_context_token_budget", 0),
+        follow_up_fetch_k=t.get("spec_driven_follow_up_fetch_k", 8),
+        follow_up_keep_k=t.get("spec_driven_follow_up_keep_k", 3),
+        summarizer=deps.summarizer,
+        session_memory_enabled=t.get("spec_driven_session_memory_enabled", False),
+        session_keep_turns=t.get("spec_driven_session_keep_turns", 10),
+        session_retrieval_window=t.get("spec_driven_session_retrieval_window", 5),
+        session_overlap_threshold=t.get("spec_driven_session_overlap_threshold", 0.5),
+        slot_source=slot_source,
+        synthesize_source=getattr(deps, "composer_synthesize_source", None),
+        slot_verify_source=getattr(deps, "composer_slot_verify_source", None),
+        slot_max_tokens=t.get("composer_slot_max_tokens", 8192),
+        slot_verify=t.get("composer_slot_verify", "off"),
+        synthesize=t.get("composer_synthesize", True),
+        slot_context_k=t.get("composer_slot_context_k", 12),
+        prior_full_k=t.get("composer_prior_full_k", 2),
+    )

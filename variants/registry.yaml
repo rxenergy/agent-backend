@@ -53,3 +53,18 @@ variants:
       - retrieval.search
     required_scenarios: []
     capability_tags: [spec_driven, retrieval, stateless, keyword_fidelity, dual_node]
+
+  # composer_pipelined — composer 의 슬롯 단위 생성(즉시 토큰 스트리밍)과 spec_driven_v2 의
+  # 슬롯별 검색-검증 파이프라인을 결합해 *배리어를 제거* 한 variant. 설계:
+  # docs/plans/spec_driven_slot_pipeline_streaming.design.v1.md. N2 직후 슬롯별 검색-검증
+  # future 를 즉시 발사(SlotSearchHandle)하고, 생성 루프가 슬롯 i 직전 그 future 만 await
+  # 해 먼저 준비된 슬롯을 다른 슬롯 대기 없이 스트리밍한다(검색-생성 겹침으로 지연 단축).
+  # cite-N 은 슬롯별 sub-pack 기준(slot-local) → 전체 청크 확정 불요(완전 배리어 제거).
+  # required_tools 는 retrieval.search 만 — verify_slot/follow_up 은 미배선 시 단일노드
+  # degrade(원칙 6, v2 동형).
+  composer_pipelined:
+    compatible_llms: ["*"]
+    required_tools:
+      - retrieval.search
+    required_scenarios: []
+    capability_tags: [spec_driven, retrieval, slotwise, composition, pipelined, dual_node, stateless]

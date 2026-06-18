@@ -181,13 +181,19 @@ class ContextBuilder:
         chunks: list[RetrievedChunk],
         memory_refs: tuple[MemoryRef, ...] = (),
         tool_result_refs: tuple[str, ...] = (),
+        cite_start: int = 0,
     ) -> ContextPack:
         # 통합 cite-N 풀(spec_driven_table_citation_granularity D2) — chunk 마다 본문
         # cite 1개 + 그 chunk 가 보유한 표 개수만큼 table cite. 단일 카운터(_n)로 번호를
         # 매겨 본문/표가 같은 [cite-N] 공간을 공유한다(본문에서 [n] 로 표시·검증 동일).
         # 배치 순서: chunk 본문 cite 직후 그 chunk 의 표 cite 들(parent 인접·가독성).
+        #
+        # `cite_start` 는 cite 번호 시작값(기본 0 — 단일 pack). composer_pipelined 처럼
+        # 슬롯별 sub-pack 을 *순차* 빌드하며 cite-N 을 전역 단일 공간으로 잇는 경우, 직전
+        # 슬롯까지 배정된 cite 수를 넘겨 [cite-N] 이 슬롯을 가로질러 유일하게 한다(슬롯
+        # 본문이 처음부터 전역 번호로 생성 → 사후 재매핑·중복 [cite-0] 충돌 제거).
         candidates_list: list[CitationCandidate] = []
-        n = 0
+        n = cite_start
         for c in chunks:
             cid = f"cite-{n}"
             n += 1

@@ -497,15 +497,17 @@ async def build_container(settings: Settings) -> AppContainer:
                     hint="secondary_llm is openai_compat but tool init failed; graceful degrade",
                 )
 
-        # retrieval.verify_slot — spec_driven_v2 슬롯 검증을 **main 노드**(Node1 =
-        # utility_llm, 없으면 default_llm 폴백)에서 돈다. follow_up 과 동일 가드: utility_llm
-        # pool 엔트리가 openai_compat(내부망 vLLM)일 때만 배선한다(verify 는 vLLM guided_json
-        # 에 의존 — anthropic/fake 비호환 → graceful skip). 토글(spec_driven_v2_verify_enabled)
-        # 이 꺼져 있어도 미배선(단일노드 degrade). 연결 정보(endpoint/model/timeout·재시도)는
-        # utility_llm(HttpLLM)이 단독 소유한다.
+        # retrieval.verify_slot — spec_driven_v2/composer_pipelined 슬롯 검증(relevance)을
+        # **worker 노드**(SECONDARY_LLM = secondary_llm, 없으면 default_llm 폴백)에서 돈다.
+        # relevance·multihop 을 둘 다 worker(secondary)로 보내 main(생성)과 물리 분리한다
+        # (지연 단축 — 검증 fan-out 이 생성 디코딩 큐와 안 경쟁). follow_up 과 동일 가드:
+        # secondary_llm pool 엔트리가 openai_compat(내부망 vLLM)일 때만 배선한다(verify 는 vLLM
+        # guided_json 에 의존 — anthropic/fake 비호환 → graceful skip). 토글
+        # (spec_driven_v2_verify_enabled)이 꺼져 있어도 미배선(단일노드 degrade). 연결 정보
+        # (endpoint/model/timeout·재시도)는 secondary_llm(HttpLLM)이 단독 소유한다.
         verify_slot_tool = None
         _verify_entry = next(
-            (e for e in settings.llm_pool if e.id == utility_llm_id), None
+            (e for e in settings.llm_pool if e.id == secondary_llm_id), None
         )
         if (
             settings.spec_driven_v2_verify_enabled
@@ -523,9 +525,9 @@ async def build_container(settings: Settings) -> AppContainer:
                 spec_driven_v2_verify_source = _verify_source
                 verify_slot_tool = RetrievalVerifySlotTool(
                     slot_verifier=SlotVerifierLlm(
-                        llm=utility_llm, source=_verify_source,
+                        llm=secondary_llm, source=_verify_source,
                         # 동시 슬롯 호출 전역 캡(러너 fan-out 전체에 걸침). 별도 튜너블 대신
-                        # max_queries 를 재사용한다 — N2 가 띄우는 슬롯×쿼리 규모와 Node1
+                        # max_queries 를 재사용한다 — N2 가 띄우는 슬롯×쿼리 규모와 worker
                         # 검증의 동시 슬롯 규모를 같은 손잡이로 함께 키운다.
                         max_concurrency=settings.spec_driven_max_queries,
                     ),
@@ -536,8 +538,8 @@ async def build_container(settings: Settings) -> AppContainer:
                 structlog.get_logger("retrieval.verify_slot.boot").warning(
                     "verify_slot_tool_disabled",
                     error=str(_exc),
-                    llm_id=utility_llm_id,
-                    hint="utility_llm is openai_compat but tool init failed; single-node degrade",
+                    llm_id=secondary_llm_id,
+                    hint="secondary_llm is openai_compat but tool init failed; single-node degrade",
                 )
 
         # 검색·범위·용어 도구. retrieval.search = 내부 retriever 재사용 + Reranker 정렬

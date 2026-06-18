@@ -4,3 +4,4 @@
 from app.application.agents import spec_driven_v1  # noqa: F401
 from app.application.agents import composer  # noqa: F401
 from app.application.agents import spec_driven_v2  # noqa: F401
+from app.application.agents import composer_pipelined  # noqa: F401
