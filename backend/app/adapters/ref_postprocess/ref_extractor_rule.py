@@ -298,6 +298,7 @@ You are given:
 - USER QUESTION: what the user originally wanted to know.
 - ANSWER SPEC: the evidence the answer must rest on (intent, structure, governing authority, the required slot).
 - SLOT SEARCH QUERY: the query that retrieved this chunk for the current slot.
+- SEARCH DIRECTION (optional): guidance from the verification step on what to look for, and from which angle, when searching the external document this chunk cites.
 - RETRIEVED CHUNK: a text chunk from the initial search results.
 
 For each citation to a SEPARATE document, output one entry with:
@@ -345,6 +346,8 @@ Rules for follow-up queries:
 1. Only target documents that appear in your (necessity-filtered) references list.
 2. If no reference is needed, return an empty follow_up_queries array.
 3. Be specific to the user's question angle — avoid generic queries.
+4. If a SEARCH DIRECTION is provided, treat it as the primary steer for the query — \
+phrase query_text to look for exactly what the SEARCH DIRECTION asks, in the cited document.
 
 Return ONLY the JSON object matching the schema. No prose."""
 
@@ -359,6 +362,7 @@ async def extract_refs_with_follow_up(
     answer_spec: str | None = None,
     slot_query: str | None = None,
     necessity_only: bool = False,
+    search_direction: str | None = None,
 ) -> tuple[list[RawRef], list[dict]]:
     """참조 추출 + follow-up 쿼리 생성을 단일 LLM 호출로 수행.
 
@@ -366,6 +370,10 @@ async def extract_refs_with_follow_up(
     `necessity_only=True` 면 SYSTEM_PROMPT_NECESSITY 로 "답변에 꼭 필요한" 참조만 선별하고,
     user content 에 ANSWER SPEC·SLOT SEARCH QUERY 블록을 싣는다. 미지정 시 기존 동작
     (전체 추출, SYSTEM_PROMPT_WITH_FOLLOW_UP)과 byte-identical.
+
+    `search_direction` 은 verify_slot 이 이 멀티홉 청크에 부여한 재검색 방향(1문장, 옵셔널 —
+    necessity_only 경로에서만 의미). 주어지면 user content 에 SEARCH DIRECTION 블록을 실어
+    재검색 쿼리가 이 방향을 우선 반영하게 한다. None → 기존 동작과 byte-identical.
 
     반환: (raw_refs, raw_follow_ups)
     raw_follow_ups는 LLM 원본 dict 리스트 (target_identifiers 포함).
@@ -379,6 +387,9 @@ async def extract_refs_with_follow_up(
             user_parts.append("")
         if slot_query:
             user_parts.append(f"SLOT SEARCH QUERY: {slot_query}")
+            user_parts.append("")
+        if search_direction:
+            user_parts.append(f"SEARCH DIRECTION: {search_direction}")
             user_parts.append("")
     else:
         system_prompt = SYSTEM_PROMPT_WITH_FOLLOW_UP
@@ -503,11 +514,12 @@ async def resolve_text_with_follow_up(
     answer_spec: str | None = None,
     slot_query: str | None = None,
     necessity_only: bool = False,
+    search_direction: str | None = None,
 ) -> dict:
     """검색 에이전트 진입점: 참조 추출 + 해소 + follow-up 쿼리(source_id 매핑 완료).
 
-    `answer_spec`/`slot_query`/`necessity_only` 는 spec_driven_v2 N3.5 고도화용(옵셔널 —
-    extract_refs_with_follow_up 으로 전달). 미지정 시 기존 동작과 동일.
+    `answer_spec`/`slot_query`/`necessity_only`/`search_direction` 은 spec_driven_v2 N3.5
+    고도화용(옵셔널 — extract_refs_with_follow_up 으로 전달). 미지정 시 기존 동작과 동일.
 
     반환: {
         "raw_refs": list[RawRef],
@@ -525,6 +537,7 @@ async def resolve_text_with_follow_up(
         answer_spec=answer_spec,
         slot_query=slot_query,
         necessity_only=necessity_only,
+        search_direction=search_direction,
     )
     resolved = resolver.resolve_many(raw_refs)
     follow_up_queries = _resolve_follow_up_targets(

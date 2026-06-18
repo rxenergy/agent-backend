@@ -56,6 +56,7 @@ class LlmRefExtractor:
         answer_spec: str | None = None,
         slot_query: str | None = None,
         necessity_only: bool = False,
+        search_direction: str | None = None,
     ) -> list[dict[str, Any]]:
         result = await resolve_text_with_follow_up(
             query_text=query_text,
@@ -68,6 +69,7 @@ class LlmRefExtractor:
             answer_spec=answer_spec,
             slot_query=slot_query,
             necessity_only=necessity_only,
+            search_direction=search_direction,
         )
         return [
             {

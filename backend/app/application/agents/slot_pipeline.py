@@ -21,6 +21,7 @@ docs/plans/spec_driven_slot_pipeline_streaming.design.v1.md(배리어 제거 스
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,6 +39,87 @@ _TRACER = get_tracer("agent")
 
 _VERIFY_TOOL = "retrieval.verify_slot"
 _FOLLOW_UP_TOOL = "retrieval.follow_up"
+_FETCH_CHUNKS_TOOL = "document.fetch_chunks"  # neighbor_requests 이웃 보강(id 조회)
+
+# chunk_id `<prefix>_c<NNNN>` 의 prefix 와 ordinal 분해(이웃 id 계산용).
+_CHUNK_ORD_RE = re.compile(r"^(.*_c)(\d+)$")
+
+# CFR packageId(=source_id)의 연도 추출용. "CFR-1997-title10-vol1" → 1997.
+# ref_resolver._CFR_YEAR_RE(adapter)와 같은 발상이나, application 레이어 자족성을
+# 위해 여기 작은 정규식을 따로 둔다(adapter import 회피).
+_PKG_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+
+
+def _content_key(c: RetrievedChunk) -> str | None:
+    """동일내용 판정 키 = 정규화된 본문(text 우선, 없으면 snippet). 공백 collapse +
+    lower + strip. 본문이 비면 None(=빈본문끼리 오병합 방지 — 호출부가 고유키로 분리)."""
+    body = (c.text or c.snippet or "").strip()
+    if not body:
+        return None
+    return " ".join(body.lower().split())
+
+
+def _recency_sort_key(c: RetrievedChunk) -> tuple[str, int, float]:
+    """최신 우선 정렬 키(max 로 1등 선택). response_date(YYYY-MM-DD 는 사전식==시간순)
+    → packageId 연도(source_id) → score 순. 메타 전무면 ("",0,score)로 밀려 score 가
+    자연 tiebreak — 동일내용은 score 최고 1개만 남는다(사용자 결정)."""
+    date = c.response_date or ""
+    m = _PKG_YEAR_RE.search(c.source_id or "")
+    year = int(m.group()) if m else 0
+    return (date, year, c.score)
+
+
+def dedupe_latest_version(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    """본문 내용이 동일한 청크 그룹마다 최신 버전 1개만 남긴다(예외 안전).
+
+    NRC 코퍼스의 CFR 연도판(CFR-1997-… vs CFR-2025-…)처럼 본문이 글자 그대로 같고
+    문서 버전만 다른 중복을, verify_slot LLM 호출 직전에 최신판 1개로 접는다.
+
+      - 그룹핑: _content_key(정규화 본문 완전일치). 빈 본문은 고유키(chunk_id)로 두어
+        절대 합쳐지지 않게 한다(빈 텍스트끼리 오병합 방지).
+      - 그룹 내 선택: _recency_sort_key 최댓값 1개(response_date→packageId 연도→score).
+      - 입력 *원순서* 보존(keep id 집합으로 원리스트 필터)."""
+    by_group: dict[str, list[RetrievedChunk]] = {}
+    for c in chunks:
+        key = _content_key(c) or f"\x00{c.chunk_id}"  # 빈본문 → 고유키
+        by_group.setdefault(key, []).append(c)
+    keep_ids: set[str] = set()
+    for grp in by_group.values():
+        winner = max(grp, key=_recency_sort_key)  # date→year→score desc
+        keep_ids.add(winner.chunk_id)
+    return [c for c in chunks if c.chunk_id in keep_ids]
+
+
+def compute_neighbor_ids(neighbor_requests: dict[str, str]) -> list[str]:
+    """verify_slot 의 neighbor_requests(chunk_id → "before"|"after"|"both")를 실제 이웃
+    chunk_id 리스트로 변환한다(결정형 — 모델이 방향만 주고 이웃 id 는 코드가 계산).
+
+    chunk_id 가 `<prefix>_c<NNNN>` 형식일 때만 ordinal±1 로 이웃을 만든다. before→ord-1,
+    after→ord+1, both→양쪽. ord-1<0 은 제외, 형식 미매칭 chunk 는 skip. zero-pad 폭은 원본
+    자릿수를 유지하되 자릿수가 늘면 자연 확장(9999→10000). 중복 이웃 id 는 한 번만 낸다.
+    앵커/타 necessary 와 겹치는 id 는 호출부 dedup(by_id)이 거른다."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for cid, direction in neighbor_requests.items():
+        m = _CHUNK_ORD_RE.match(cid or "")
+        if not m:
+            continue
+        prefix, digits = m.group(1), m.group(2)
+        ordinal = int(digits)
+        width = len(digits)
+        targets: list[int] = []
+        if direction in ("before", "both"):
+            targets.append(ordinal - 1)
+        if direction in ("after", "both"):
+            targets.append(ordinal + 1)
+        for t in targets:
+            if t < 0:
+                continue
+            nid = f"{prefix}{t:0{width}d}"
+            if nid != cid and nid not in seen:
+                seen.add(nid)
+                out.append(nid)
+    return out
 
 
 @dataclass
@@ -53,6 +135,9 @@ class _SlotPipelineResult:
     rationale: str
     fq_list: list[dict[str, Any]] = field(default_factory=list)   # Node2 외부참조 선별 결과
     second_pass: list[RetrievedChunk] = field(default_factory=list)  # Stage4 검증 *통과* 2차 청크
+    # Stage 1.5 — neighbor_requests(앞/뒤 문맥 보강)로 가져온 이웃 청크. necessary 와 동급
+    # always-include 로 N4 CONTEXT 에 합친다(잘린 본문 보강이므로). by_id/necessary 중복 제외.
+    neighbor_chunks: list[RetrievedChunk] = field(default_factory=list)
     tool_results: list[Any] = field(default_factory=list)         # record() 용(순차 기록)
     # Stage 4 — 2차 검색 결과 Node1 재검증. second_pass 는 이미 통과 청크만 담는다(검증 후
     # trim). num_second_pass 는 검증 *입력* 수, second_method 는 재검증 경로
@@ -122,6 +207,9 @@ class _SlotPipelineMixin:
         — gather task 마다 contextvars 가 독립이라 슬롯끼리 섞이지 않는다(Phoenix 에서
         agent.run > agent.slot.<name> > {도구} 로 슬롯 단위로 읽힌다)."""
         tool_results: list[Any] = list(pre_tool_results or [])
+        # verify LLM 호출 직전 — 본문 동일 청크는 최신판 1개로 접는다(CFR 연도판 등).
+        # by_id 부터 일관되게 축소된 집합을 보도록 진입부에서 한 번 dedup.
+        slot_chunks = dedupe_latest_version(slot_chunks)
         if not slot_chunks:
             # 0건 슬롯 — verify 호출 낭비 방지(빈 기여). span 도 열지 않는다. 단 1차 검색
             # tool_results(있으면)는 record 되도록 그대로 싣는다.
@@ -143,6 +231,8 @@ class _SlotPipelineMixin:
             necessary_ids: list[str] = list(by_id)   # fallback 기본 = 전량 필요
             multihop_ids: list[str] = []
             rationale = ""
+            search_directions: dict[str, str] = {}   # 멀티홉 청크 → 재검색 방향
+            neighbor_requests: dict[str, str] = {}    # necessary 청크 → 이웃 보강 방향
             try:
                 v = await self._tools.invoke(  # type: ignore[attr-defined]
                     _VERIFY_TOOL,
@@ -163,6 +253,18 @@ class _SlotPipelineMixin:
                     necessary_ids = nids
                     multihop_ids = mids
                     rationale = str(v.output.get("rationale", ""))
+                    # 멀티홉 청크별 재검색 방향(follow_up 에 전달) + 이웃 보강 요청(Stage 1.5).
+                    # 키는 각각 multihop/necessary 부분집합으로 한 번 더 제한(어댑터가 이미 필터).
+                    search_directions = {
+                        k: str(sd)
+                        for k, sd in (v.output.get("multihop_search_directions") or {}).items()
+                        if k in by_id
+                    }
+                    neighbor_requests = {
+                        k: str(d)
+                        for k, d in (v.output.get("neighbor_requests") or {}).items()
+                        if k in set(nids)
+                    }
             except Exception:  # noqa: BLE001 — ToolUnknown/실패 → 단일노드 degrade(전량 필요).
                 method = "fallback"
                 necessary_ids = list(by_id)
@@ -172,6 +274,31 @@ class _SlotPipelineMixin:
 
             necessary = [by_id[i] for i in necessary_ids if i in by_id]
             multihop = [by_id[i] for i in multihop_ids if i in by_id]
+
+            # === Stage 1.5 — necessary 청크 앞/뒤 문맥 보강(neighbor_requests) ===
+            # verify 가 방향만 주면(before/after/both) 코드가 이웃 chunk_id 를 ordinal 로 계산해
+            # document.fetch_chunks 로 가져온다. by_id(이 슬롯 1차)·이미 necessary 인 id 는 제외.
+            # 미배선/실패는 graceful skip(이웃 없이 진행 — local fake 는 빈 결과).
+            neighbor_chunks: list[RetrievedChunk] = []
+            neighbor_ids = compute_neighbor_ids(neighbor_requests)
+            fetch_ids = [nid for nid in neighbor_ids if nid not in by_id]
+            if fetch_ids:
+                try:
+                    nb = await self._tools.invoke(  # type: ignore[attr-defined]
+                        _FETCH_CHUNKS_TOOL,
+                        {"chunk_ids": fetch_ids},
+                        ctx,
+                    )
+                    tool_results.append(nb)
+                    if nb.status == "success" and nb.output:
+                        seen_nb: set[str] = set()
+                        for c in _parse_chunks(nb.output):
+                            if c.chunk_id in by_id or c.chunk_id in seen_nb:
+                                continue
+                            seen_nb.add(c.chunk_id)
+                            neighbor_chunks.append(c)
+                except Exception:  # noqa: BLE001 — 미배선/실패 → 이웃 없이 진행(graceful).
+                    neighbor_chunks = []
 
             # === Stage 2 — Node2 외부참조 선별(enhanced follow_up, necessity_only) ===
             fq_list: list[dict[str, Any]] = []
@@ -185,6 +312,8 @@ class _SlotPipelineMixin:
                             "answer_spec": spec_block,
                             "slot_query": slot_query,
                             "necessity_only": True,
+                            # verify 가 멀티홉 청크별로 부여한 재검색 방향(없으면 빈 → 기존 동작).
+                            "search_directions": search_directions,
                         },
                         ctx,
                     )
@@ -236,6 +365,8 @@ class _SlotPipelineMixin:
             # 2차 청크를 동일 retrieval.verify_slot 도구로 한 번 더 검증해 *답변에 필요한* 청크만
             # N4 로 보낸다. 멀티홉 출력은 무시한다(3차 홉 없음 — 두번째 Node1 호출 후 바로 N4).
             # 미배선/실패/fallback → 2차 전량 보존(단일노드 degrade). 빈 2차는 스킵(호출 낭비 방지).
+            # 2차 검색도 본문 동일 중복을 가질 수 있어 재검증 직전 최신판 1개로 접는다.
+            second_pass_raw = dedupe_latest_version(second_pass_raw)
             second_pass = second_pass_raw
             num_second_pass = len(second_pass_raw)
             second_method = "skip"
@@ -276,6 +407,7 @@ class _SlotPipelineMixin:
             oi.set_io(slot_span, output_value={
                 "method": method,
                 "num_necessary": len(necessary),
+                "num_neighbor": len(neighbor_chunks),
                 "num_multihop": len(multihop_ids),
                 "num_second_pass": num_second_pass,
                 "num_second_necessary": len(second_pass),
@@ -286,7 +418,8 @@ class _SlotPipelineMixin:
         return _SlotPipelineResult(
             slot_name=slot_name, method=method, num_first_pass=len(slot_chunks),
             necessary=necessary, multihop_ids=multihop_ids, rationale=rationale,
-            fq_list=fq_list, second_pass=second_pass, tool_results=tool_results,
+            fq_list=fq_list, second_pass=second_pass, neighbor_chunks=neighbor_chunks,
+            tool_results=tool_results,
             num_second_pass=num_second_pass, second_method=second_method,
             rationale2=rationale2,
         )
@@ -301,12 +434,14 @@ class SlotSearchResult:
     necessary: list[RetrievedChunk]
     second_pass: list[RetrievedChunk]
     pipeline: _SlotPipelineResult     # 핀/근거/tool_results 원본
+    neighbor: list[RetrievedChunk] = field(default_factory=list)  # Stage1.5 이웃 보강 청크
 
     @property
     def context_chunks(self) -> list[RetrievedChunk]:
-        """이 슬롯 생성 CONTEXT = 검증 통과 1차(necessary) ∪ 2차(second_pass), score desc."""
+        """이 슬롯 생성 CONTEXT = 검증 통과 1차(necessary) ∪ 이웃 보강(neighbor) ∪
+        2차(second_pass), score desc."""
         by_id: dict[str, RetrievedChunk] = {}
-        for c in (*self.necessary, *self.second_pass):
+        for c in (*self.necessary, *self.neighbor, *self.second_pass):
             prev = by_id.get(c.chunk_id)
             if prev is None or c.score > prev.score:
                 by_id[c.chunk_id] = c

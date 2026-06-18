@@ -26,6 +26,10 @@ from opentelemetry import trace
 
 from app.application.agents.events import emit_step
 from app.application.agents.registry import AgentDeps, register_variant
+from app.application.agents.slot_pipeline import (
+    _FETCH_CHUNKS_TOOL,
+    compute_neighbor_ids,
+)
 from app.application.agents.spec_driven_v1 import (
     _NOISE_FILTER,
     _SEARCH_TOOL,
@@ -63,6 +67,9 @@ class _SlotPipelineResult:
     rationale: str
     fq_list: list[dict[str, Any]] = field(default_factory=list)   # Node2 외부참조 선별 결과
     second_pass: list[RetrievedChunk] = field(default_factory=list)  # Stage4 검증 *통과* 2차 청크
+    # Stage 1.5 — neighbor_requests(앞/뒤 문맥 보강)로 가져온 이웃 청크. necessary 와 동급
+    # always-include 로 N4 CONTEXT 에 합친다(잘린 본문 보강이므로).
+    neighbor_chunks: list[RetrievedChunk] = field(default_factory=list)
     tool_results: list[Any] = field(default_factory=list)         # record() 용(순차 기록)
     # Stage 4 — 2차 검색 결과 Node2 재검증(검색 후엔 항상 relevance). second_pass 는 이미
     # 통과 청크만 담는다(검증 후 trim). num_second_pass 는 검증 *입력* 수, second_method 는
@@ -147,13 +154,15 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
         total_multihop = 0
         total_second_pass = 0
         total_second_necessary = 0
+        total_neighbor = 0
         slots_with_multihop = 0
         for slot_name, res in zip(slot_order, slot_results):
             if isinstance(res, BaseException):
                 # 슬롯 파이프라인 전체 실패 → 그 슬롯은 기여 없음(graceful). 핀에 남긴다.
                 verify_pins.append({"slot": slot_name, "method": "error",
                                     "num_first_pass": len(chunks_by_slot.get(slot_name, [])),
-                                    "num_necessary": 0, "num_multihop": 0,
+                                    "num_necessary": 0, "num_neighbor": 0,
+                                    "num_multihop": 0,
                                     "num_second_pass": 0, "num_second_necessary": 0,
                                     "second_method": "error"})
                 verify_reason_lines.append(f"- [{slot_name}] 검증 실패(graceful skip)")
@@ -163,10 +172,16 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
             for c in res.necessary:
                 if c.chunk_id not in necessary_by_id:
                     necessary_by_id[c.chunk_id] = c
+            # 이웃 보강 청크 — necessary 와 동급 always-include(잘린 본문 보강). 1차 비필요로
+            # trim 되지 않도록 necessary_by_id 에 함께 넣는다(2차와 달리 score-순 채움 아님).
+            for c in res.neighbor_chunks:
+                if c.chunk_id not in necessary_by_id:
+                    necessary_by_id[c.chunk_id] = c
             for c in res.second_pass:
                 if c.chunk_id not in necessary_by_id and c.chunk_id not in second_by_id:
                     second_by_id[c.chunk_id] = c
             total_multihop += len(res.multihop_ids)
+            total_neighbor += len(res.neighbor_chunks)
             if res.multihop_ids:
                 slots_with_multihop += 1
             total_second_pass += res.num_second_pass
@@ -181,6 +196,7 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
                 "slot": slot_name, "method": res.method,
                 "num_first_pass": res.num_first_pass,
                 "num_necessary": len(res.necessary),
+                "num_neighbor": len(res.neighbor_chunks),
                 "num_multihop": len(res.multihop_ids),
                 "rationale_present": bool(res.rationale),
                 "num_second_pass": res.num_second_pass,
@@ -192,6 +208,8 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
             # 마커를 붙여 UI thinking 에 명시한다(adapter 가 채운 rationale 도 근거로 노출).
             line = (f"- [{slot_name}] 1차 {res.num_first_pass}개 → 필요 "
                     f"{len(res.necessary)}개, 멀티홉 {len(res.multihop_ids)}개")
+            if res.neighbor_chunks:
+                line += f", 이웃 보강 {len(res.neighbor_chunks)}개"
             if res.method == "fallback":
                 line += " ⚠ 검증 호출 실패 → 전량 보존"
             if res.rationale:
@@ -211,6 +229,7 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
         run_span = trace.get_current_span()
         run_span.set_attribute("verify.num_slots", len(slot_order))
         run_span.set_attribute("verify.total_necessary", len(necessary_by_id))
+        run_span.set_attribute("verify.total_neighbor", total_neighbor)
         run_span.set_attribute("verify.total_multihop", total_multihop)
         run_span.set_attribute("verify.added_second_pass", len(second_by_id))
         run_span.set_attribute("verify.second_pass_total", total_second_pass)
@@ -279,6 +298,7 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
                 "node2": True,
                 "num_slots": len(slot_order),
                 "total_necessary": len(necessary_ids),
+                "total_neighbor": total_neighbor,
                 "total_multihop": total_multihop,
                 "added_second_pass": len(second_by_id),
                 # Stage 4 — 2차 검색 결과 Node2 재검증(검색 후 항상 relevance).
@@ -345,6 +365,8 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
             necessary_ids: list[str] = list(by_id)   # fallback 기본 = 전량 필요
             multihop_ids: list[str] = []
             rationale = ""
+            search_directions: dict[str, str] = {}   # 멀티홉 청크 → 재검색 방향
+            neighbor_requests: dict[str, str] = {}    # necessary 청크 → 이웃 보강 방향
             try:
                 v = await self._tools.invoke(
                     _VERIFY_TOOL,
@@ -365,6 +387,16 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
                     necessary_ids = nids
                     multihop_ids = mids
                     rationale = str(v.output.get("rationale", ""))
+                    search_directions = {
+                        k: str(sd)
+                        for k, sd in (v.output.get("multihop_search_directions") or {}).items()
+                        if k in by_id
+                    }
+                    neighbor_requests = {
+                        k: str(d)
+                        for k, d in (v.output.get("neighbor_requests") or {}).items()
+                        if k in set(nids)
+                    }
             except Exception:  # noqa: BLE001 — ToolUnknown/실패 → 단일노드 degrade(전량 필요).
                 method = "fallback"
                 necessary_ids = list(by_id)
@@ -374,6 +406,31 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
 
             necessary = [by_id[i] for i in necessary_ids if i in by_id]
             multihop = [by_id[i] for i in multihop_ids if i in by_id]
+
+            # === Stage 1.5 — necessary 청크 앞/뒤 문맥 보강(neighbor_requests) ===
+            # verify 가 방향만 주면(before/after/both) 코드가 이웃 chunk_id 를 ordinal 로 계산해
+            # document.fetch_chunks 로 가져온다. by_id(이 슬롯 1차)·이미 necessary 인 id 는 제외.
+            # 미배선/실패는 graceful skip(이웃 없이 진행 — local fake 는 빈 결과).
+            neighbor_chunks: list[RetrievedChunk] = []
+            neighbor_ids = compute_neighbor_ids(neighbor_requests)
+            fetch_ids = [nid for nid in neighbor_ids if nid not in by_id]
+            if fetch_ids:
+                try:
+                    nb = await self._tools.invoke(
+                        _FETCH_CHUNKS_TOOL,
+                        {"chunk_ids": fetch_ids},
+                        ctx,
+                    )
+                    tool_results.append(nb)
+                    if nb.status == "success" and nb.output:
+                        seen_nb: set[str] = set()
+                        for c in _parse_chunks(nb.output):
+                            if c.chunk_id in by_id or c.chunk_id in seen_nb:
+                                continue
+                            seen_nb.add(c.chunk_id)
+                            neighbor_chunks.append(c)
+                except Exception:  # noqa: BLE001 — 미배선/실패 → 이웃 없이 진행(graceful).
+                    neighbor_chunks = []
 
             # === Stage 2 — Node2 외부참조 선별(enhanced follow_up, necessity_only) ===
             fq_list: list[dict[str, Any]] = []
@@ -387,6 +444,8 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
                             "answer_spec": spec_block,
                             "slot_query": slot_query,
                             "necessity_only": True,
+                            # verify 가 멀티홉 청크별로 부여한 재검색 방향(없으면 빈 → 기존 동작).
+                            "search_directions": search_directions,
                         },
                         ctx,
                     )
@@ -478,6 +537,7 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
             oi.set_io(slot_span, output_value={
                 "method": method,
                 "num_necessary": len(necessary),
+                "num_neighbor": len(neighbor_chunks),
                 "num_multihop": len(multihop_ids),
                 "num_second_pass": num_second_pass,
                 "num_second_necessary": len(second_pass),
@@ -488,7 +548,8 @@ class SpecDrivenV2Runner(SpecDrivenRunner):
         return _SlotPipelineResult(
             slot_name=slot_name, method=method, num_first_pass=len(slot_chunks),
             necessary=necessary, multihop_ids=multihop_ids, rationale=rationale,
-            fq_list=fq_list, second_pass=second_pass, tool_results=tool_results,
+            fq_list=fq_list, second_pass=second_pass, neighbor_chunks=neighbor_chunks,
+            tool_results=tool_results,
             num_second_pass=num_second_pass, second_method=second_method,
             rationale2=rationale2,
         )
