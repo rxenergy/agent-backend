@@ -1,4 +1,4 @@
-"""SlotVerifierLlm — 슬롯당 단일 호출 검증 단위 테스트(spec_driven_v2 Node1 = main).
+"""SlotVerifierLlm — 슬롯당 단일 호출 검증 단위 테스트(spec_driven_v2 Node2 = sub).
 
 검증이 슬롯 1개의 청크 전체를 한 프롬프트로 합쳐 **단일 LLM 호출**로 판정하고, 모델이 낸
 necessary/multihop 식별자 리스트를 입력 부분집합으로 필터하는지 — vLLM 컨테이너 없이 fake

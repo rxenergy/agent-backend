@@ -236,9 +236,9 @@ class SpecDrivenGenerationV2Source(SpecDrivenGenerationSource):
 
 
 class SpecDrivenVerifySource(_SpecDrivenPromptSource):
-    """spec_driven_v2 Node1 — 슬롯 단위 검증 프롬프트 source(json_schema guided).
+    """spec_driven_v2 Node2 — 슬롯 단위 검증 프롬프트 source(json_schema guided).
     슬롯 1개의 청크 전체를 한 프롬프트로 합쳐 단일 호출 → 필요 청크 + 멀티홉 청크 식별자
-    리스트 산출(verify_slot_v2). utility_llm(Node1 = main)에서 호출된다."""
+    리스트 산출(verify_slot_v2). secondary_llm(Node2 = sub)에서 호출된다."""
 
     registry_key = "spec_driven_verify_prompts"
     has_schema = True
