@@ -327,7 +327,6 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         slot_outputs: list[dict[str, Any]] = []
         slot_pins: list[dict[str, Any]] = []
         verify_pins: list[dict[str, Any]] = []
-        verify_reason_lines: list[str] = []
         fq_all: list[dict[str, Any]] = []
         streamed_parts: list[str] = []
         # 전역 citation 관리자 — 슬롯 CONTEXT 로 넘어가기 *전* 에 전역 cite-N 을 배정해 모델이
@@ -346,7 +345,9 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             # 슬롯 검색-검증 tool_results 를 *여기서* 순차 record(결정성·순서 — §6).
             for r in pipe.tool_results:
                 record(r)
-            # 슬롯 검증 핀/근거(v2 와 동형 — UI thinking).
+            # 슬롯 검증 핀/근거 — 재현 핀(_build_qu_pin → spec_driven.verify)과 OTel 에
+            # 남는 구조화 기록. rationale/rationale2(검증 근거 문장)도 함께 실어 UI thinking
+            # 비활성화 후에도 관측/재현에서 검증 근거를 그대로 읽을 수 있게 한다.
             verify_pins.append({
                 "slot": slot.name, "method": pipe.method,
                 "num_first_pass": pipe.num_first_pass,
@@ -355,22 +356,9 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 "num_second_pass": pipe.num_second_pass,
                 "num_second_necessary": len(pipe.second_pass),
                 "second_method": pipe.second_method,
+                "rationale": pipe.rationale,
+                "rationale2": pipe.rationale2,
             })
-            line = (f"- [{slot.name}] 1차 {pipe.num_first_pass}개 → 필요 "
-                    f"{len(pipe.necessary)}개, 멀티홉 {len(pipe.multihop_ids)}개")
-            if pipe.method == "fallback":
-                line += " ⚠ 검증 호출 실패 → 전량 보존"
-            if pipe.rationale:
-                line += f"\n    근거: {pipe.rationale}"
-            verify_reason_lines.append(line)
-            if pipe.num_second_pass > 0:
-                sline = (f"  · 2차 검색 {pipe.num_second_pass}개 → 채택 "
-                         f"{len(pipe.second_pass)}개")
-                if pipe.second_method == "fallback":
-                    sline += " ⚠ 검증 호출 실패 → 전량 보존"
-                if pipe.rationale2:
-                    sline += f"\n    근거: {pipe.rationale2}"
-                verify_reason_lines.append(sline)
             for fq in pipe.fq_list:
                 fq_all.append(fq)
             total_multihop += len(pipe.multihop_ids)
@@ -402,11 +390,17 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             await emit_step("slot_generation", "started", slot=slot.name,
                             facet=slot.facet or "-", num_chunks=len(sub_chunks),
                             index=idx)
-            # 슬롯 검증 근거를 *그 슬롯 본문 직전* 에 방출(스트리밍 순서 — §5.1). composer 의
-            # 일괄 reasoning 대신 슬롯별로 흘려 thinking↔본문 인접(#24295).
-            await emit_reasoning(
-                f"\n**슬롯 검증 (Node1) — {slot.name}**\n{verify_reason_lines[-1]}\n"
-            )
+            # NOTE: 슬롯 검색-검증(Node1) thinking 의 UI 노출을 비활성화한다. 검색-검증이
+            # 생성과 병렬로 도는 파이프라인에서 이 reasoning 방출이 생성 본문 스트림과 섞여
+            # 답변이 깨지는(thinking 이 본문에 새는) 현상이 있었다. 검증 근거 자체는
+            # verify_pins(rationale/rationale2 포함)로 그대로 모아 재현 핀(_build_qu_pin →
+            # spec_driven.verify)과 OTel span(agent.slot.<name> output_value)에 남으므로
+            # 관측/재현은 영향 없다 — UI thinking 으로 흘리는 한 줄만 제거한다.
+            # await emit_reasoning(
+            #     f"\n**슬롯 검증 (Node1) — {slot.name}**\n"
+            #     f"- [{slot.name}] 1차 {pipe.num_first_pass}개 → 필요 "
+            #     f"{len(pipe.necessary)}개, 멀티홉 {len(pipe.multihop_ids)}개\n"
+            # )
 
             with _TRACER.start_as_current_span("llm.slot_generation") as ss:
                 ss.set_attribute("slot.name", slot.name)

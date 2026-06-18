@@ -269,8 +269,10 @@ async def test_pipelined_slot_generation_with_global_cite_remap() -> None:
 
 
 @pytest.mark.asyncio
-async def test_slot_verify_rationale_streams_before_each_slot() -> None:
-    # 슬롯 검증 근거가 *그 슬롯별로* reasoning 에 실린다(스트리밍 순서 — composer 일괄 대신).
+async def test_slot_verify_thinking_not_streamed_but_rationale_in_pin() -> None:
+    # 검색-검증(Node1) thinking 의 UI 노출은 비활성화 — 생성과 병렬로 도는 파이프라인에서
+    # 본문 스트림과 섞여 답변이 깨지던 현상 제거. 검증 근거(rationale)는 재현 핀에 남아
+    # 관측/재현은 영향 없다.
     with tempfile.TemporaryDirectory() as tmp:
         runner = VariantRegistry.build(
             COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
@@ -280,9 +282,14 @@ async def test_slot_verify_rationale_streams_before_each_slot() -> None:
             if ev.kind == "reasoning":
                 reasoning_parts.append(ev.payload.get("content", ""))
         reasoning = "".join(reasoning_parts)
-        assert "**슬롯 검증 (Node1) — governing_clause**" in reasoning
-        assert "**슬롯 검증 (Node1) — requirement_text**" in reasoning
-        assert "governing_clause 청크 전부 필요" in reasoning
+        # UI thinking 에 슬롯 검증 블록이 더는 새지 않는다.
+        assert "슬롯 검증 (Node1)" not in reasoning
+        assert "청크 전부 필요" not in reasoning
+        # 그러나 검증 근거는 재현 핀(spec_driven.verify.slots[].rationale)에 남는다.
+        pin = _event(tmp)["query_understanding"]["spec_driven"]
+        rationales = [s.get("rationale") for s in pin["verify"]["slots"]]
+        assert "governing_clause 청크 전부 필요" in rationales
+        assert "requirement_text 청크 전부 필요" in rationales
 
 
 @pytest.mark.asyncio
