@@ -35,7 +35,7 @@ from app.domain.errors import RefusalReason, VerificationStatus
 from app.domain.interaction import AgentRequest, AgentResponse, ToolCallRecord
 from app.domain.memory import MemoryRef, MemoryReviewStatus, StalenessStatus
 from app.domain.retrieval import RetrievedChunk
-from app.domain.spec_driven import AnswerSpec, SpecSlot
+from app.domain.spec_driven import PERSONAS, AnswerSpec, Persona, SpecSlot
 from app.observability import openinference as oi
 from app.observability.logging import get_logger
 from app.observability.metrics import get_metrics
@@ -91,9 +91,18 @@ class ComposerRunner(SpecDrivenRunner):
         synthesize: bool = True,
         slot_context_k: int = 12,
         prior_full_k: int | None = 2,
+        persona: Persona | None = None,
+        persona_profile_source: Any = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
+        # 다중 페르소나(설계 composer_persona_framework.design.v1) — variant 가 생성 시점에
+        # 1개를 바인딩한다(런타임 추론 없음 — drift·오추론 차단). None=중립 baseline(기존
+        # `composer` variant — 현행 동작 불변, 회귀 0). persona 소비(N1 spine·N2 우선순위·
+        # N4 register)는 단계 B~D 에서 추가 — 단계 A 는 바인딩·전파·재현 핀만(동작 net-neutral).
+        # persona_profile_source: registry persona fragment(미배선이면 None — graceful).
+        self._persona = persona
+        self._persona_profile_source = persona_profile_source
         # 슬롯/종합/검수 프롬프트 source(registry 호스팅). 미배선(None)이면 슬롯 프롬프트는
         # 계승한 generation_source(단일 N4 프롬프트)를 슬롯 범위로 재사용하고, 종합은
         # 결정론 이어붙이기로 떨어진다(graceful — 프롬프트 없이도 동작, 점진 도입).
@@ -220,7 +229,8 @@ class ComposerRunner(SpecDrivenRunner):
             )
             spec = await n1.instantiate(request.query_text,
                                         reasoning_label="답변 사양 정의",
-                                        prior_context=prior_context)
+                                        prior_context=prior_context,
+                                        persona_profile=self._persona_profile())
             await emit_step("define_spec", "ok", method=spec.instantiation_method,
                             num_slots=len(spec.required_slots),
                             num_refs=len(spec.explicit_references))
@@ -395,6 +405,13 @@ class ComposerRunner(SpecDrivenRunner):
                 "spec_driven": {
                     "route": "retrieval",
                     "triage": triage_pin,
+                    # 페르소나 재현 핀 — variant_id(=composer_reviewer 등)가 이미 자명히
+                    # 기록하나 보강(EU AI Act Art.12 / 설계 §5.3). 중립 baseline 은 None.
+                    "persona": (
+                        {"persona_id": self._persona.persona_id,
+                         "profile_source_id": self._persona.profile_source_id}
+                        if self._persona else None
+                    ),
                     "spec": {
                         "intent": spec.intent,
                         "method": spec.instantiation_method,
@@ -1198,6 +1215,12 @@ class ComposerRunner(SpecDrivenRunner):
     # ------------------------------------------------------------------
     # 보조 — model_options / 이어붙이기 / 요지 추출 / cite 범위 가드.
     # ------------------------------------------------------------------
+    def _persona_profile(self) -> str | None:
+        """바인딩된 페르소나의 프로필 fragment 본문(N1/N2/N4 앞에 prepend, 설계 §10).
+        중립(persona=None)이거나 source 미배선이면 None → 현행 동작 불변(net-neutral)."""
+        src = self._persona_profile_source
+        return src.prompt_body if (self._persona and src) else None
+
     def _slot_model_options(self) -> dict[str, Any]:
         if self._slot_source and self._slot_source.model_options:
             opts = dict(self._slot_source.model_options)
@@ -1287,8 +1310,14 @@ class ComposerRunner(SpecDrivenRunner):
         return re.sub(r"[ \t]{2,}", " ", _CITE_N_RE.sub(_sub, text)).strip()
 
 
-@register_variant(COMPOSER_VARIANT_ID)
-def _build_composer(spec: VariantSpec, deps: AgentDeps) -> "ComposerRunner":
+def _make_composer(
+    spec: VariantSpec, deps: AgentDeps, persona: Persona | None
+) -> "ComposerRunner":
+    """공통 팩토리 — persona 만 달리해 동일한 `ComposerRunner` 를 만든다(설계
+    composer_persona_framework.design.v1 §4). 중립(`composer`, persona=None)과 3개 페르소나
+    variant 가 *동일 프롬프트 source* 를 공유하고, 차이는 persona profile fragment + Persona
+    구조화 신호로만 낸다(프롬프트 복제 금지). persona profile source 는 미배선이면 None
+    (graceful — 단계 A 는 바인딩만, 소비는 단계 B~D)."""
     t = deps.tunables
     # 책임 재분배(split.design.v1): composer 전용 v2 source(N1 답변설계·N2 검색설계·슬롯
     # role 소비)를 *기본* 으로 쓰되, tunable `composer_prompts_v2=false` 면 계승한 base v1
@@ -1303,6 +1332,11 @@ def _build_composer(spec: VariantSpec, deps: AgentDeps) -> "ComposerRunner":
     slot_source = (
         getattr(deps, "composer_slot_v2_source", None) if use_v2 else None
     ) or getattr(deps, "composer_slot_source", None)
+    # persona profile fragment source(registry 호스팅, 미배선이면 None — graceful).
+    persona_sources = getattr(deps, "composer_persona_sources", None) or {}
+    persona_profile_source = (
+        persona_sources.get(persona.persona_id) if persona else None
+    )
     return ComposerRunner(
         spec=spec,
         llm_router=deps.llm_router,
@@ -1340,4 +1374,26 @@ def _build_composer(spec: VariantSpec, deps: AgentDeps) -> "ComposerRunner":
         synthesize=t.get("composer_synthesize", True),
         slot_context_k=t.get("composer_slot_context_k", 12),
         prior_full_k=t.get("composer_prior_full_k", 2),
+        persona=persona,
+        persona_profile_source=persona_profile_source,
     )
+
+
+@register_variant(COMPOSER_VARIANT_ID)
+def _build_composer(spec: VariantSpec, deps: AgentDeps) -> "ComposerRunner":
+    # 중립 baseline — persona 미바인딩(현행 동작 불변, 회귀 0).
+    return _make_composer(spec, deps, persona=None)
+
+
+# 페르소나 variant — `composer_{persona_id}`. 선택은 AGENT_VARIANT(결정론) — 런타임 추론
+# 없음(설계 §4). 공통 팩토리에 Persona 상수만 바인딩. 등록은 import 시 1회.
+def _register_persona_variants() -> None:
+    for persona in PERSONAS.values():
+        def _factory(spec: VariantSpec, deps: AgentDeps,
+                     _persona: Persona = persona) -> "ComposerRunner":
+            return _make_composer(spec, deps, persona=_persona)
+
+        register_variant(f"{COMPOSER_VARIANT_ID}_{persona.persona_id}")(_factory)
+
+
+_register_persona_variants()

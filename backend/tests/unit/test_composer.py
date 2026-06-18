@@ -185,6 +185,24 @@ def test_composer_is_registered() -> None:
     assert COMPOSER_VARIANT_ID in VariantRegistry.known()
 
 
+def test_persona_variants_register_and_bind() -> None:
+    # 단계 A(composer_persona_framework.design.v1) — 3 페르소나 variant 가 등록·구성되고
+    # 각자 Persona 를 바인딩한다. 중립 `composer` 는 persona=None(현행 동작 불변).
+    from app.domain.spec_driven import PERSONAS
+
+    for vid in ("composer_reviewer", "composer_designer", "composer_operator"):
+        assert vid in VariantRegistry.known()
+    with tempfile.TemporaryDirectory() as tmp:
+        deps = _deps(Path(tmp), llm=_slotwise_script())
+        neutral = VariantRegistry.build(COMPOSER_VARIANT_ID, _SPEC, deps)
+        assert neutral._persona is None
+        for pid in PERSONAS:
+            runner = VariantRegistry.build(f"composer_{pid}", _SPEC, deps)
+            assert runner._persona is PERSONAS[pid]
+            # profile source 미배선 → graceful None(단계 A 는 바인딩만).
+            assert runner._persona_profile_source is None
+
+
 @pytest.mark.asyncio
 async def test_slotwise_streams_slots_then_appends_closing() -> None:
     with tempfile.TemporaryDirectory() as tmp:

@@ -206,6 +206,18 @@ class ComposerSlotV2Source(ComposerSlotSource):
         super().__init__(prompt_dir, profile_id="composer_slot_v2")
 
 
+# composer 다중 페르소나(composer_persona_framework.design.v1 §10) — 페르소나 프로필
+# fragment source(자유 텍스트, 스키마 없음). profile_id 는 Persona.profile_source_id 와
+# 일치(composer_{persona_id} variant 가 자기 페르소나의 fragment 를 조회). prompt_body 가
+# N1/N2/N4 프롬프트 앞에 `# PERSONA` 블록으로 prepend 된다(단일 fragment, 세 노드).
+class ComposerPersonaSource(_SpecDrivenPromptSource):
+    registry_key = "composer_persona_prompts"
+    has_schema = False
+
+    def __init__(self, prompt_dir: str | Path, *, profile_id: str) -> None:
+        super().__init__(prompt_dir, profile_id=profile_id)
+
+
 # spec_driven_v2 — 2-노드(DGX Spark) 분산 변형 전용 프롬프트 source. base 로직은 동일하고
 # 기본 profile_id 만 `*_v2` 로 바꿔 registry 의 v2 블록을 읽는다. 초기 v2 블록은 v1 fragment
 # 를 그대로 참조(동일 sha)하므로 동작은 v1 과 같으나, v2 전용 프롬프트 진화를 v1 과 격리한다

@@ -132,6 +132,93 @@ class AnswerSpec:
 
 
 @dataclass(frozen=True)
+class Persona:
+    """composer 다중 페르소나 — 검색 목적·답 척추가 다른 사용자 역할의 *데이터 모델*
+    (설계: docs/plans/composer_persona_framework.design.v1.md §2).
+
+    페르소나는 프롬프트 문자열이 아니라 typed object 다 — 4개 노드(N1 답변설계·N2 검색설계·
+    N4 생성)가 *동일 인스턴스* 를 읽어 일관되게 conditioning 한다(drift·오추론 차단). 선택은
+    런타임 추론이 아니라 **variant 결정론**(`composer_reviewer/designer/operator`)이다 —
+    `ComposerRunner` 가 생성자에서 1개를 바인딩한다(persona=None=중립 baseline=현행 동작).
+
+    frozen dataclass — `InteractionEvent` 로 `dataclasses.asdict()` 재귀 호환(pydantic 금지,
+    이 모듈 idiom). *값* 은 코드(아래 상수), *산문 프로필* 은 registry fragment
+    (`prompts/spec_driven/persona/{persona_id}.md`)에 산다(표현=모델·결정=코드).
+
+    필드는 노드별 conditioning 신호다:
+      - `default_authority` — N1 governing_normative_class 기본 anchor.
+      - `spine_facets` — N1 답 머리 facet 우선순위(앞일수록 우선) + N4 전개 우선순위. *머리
+        순서*이지 *배제 목록* 이 아니다(safety-critical 누락 금지 — 설계 §5.2).
+      - `collection_priority` — N2 가 동률/boost 시 우선하는 문서군(soft boost — 하드 filter
+        배타성·게이트는 페르소나 불변, 설계 §5.1).
+      - `design_default` — N2 NuScale design 기본(없으면 노드 기본 US600).
+      - `register` — N4 표현 톤("evaluative"|"comparative"|"directive").
+      - `next_action_kind` — N4.3 synthesize "다음 단계 제안" 종류("review"|"design"|"operate").
+      - `profile_source_id` — registry persona fragment id(재현 핀).
+      - `permissions` — RBAC 향후 게이트(현재 미사용=빈 튜플)."""
+
+    persona_id: str  # "reviewer" | "designer" | "operator" — 안정 control token.
+    label: str  # 표시명(심사자/설계자/운영자).
+    default_authority: str  # governing_normative_class 기본 anchor.
+    spine_facets: tuple[str, ...]  # 답 머리·전개 우선 facet(앞일수록 우선, 배제 아님).
+    collection_priority: tuple[str, ...]  # N2 soft boost 우선 문서군.
+    register: str  # N4 표현 톤.
+    next_action_kind: str  # synthesize 다음액션 종류.
+    profile_source_id: str  # registry persona fragment id(재현 핀).
+    design_default: str | None = None  # NuScale design 기본(없으면 노드 기본).
+    permissions: tuple[str, ...] = ()  # RBAC — 향후 게이트(현재 빈 튜플).
+
+
+# 페르소나 3 상수(설계 §2 테이블). facet·collection 값은 *기존 enum 재사용*(신규 0) —
+# 페르소나는 그 *우선순위* 만 바꾼다. operator 의 tech spec/license condition 은 기존 facet
+# (applicability·open_item_condition)+collection(nuscale_FSAR Ch16=Tech Specs·nuscale_SER)로
+# 재매핑(enum 신설 후속, 설계 §6.3 / 미해결결정 §9-2).
+PERSONA_REVIEWER = Persona(
+    persona_id="reviewer",
+    label="심사자",
+    default_authority="binding",
+    spine_facets=("requirement", "acceptance_criterion", "review_finding"),
+    collection_priority=("10CFR", "RG", "SRP", "DSRS", "nuscale_SER"),
+    register="evaluative",
+    next_action_kind="review",
+    profile_source_id="composer_persona_reviewer_v1",
+)
+PERSONA_DESIGNER = Persona(
+    persona_id="designer",
+    label="설계자",
+    default_authority="mixed",
+    spine_facets=(
+        "applicant_design", "demonstration_method",
+        "review_finding", "open_item_condition",
+    ),
+    collection_priority=(
+        "nuscale_FSAR", "nuscale_Topical_Report", "nuscale_RAI", "nuscale_SER",
+    ),
+    register="comparative",
+    next_action_kind="design",
+    profile_source_id="composer_persona_designer_v1",
+    design_default="US600",
+)
+PERSONA_OPERATOR = Persona(
+    persona_id="operator",
+    label="운영자",
+    default_authority="mixed",
+    spine_facets=("applicability", "open_item_condition", "requirement"),
+    collection_priority=("nuscale_FSAR", "nuscale_SER", "10CFR"),
+    register="directive",
+    next_action_kind="operate",
+    profile_source_id="composer_persona_operator_v1",
+    design_default="US600",
+)
+
+# variant_id suffix → Persona(공통 팩토리·variant 등록이 읽는 단일 테이블, 설계 §4).
+PERSONAS: dict[str, Persona] = {
+    p.persona_id: p
+    for p in (PERSONA_REVIEWER, PERSONA_DESIGNER, PERSONA_OPERATOR)
+}
+
+
+@dataclass(frozen=True)
 class TriageDecision:
     """N0 Triage Node 산출 — 라우팅 판정(설계 spec_driven_general_query_routing.design.v1).
 

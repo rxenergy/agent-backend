@@ -49,6 +49,7 @@ from app.application.events.recorder import EventRecorder
 from app.application.prompting.classification_source import ClassificationPromptSource
 from app.application.prompting.spec_driven_source import (
     ComposerAnswerSpecSource,
+    ComposerPersonaSource,
     ComposerQuerySource,
     ComposerSlotSource,
     ComposerSlotV2Source,
@@ -301,6 +302,9 @@ async def build_container(settings: Settings) -> AppContainer:
     composer_answer_spec_source: Any = None
     composer_query_source: Any = None
     composer_slot_v2_source: Any = None
+    # composer 다중 페르소나(composer_persona_framework.design.v1 §10) — persona_id → profile
+    # fragment source. 미배선(빈 dict)이면 페르소나 variant 가 profile 없이 graceful.
+    composer_persona_sources: dict[str, Any] = {}
     spec_driven_v2_answer_spec_source: Any = None
     spec_driven_v2_query_source: Any = None
     spec_driven_v2_generation_source: Any = None
@@ -637,6 +641,16 @@ async def build_container(settings: Settings) -> AppContainer:
         )
         composer_query_source = ComposerQuerySource(Path(settings.prompt_local_dir))
         composer_slot_v2_source = ComposerSlotV2Source(Path(settings.prompt_local_dir))
+        # composer 다중 페르소나(persona_framework.design.v1 §10) — persona_id → profile
+        # fragment. 페르소나 variant(composer_reviewer 등)가 자기 id 로 조회(단일 fragment,
+        # N1/N2/N4 가 공유). 중립 `composer`(persona=None)는 무관.
+        composer_persona_sources = {
+            pid: ComposerPersonaSource(
+                Path(settings.prompt_local_dir),
+                profile_id=f"composer_persona_{pid}_v1",
+            )
+            for pid in ("reviewer", "designer", "operator")
+        }
         # spec_driven_v2 — 2-노드 분산 변형 전용 프롬프트 source(registry 호스팅, sha 핀).
         # 초기엔 v1 fragment 를 그대로 참조(동일 sha)하나 profile_id 만 `*_v2` 로 분리해
         # v2 전용 프롬프트 진화를 v1 과 격리한다(설계 spec_driven_agent.design.v2).
@@ -700,6 +714,7 @@ async def build_container(settings: Settings) -> AppContainer:
         composer_answer_spec_source=composer_answer_spec_source,
         composer_query_source=composer_query_source,
         composer_slot_v2_source=composer_slot_v2_source,
+        composer_persona_sources=composer_persona_sources,
         spec_driven_v2_answer_spec_source=spec_driven_v2_answer_spec_source,
         spec_driven_v2_query_source=spec_driven_v2_query_source,
         spec_driven_v2_generation_source=spec_driven_v2_generation_source,

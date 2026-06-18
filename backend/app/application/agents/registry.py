@@ -68,6 +68,11 @@ class AgentDeps:
     composer_answer_spec_source: Any = None
     composer_query_source: Any = None
     composer_slot_v2_source: Any = None
+    # composer 다중 페르소나(composer_persona_framework.design.v1) — persona_id → profile
+    # fragment source(registry 호스팅). 페르소나 variant(composer_reviewer 등)가 자기 id 로
+    # 조회. 미배선(None/빈 dict)이면 페르소나 variant 가 profile 없이 graceful(단계 A — 바인딩
+    # 만, 소비는 단계 B~D). 중립 `composer` variant 는 persona=None 이라 무관.
+    composer_persona_sources: dict[str, Any] = field(default_factory=dict)
     # spec_driven_v2 — 2-노드(DGX Spark) 분산 변형 전용 프롬프트 source(registry 호스팅,
     # sha 핀). v1 과 격리된 `*_v2` profile_id 를 읽는다(초기엔 v1 fragment 재사용 → 동일
     # sha). None 이면 v2 변형이 run() 에서 부트 배선 오류로 처리(프롬프트 인라인 금지).

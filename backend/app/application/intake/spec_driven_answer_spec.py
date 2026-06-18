@@ -68,14 +68,21 @@ class SpecDrivenAnswerSpecInstantiator:
 
     async def instantiate(
         self, query_text: str, *, reasoning_label: str | None = None,
-        prior_context: str | None = None,
+        prior_context: str | None = None, persona_profile: str | None = None,
     ) -> AnswerSpec:
         # .replace (not .format): 프롬프트 본문에 JSON 예시의 { } 가 있어 .format 은
         # KeyError. LLMClassifier/AnswerSpecInstantiator 와 동일 idiom.
         prompt = self._prompt.replace("{query}", query_text)
+        # 페르소나 프로필(composer_persona_framework.design.v1 §10) — composer 페르소나
+        # variant 가 자기 fragment 를 넘기면 답변 설계 골격 앞에 prepend 한다(답 척추·검색
+        # 목적·facet 해석을 모델이 읽는 지침). 정적 body 불변(policy_hash 안정), 동적 입력만
+        # prepend. 중립(persona=None)이면 미전달 → 현행 동작 불변(net-neutral).
+        if persona_profile:
+            prompt = persona_profile.rstrip() + "\n\n" + prompt
         # 멀티턴 후속 — prior_context 동반 시 N1 이 지시표현을 해소해 explicit_references
         # 를 승계한다(예: "그 중 PCT 한계" → 직전 10 CFR 50.46 승계). 정적 body 불변
-        # (policy_hash 안정), 동적 입력만 prepend.
+        # (policy_hash 안정), 동적 입력만 prepend. 페르소나 *뒤*(질의에 더 가깝게) — 페르소나는
+        # 설계 렌즈, prior_context 는 지시표현 해소용.
         if prior_context:
             prompt = prior_context.rstrip() + "\n\n" + prompt
         with _TRACER.start_as_current_span("intake.spec_driven_answer_spec") as span:
