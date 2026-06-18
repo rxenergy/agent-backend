@@ -505,14 +505,13 @@ async def build_container(settings: Settings) -> AppContainer:
                          "failed; graceful degrade",
                 )
 
-        # retrieval.verify_slot — spec_driven_v2/composer_pipelined 슬롯 검증(relevance)을
-        # **worker 노드**(SECONDARY_LLM = secondary_llm, 없으면 default_llm 폴백)에서 돈다.
-        # relevance·multihop 을 둘 다 worker(secondary)로 보내 main(생성)과 물리 분리한다
-        # (지연 단축 — 검증 fan-out 이 생성 디코딩 큐와 안 경쟁). follow_up 과 동일 가드:
-        # secondary_llm 이 구조화 출력 가능 provider(_STRUCTURED_PROVIDERS — vLLM guided_json
-        # 또는 Bedrock/Anthropic Haiku 의 프롬프트-JSON)일 때만 배선한다(fake 만 graceful skip).
-        # 토글(spec_driven_v2_verify_enabled)이 꺼져 있어도 미배선(단일노드 degrade). 연결 정보
-        # (endpoint/model/timeout·재시도)는 secondary_llm(HttpLLM)이 단독 소유한다.
+        # retrieval.verify_slot — spec_driven_v2 슬롯 검증을 follow_up 과 같은 **sub 노드**
+        # (Node2 = secondary_llm, 없으면 default_llm 폴백)에서 돈다. follow_up 과 동일 가드:
+        # secondary_llm pool 엔트리가 openai_compat(내부망 vLLM)일 때만 배선한다(verify 는
+        # vLLM guided_json 에 의존 — anthropic/fake 비호환 → graceful skip). 토글
+        # (spec_driven_v2_verify_enabled)이 꺼져 있어도 미배선(단일노드 degrade). 연결 정보
+        # (endpoint/model/timeout·재시도)는 secondary_llm(HttpLLM)이 단독 소유한다. verify 와
+        # follow_up 이 같은 Node2 에 몰리므로 두 도구 fan-out 은 한 vLLM 을 공유한다(아래 캡 주석).
         verify_slot_tool = None
         _verify_entry = next(
             (e for e in settings.llm_pool if e.id == secondary_llm_id), None
@@ -535,8 +534,11 @@ async def build_container(settings: Settings) -> AppContainer:
                     slot_verifier=SlotVerifierLlm(
                         llm=secondary_llm, source=_verify_source,
                         # 동시 슬롯 호출 전역 캡(러너 fan-out 전체에 걸침). 별도 튜너블 대신
-                        # max_queries 를 재사용한다 — N2 가 띄우는 슬롯×쿼리 규모와 worker
-                        # 검증의 동시 슬롯 규모를 같은 손잡이로 함께 키운다.
+                        # max_queries 를 재사용한다 — N2 가 띄우는 슬롯×쿼리 규모와 Node2
+                        # 검증의 동시 슬롯 규모를 같은 손잡이로 함께 키운다. 단, verify 와
+                        # follow_up 이 같은 Node2 vLLM 을 공유하므로 두 도구의 동시 호출이
+                        # 같은 max_num_seqs 를 두고 경쟁한다 — KV cache 적체가 보이면
+                        # SPEC_DRIVEN_MAX_QUERIES / DOCUMENTS_REF_MAX_CONCURRENCY 로 함께 낮춘다.
                         max_concurrency=settings.spec_driven_max_queries,
                     ),
                     # 동시 슬롯 캡(러너 _verify_sem 과 동일 취지의 tool 레벨 캡).
@@ -547,8 +549,7 @@ async def build_container(settings: Settings) -> AppContainer:
                     "verify_slot_tool_disabled",
                     error=str(_exc),
                     llm_id=secondary_llm_id,
-                    hint="secondary_llm provider supports structured output but tool init "
-                         "failed; single-node degrade",
+                    hint="secondary_llm is openai_compat but tool init failed; single-node degrade",
                 )
 
         # 검색·범위·용어 도구. retrieval.search = 내부 retriever 재사용 + Reranker 정렬
@@ -733,7 +734,7 @@ async def build_container(settings: Settings) -> AppContainer:
             "spec_driven_max_context_chunks": settings.spec_driven_max_context_chunks,
             # N4 생성 컨텍스트 토큰 예산(0=무제한). 1차 전량 보존 + 2차 score 순 채움 캡.
             "spec_driven_context_token_budget": settings.spec_driven_context_token_budget,
-            # spec_driven_v2 — Node1 검증 토글 + 동시 검증 슬롯 상한(per-slot 파이프라인 캡).
+            # spec_driven_v2 — Node2 검증 토글 + 동시 검증 슬롯 상한(per-slot 파이프라인 캡).
             "spec_driven_v2_verify_enabled": settings.spec_driven_v2_verify_enabled,
             "spec_driven_v2_verify_concurrency": settings.spec_driven_v2_verify_concurrency,
             # spec_driven_v1 N4 — 인용 계약(파일 호스팅 → rendered_prompt_hash 에 반영).

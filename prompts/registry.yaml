@@ -211,8 +211,8 @@ spec_driven_generation_prompts:
     prompt:        {path: spec_driven/generation_v1.md, version: v1, sha256: "eb3e0153ea8ebfe4174f6a8c1d1aa84e7124d269b6218c16fd769f89b82acd69"}
     model_options: {temperature: 0.1, top_p: 0.9, max_tokens: 16384, seed: 7}
 
-# spec_driven_v2 Node1 — 슬롯 단위 1차 검색 결과 검증(필요 청크 + 멀티홉 청크 선별).
-# utility_llm(메인, gemma-4-26b)에서 json_schema guided decoding 으로 1회 호출. 식별자만
+# spec_driven_v2 Node2 — 슬롯 단위 1차 검색 결과 검증(필요 청크 + 멀티홉 청크 선별).
+# secondary_llm(sub, gemma-4-26b-sub)에서 json_schema guided decoding 으로 1회 호출. 식별자만
 # 산출(address-not-content). SpecDrivenVerifySource 가 boot 시 sha 검증(원칙 5).
 spec_driven_verify_prompts:
   spec_driven_verify_v2:
