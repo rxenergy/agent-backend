@@ -213,43 +213,57 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                     triage_pin=triage_pin, ctx=ctx, sess=sess, record=record,
                 )
 
-            # === N1 Define Spec(계승) ====================================
-            await emit_step("define_spec", "started")
-            n1 = SpecDrivenAnswerSpecInstantiator(
-                util,
-                prompt_body=self._answer_spec_source.prompt_body,
-                schema=self._answer_spec_source.schema or None,
-                model_options=self._answer_spec_source.model_options or None,
-                policy_hash=self._answer_spec_source.policy_hash,
-            )
-            spec = await n1.instantiate(request.query_text,
-                                        reasoning_label="답변 사양 정의",
-                                        prior_context=prior_context,
-                                        persona_profile=self._persona_profile())
-            await emit_step("define_spec", "ok", method=spec.instantiation_method,
-                            num_slots=len(spec.required_slots),
-                            num_refs=len(spec.explicit_references))
+            # === Planning(N1 Define Spec + N2 Query Formulation) ==========
+            # 답변 설계(N1)와 검색 설계(N2)를 단일 부모 span(agent.planning)으로 묶는다 —
+            # 둘 다 *검색 전* 계획 단계라 Phoenix 에서 한 노드로 접힌다. triage(N0)는 라우팅
+            # 결정이라 planning 밖에 독립으로 둔다(general 분기가 planning 진입 전에 갈림).
+            # intake.spec_driven_answer_spec/query span 은 current context 자식이라 이
+            # span 안에서 호출하면 자동으로 agent.run > agent.planning > intake.* 로 중첩된다.
+            with _TRACER.start_as_current_span("agent.planning") as plan_span:
+                oi.set_kind(plan_span, oi.KIND_CHAIN)
+                oi.set_io(plan_span, input_value=request.query_text)
 
-            post = self._post_gate(request, sess, triage, spec)
+                # === N1 Define Spec(계승) ================================
+                await emit_step("define_spec", "started")
+                n1 = SpecDrivenAnswerSpecInstantiator(
+                    util,
+                    prompt_body=self._answer_spec_source.prompt_body,
+                    schema=self._answer_spec_source.schema or None,
+                    model_options=self._answer_spec_source.model_options or None,
+                    policy_hash=self._answer_spec_source.policy_hash,
+                )
+                spec = await n1.instantiate(request.query_text,
+                                            reasoning_label="답변 사양 정의",
+                                            prior_context=prior_context,
+                                            persona_profile=self._persona_profile())
+                await emit_step("define_spec", "ok", method=spec.instantiation_method,
+                                num_slots=len(spec.required_slots),
+                                num_refs=len(spec.explicit_references))
 
-            # === N2 Query Formulation(계승) ==============================
-            await emit_step("query_formulation", "started")
-            n2 = QueryFormulator(
-                util,
-                prompt_body=self._query_source.prompt_body,
-                schema=self._query_source.schema or None,
-                model_options=self._query_source.model_options or None,
-                policy_hash=self._query_source.policy_hash,
-            )
-            queries, formulation_method = await n2.formulate(
-                request.query_text, spec, reasoning_label="검색 쿼리 생성",
-                persona_profile=self._persona_profile())
-            truncated = False
-            if len(queries) > self._max_queries:
-                truncated = True
-                queries = queries[: self._max_queries]
-            await emit_step("query_formulation", "ok", method=formulation_method,
-                            num_queries=len(queries), truncated=truncated)
+                post = self._post_gate(request, sess, triage, spec)
+
+                # === N2 Query Formulation(계승) ==========================
+                await emit_step("query_formulation", "started")
+                n2 = QueryFormulator(
+                    util,
+                    prompt_body=self._query_source.prompt_body,
+                    schema=self._query_source.schema or None,
+                    model_options=self._query_source.model_options or None,
+                    policy_hash=self._query_source.policy_hash,
+                )
+                queries, formulation_method = await n2.formulate(
+                    request.query_text, spec, reasoning_label="검색 쿼리 생성",
+                    persona_profile=self._persona_profile())
+                truncated = False
+                if len(queries) > self._max_queries:
+                    truncated = True
+                    queries = queries[: self._max_queries]
+                await emit_step("query_formulation", "ok", method=formulation_method,
+                                num_queries=len(queries), truncated=truncated)
+                # planning 결과 요약 — Phoenix 에서 이 노드 한 곳에서 슬롯/쿼리 수를 읽는다.
+                plan_span.set_attribute("planning.num_slots", len(spec.required_slots))
+                plan_span.set_attribute("planning.num_queries", len(queries))
+                plan_span.set_attribute("planning.formulation_method", formulation_method)
 
             # === N3+N3.5 — 슬롯별 검색-검증 future 발사(배리어 없음, §2/§3) =========
             # N2 직후 슬롯별 task 를 즉시 띄운다. 생성 루프가 슬롯 i 직전 그 future 만 await
@@ -279,7 +293,14 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
     ) -> SlotSearchHandle:
         """슬롯명 → 검색-검증 task. 슬롯별로 그 슬롯에 귀속된 N2 쿼리들만 1차 검색하고
         (`_slot_first_pass_search`), 이어 4-stage 검증 파이프라인(`_run_slot_pipeline`)을
-        돈다. 배리어 없이 동시 발사 — gather 는 생성 루프가 슬롯별 await 로 대신한다."""
+        돈다. 배리어 없이 동시 발사 — gather 는 생성 루프가 슬롯별 await 로 대신한다.
+
+        planning 직후의 슬롯 단위 retrieval 전체를 단일 부모 span(agent.retrieval)으로
+        묶는다. 각 슬롯 검색 task 는 `agent.slot.<name>` span 을 여는데(slot_pipeline),
+        task 를 이 span context 안에서 create_task 하면 contextvars 캡처로 그 span 들이
+        agent.run > agent.retrieval > agent.slot.* 로 중첩된다. 검색은 백그라운드 진행이라
+        span 을 수동으로 열고(attach → task 발사 → 즉시 detach), 모든 task 정리 후
+        handle.aclose 가 닫는다(generation span 과 동형 — 배리어 없이도 묶임 보존)."""
         spec_block = _render_spec_block(spec)
         per_query_k = max(self._top_k, self._max_context_chunks)
         # 슬롯별 N2 쿼리 그룹(슬롯명 일치). 슬롯에 쿼리가 없으면 원질의 1개로 폴백.
@@ -311,11 +332,38 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                     pipeline=res,
                 )
 
-        tasks: dict[str, asyncio.Task[SlotSearchResult]] = {
-            s.name: asyncio.create_task(_search_slot(s.name))
-            for s in spec.required_slots
-        }
-        return SlotSearchHandle(tasks)
+        # agent.retrieval 부모 span — task 발사 동안만 OTel context 에 attach 해 각 슬롯
+        # 검색 task(agent.slot.*)가 이 span 을 부모로 캡처하게 한다. task 는 비동기 백그라운드
+        # 진행이라 span 은 즉시 닫지 않고(attach 직후 detach 만), 모든 task 정리 후 aclose 가
+        # _end_retrieval_span 으로 닫는다. detach 는 *생성 시점* current context 만 복원하므로
+        # 호출부의 root context 가 그대로 유지된다(생성 루프 span 들에 영향 없음).
+        from opentelemetry import context as _otel_context
+        from opentelemetry import trace as _otel_trace
+        retr_span = _TRACER.start_span("agent.retrieval")
+        oi.set_kind(retr_span, oi.KIND_RETRIEVER)
+        retr_span.set_attribute("retrieval.num_slots", len(spec.required_slots))
+        retr_span.set_attribute("retrieval.pipelined", True)
+        _retr_token = _otel_context.attach(
+            _otel_trace.set_span_in_context(retr_span))
+        try:
+            tasks: dict[str, asyncio.Task[SlotSearchResult]] = {
+                s.name: asyncio.create_task(_search_slot(s.name))
+                for s in spec.required_slots
+            }
+        finally:
+            _otel_context.detach(_retr_token)
+
+        _ended = {"done": False}
+
+        def _end_retrieval_span() -> None:
+            # 멱등 — 모든 슬롯 검색 task 정리 후 aclose 가 1회 호출. detach 는 task 발사 때
+            # 이미 했으므로 여기선 span.end 만(context 복원 불필요 — 이 콜백은 어느 context 든).
+            if _ended["done"]:
+                return
+            _ended["done"] = True
+            retr_span.end()
+
+        return SlotSearchHandle(tasks, end_span=_end_retrieval_span)
 
     # ------------------------------------------------------------------
     # 슬롯 future 소비 — task 예외를 그 슬롯만 degrade(method="error")로 흡수(설계 §7).
@@ -350,12 +398,16 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
     # (supported) pass(무표시). alert *본문*은 정적 템플릿이 아니라 모델 rationale 이다.
     # ------------------------------------------------------------------
     async def _judge_slot(
-        self, llm: LLMPort, text: str,
+        self, llm: LLMPort, slot: SpecSlot, idx: int, text: str,
         sub_chunks: list[RetrievedChunk], pack,
     ) -> dict[str, Any]:
         """LLM judge 호출 → {verdict, rationale, unsupported_claims}. verifier source 미배선/
         실패면 verdict=skipped(결정론 룰로 대체하지 않는다 — 사용자 결정: 결정론 신뢰 불가).
-        판정은 슬롯 CONTEXT(귀속 청크)만 근거로 한다(prior knowledge 불가)."""
+        판정은 슬롯 CONTEXT(귀속 청크)만 근거로 한다(prior knowledge 불가).
+
+        `llm.slot_judge` span 은 이 슬롯의 생성 span 과 *형제*(같은 슬롯 부모 span 아래)로 떠서
+        Phoenix 에서 슬롯 단위로 생성→검증이 한 노드에 묶인다(슬롯 독립 trace). span 에 슬롯
+        식별자(name/index)를 남겨 어느 슬롯의 검증인지 명확히 한다."""
         skipped = {"verdict": _VERDICT_SKIPPED, "rationale": "", "unsupported_claims": []}
         if self._slot_verify_source is None or not text.strip():
             return skipped
@@ -371,6 +423,9 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         try:
             with _TRACER.start_as_current_span("llm.slot_judge") as js:
                 oi.set_kind(js, oi.KIND_EVALUATOR)
+                js.set_attribute("slot.name", slot.name)
+                js.set_attribute("slot.index", idx)
+                js.set_attribute("slot.num_chunks", len(sub_chunks))
                 res = await llm.generate(
                     prompt,
                     model_options=self._slot_verify_source.model_options or None,
@@ -378,22 +433,26 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 )
                 oi.set_llm(js, model_name=res.model_id, prompt=prompt,
                            completion=res.text)
+                import json
+                try:
+                    obj = json.loads(res.text)
+                except Exception:  # noqa: BLE001 — 파싱 실패는 판정 불가(skipped).
+                    js.set_attribute("slot.verify_verdict", _VERDICT_SKIPPED)
+                    return skipped
+                verdict = str(obj.get("verdict", "")).lower()
+                if verdict not in (
+                        _VERDICT_SUPPORTED, _VERDICT_PARTIAL, _VERDICT_UNSUPPORTED):
+                    # 보수적 — 알 수 없는 판정은 partial(supported 로 봐주지 않는다).
+                    verdict = _VERDICT_PARTIAL
+                js.set_attribute("slot.verify_verdict", verdict)
+                return {
+                    "verdict": verdict,
+                    "rationale": str(obj.get("rationale", "")).strip(),
+                    "unsupported_claims": [
+                        str(s) for s in obj.get("unsupported_claims", []) or []],
+                }
         except LLMUnavailableError:
             return skipped
-        import json
-        try:
-            obj = json.loads(res.text)
-        except Exception:  # noqa: BLE001 — 파싱 실패는 판정 불가(skipped, 결정론 대체 안 함).
-            return skipped
-        verdict = str(obj.get("verdict", "")).lower()
-        if verdict not in (_VERDICT_SUPPORTED, _VERDICT_PARTIAL, _VERDICT_UNSUPPORTED):
-            # 보수적 — 알 수 없는 판정은 partial 로(supported 로 봐주지 않는다).
-            verdict = _VERDICT_PARTIAL
-        return {
-            "verdict": verdict,
-            "rationale": str(obj.get("rationale", "")).strip(),
-            "unsupported_claims": [str(s) for s in obj.get("unsupported_claims", []) or []],
-        }
 
     @classmethod
     def _render_judge_alert(cls, judge: dict[str, Any], label: str) -> str:
@@ -579,6 +638,15 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         gen_span = _TRACER.start_span("agent.generation")
         oi.set_kind(gen_span, oi.KIND_CHAIN)
         gen_span.set_attribute("generation.num_slots", num_slots)
+        # 인과 힌트 — generation 은 슬롯 검색(agent.retrieval > agent.slot.*)과 *형제* span 이고
+        # (검색 task 가 생성보다 먼저 떠 부모-자식 중첩 불가), 인과 검색→생성은 각
+        # llm.slot_generation span 의 OTel *link*(D3)로만 담긴다. Phoenix waterfall 만 보면
+        # generation 이 검색보다 먼저 시작해(루프 진입 즉시 open) "근거 없이 생성"으로 인과를
+        # 거꾸로 읽을 위험이 있어, 그 오독을 막는 명시 속성을 남긴다(근거는 link 로 추적).
+        gen_span.set_attribute("generation.search_relation", "sibling")
+        gen_span.set_attribute(
+            "generation.search_evidence_via",
+            "otel.link on llm.slot_generation -> agent.slot.<name>")
         _gen_token = _otel_context.attach(
             _otel_trace.set_span_in_context(gen_span))
 
@@ -648,6 +716,38 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             label = stages[idx] if idx < len(stages) else (slot.facet or slot.name)
             header = f"## {label}\n\n"
 
+            # === 슬롯 단위 부모 span(agent.slot_compose.<name>) — 이 슬롯의 *생성*
+            # (llm.slot_generation)과 *검증*(llm.slot_judge)을 형제로 묶는다. 슬롯마다 독립
+            # trace 되어 Phoenix 에서 슬롯 1개가 생성+환각검증 한 노드로 접힌다. 검색 task 와의
+            # link(D3)는 이 슬롯 부모에 달아 "이 슬롯 검색→슬롯 생성·검증" 전체를 귀인한다.
+            # agent.generation 의 자식(루프가 OTel context attach 상태). re-indent 없이
+            # attach/detach 로 이후 start_as_current_span 들이 이 span 을 부모로 잡게 한다.
+            slot_links = []
+            search_ctx = getattr(pipe, "span_context", None)
+            if search_ctx is not None:
+                from opentelemetry.trace import Link
+                slot_links = [Link(search_ctx)]
+            slot_span = _TRACER.start_span(
+                f"agent.slot_compose.{slot.name}", links=slot_links)
+            oi.set_kind(slot_span, oi.KIND_CHAIN)
+            slot_span.set_attribute("slot.name", slot.name)
+            slot_span.set_attribute("slot.facet", slot.facet or "")
+            slot_span.set_attribute("slot.index", idx)
+            _slot_tok = _otel_context.attach(
+                _otel_trace.set_span_in_context(slot_span))
+            _slot_ended = False
+
+            def _end_slot_span(verdict: str | None = None) -> None:
+                # 멱등 — 슬롯 부모 span 종료 + context 복원(정상 종료 1회, 조기 refuse 안전판 1회).
+                nonlocal _slot_ended
+                if _slot_ended:
+                    return
+                if verdict is not None:
+                    slot_span.set_attribute("slot.verify_verdict", verdict)
+                _otel_context.detach(_slot_tok)
+                slot_span.end()
+                _slot_ended = True
+
             await emit_step("slot_generation", "started", slot=slot.name,
                             facet=slot.facet or "-", num_chunks=len(sub_chunks),
                             index=idx)
@@ -663,17 +763,9 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             #     f"{len(pipe.necessary)}개, 멀티홉 {len(pipe.multihop_ids)}개\n"
             # )
 
-            # D3 — 생성 span 을 그 슬롯 *검색-검증* span(agent.slot.<name>)에 link 로 잇는다.
-            # 검색 task 가 생성보다 먼저 떠서 부모-자식 중첩이 불가하므로(인과는 검색→생성),
-            # OpenInference/OTel 표준대로 link 로 연결한다 → Phoenix 에서 슬롯 단위로 검색→
-            # 생성 지연을 귀인. 검색 span context 가 없으면(degrade/empty) link 없이 진행.
-            links = []
-            search_ctx = getattr(pipe, "span_context", None)
-            if search_ctx is not None:
-                from opentelemetry.trace import Link
-                links = [Link(search_ctx)]
-            with _TRACER.start_as_current_span("llm.slot_generation",
-                                               links=links) as ss:
+            # 생성 span — 슬롯 부모(agent.slot_compose.<name>)의 자식. 검색→슬롯 link 는 슬롯
+            # 부모에 달았으므로(위) 여기선 중복 link 를 달지 않는다.
+            with _TRACER.start_as_current_span("llm.slot_generation") as ss:
                 ss.set_attribute("slot.name", slot.name)
                 ss.set_attribute("slot.facet", slot.facet or "")
                 ss.set_attribute("slot.index", idx)
@@ -730,6 +822,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                         request.interaction_id, prompt_render_calls)
                     await self._write_pipelined_snapshot(
                         request.interaction_id, snapshot_slots, cites)
+                    _end_slot_span("error")  # 슬롯 부모 span 종료(조기 refuse — context 복원).
                     return await self._refuse(
                         request, started, tool_calls, RefusalReason.LLM_UNAVAILABLE,
                         error_code="llm_unavailable",
@@ -751,7 +844,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             # 본문으로 보여 슬롯 단위 검증 결과를 설명한다. self-verification 금지(외부 콜).
             judge = ({"verdict": _VERDICT_SKIPPED, "rationale": "", "unsupported_claims": []}
                      if self._slot_verify == "off"
-                     else await self._judge_slot(llm, text, sub_chunks, sub_pack))
+                     else await self._judge_slot(llm, slot, idx, text, sub_chunks, sub_pack))
             verdict = {
                 "verdict": judge["verdict"],
                 "rationale": judge.get("rationale", ""),
@@ -760,7 +853,8 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             }
             alert = ("" if self._slot_verify == "off"
                      else self._render_judge_alert(judge, label))
-            ss.set_attribute("slot.verify_verdict", judge["verdict"])
+            # verdict 는 슬롯 부모 span(_end_slot_span) + llm.slot_judge span 에 기록된다
+            # (llm.slot_generation 은 이미 닫혔으므로 여기서 set 하지 않는다 — ended-span 경고 방지).
             if alert:
                 # 본문 직후에 alert 를 스트리밍(빈 줄로 본문과 분리). answer_text 재구성용으로도
                 # 합쳐 화면=기록 일치를 보존한다.
@@ -789,6 +883,8 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             })
             total_prompt_tokens += int(result.token_usage.get("prompt_tokens", 0))
             total_completion_tokens += int(result.token_usage.get("completion_tokens", 0))
+            # 슬롯 부모 span 종료(생성+검증 형제 묶음 닫음) — verdict 를 span 에 남긴다.
+            _end_slot_span(judge["verdict"])
             await emit_step("slot_generation", "ok", slot=slot.name,
                             verdict=judge["verdict"])
 

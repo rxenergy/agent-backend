@@ -416,20 +416,85 @@ async def test_span_enrichment_ttft_root_output_and_slot_link(span_exporter) -> 
     # D4/D2 — 집계 토큰(fake LLM 도 token_usage 를 1/1 로 낸다).
     assert rattrs.get("agent.completion_tokens", 0) >= 1
 
-    # D3 — slot 생성 span 에 검색 카운트 + 슬롯 검색 span 으로의 link.
-    gen_spans = [sp for sp in span_exporter.get_finished_spans()
-                 if sp.name == "llm.slot_generation"]
+    # D3 — slot 생성 span 에 검색 카운트, 슬롯 부모(agent.slot_compose.<name>)에 검색 span link.
+    all_spans = span_exporter.get_finished_spans()
+    gen_spans = [sp for sp in all_spans if sp.name == "llm.slot_generation"]
     assert len(gen_spans) == 2
-    search_span_ids = {sp.context.span_id for sp in span_exporter.get_finished_spans()
-                       if sp.name.startswith("agent.slot.")}
-    assert search_span_ids, "검색 span(agent.slot.<name>)이 있어야 link 대상이 된다"
     for gs in gen_spans:
         gattrs = dict(gs.attributes)
         assert "slot.num_necessary" in gattrs
         assert "slot.search_method" in gattrs
-        # 이 생성 span 의 link 중 하나가 그 슬롯 검색 span 을 가리킨다.
-        linked = {ln.context.span_id for ln in (gs.links or [])}
-        assert linked & search_span_ids, "생성 span 이 슬롯 검색 span 에 link 돼야 한다(D3)"
+    # 검색 span(agent.slot.<name>) — agent.slot_compose.<name> 와 접두사가 겹치지 않게 분리.
+    search_span_ids = {sp.context.span_id for sp in all_spans
+                       if sp.name.startswith("agent.slot.")
+                       and not sp.name.startswith("agent.slot_compose.")}
+    assert search_span_ids, "검색 span(agent.slot.<name>)이 있어야 link 대상이 된다"
+    compose_spans = [sp for sp in all_spans
+                     if sp.name.startswith("agent.slot_compose.")]
+    assert len(compose_spans) == 2
+    for cs in compose_spans:
+        # 슬롯 부모 span 의 link 중 하나가 그 슬롯 검색 span 을 가리킨다(D3 — 검색→슬롯 귀인).
+        linked = {ln.context.span_id for ln in (cs.links or [])}
+        assert linked & search_span_ids, "슬롯 부모 span 이 검색 span 에 link 돼야 한다(D3)"
+
+
+@pytest.mark.asyncio
+async def test_planning_and_retrieval_span_nesting(span_exporter) -> None:
+    """planning(N1+N2) 과 슬롯 retrieval 의 span 묶음:
+      - agent.planning 이 agent.run 의 자식이고 triage(intake.spec_driven_triage)는 그
+        *밖*(planning 형제) 이다 — triage 는 독립.
+      - intake.spec_driven_answer_spec(N1)·intake.spec_driven_query(N2)는 agent.planning
+        의 자식으로 중첩된다.
+      - agent.retrieval 이 agent.run 의 자식이고, 슬롯 검색 span(agent.slot.<name>)들이
+        그 자식으로 중첩된다(planning 이후 슬롯 단위 retrieval trace).
+      - generation span 인과 힌트(search_relation=sibling)가 붙는다(오독 방지)."""
+    span_exporter.clear()
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = VariantRegistry.build(
+            COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
+            _deps(Path(tmp), llm=_script(), with_verify=True))
+        await runner.run(_req())
+
+    all_spans = span_exporter.get_finished_spans()
+    by_name = {sp.name: sp for sp in all_spans}
+    sid = lambda sp: sp.context.span_id  # noqa: E731
+    pid = lambda sp: getattr(sp.parent, "span_id", None)  # noqa: E731
+
+    run = by_name.get("agent.run")
+    plan = by_name.get("agent.planning")
+    retr = by_name.get("agent.retrieval")
+    assert run is not None and plan is not None and retr is not None
+
+    # planning·retrieval 은 agent.run 의 직속 자식.
+    assert pid(plan) == sid(run)
+    assert pid(retr) == sid(run)
+
+    # triage 는 planning *밖*(agent.run 직속 — 독립).
+    triage = by_name.get("intake.spec_driven_triage")
+    assert triage is not None
+    assert pid(triage) == sid(run)
+    assert pid(triage) != sid(plan)
+
+    # N1/N2 intake span 은 planning 의 자식.
+    n1 = by_name.get("intake.spec_driven_answer_spec")
+    n2 = by_name.get("intake.spec_driven_query")
+    assert n1 is not None and pid(n1) == sid(plan)
+    assert n2 is not None and pid(n2) == sid(plan)
+
+    # 슬롯 검색 span(agent.slot.<name>, slot_compose 제외)은 retrieval 의 자식.
+    search_spans = [sp for sp in all_spans
+                    if sp.name.startswith("agent.slot.")
+                    and not sp.name.startswith("agent.slot_compose.")]
+    assert search_spans, "슬롯 검색 span 이 있어야 한다"
+    for ss in search_spans:
+        assert pid(ss) == sid(retr), "슬롯 검색 span 은 agent.retrieval 의 자식이어야 한다"
+
+    # generation 인과 힌트 — 검색과 형제이며 근거는 link 로 추적(오독 방지).
+    gen = by_name.get("agent.generation")
+    assert gen is not None
+    gattrs = dict(gen.attributes)
+    assert gattrs.get("generation.search_relation") == "sibling"
+    assert "generation.search_evidence_via" in gattrs
 
 
 def _prompt_render(tmp: Path) -> dict:
@@ -609,9 +674,14 @@ async def test_judge_unwired_marks_skipped_not_deterministic_pass() -> None:
 
 @pytest.mark.asyncio
 async def test_generation_spans_nest_under_single_parent(span_exporter) -> None:
-    """generation 단계가 단일 부모 span(agent.generation)으로 묶이고, 슬롯별
-    llm.slot_generation·llm.synthesize 가 그 *자식*으로 중첩된다(design.v2 §8 — Phoenix 에서
-    generation 단계가 한 노드로 접힘). 부모는 agent.run 의 자식."""
+    """generation 단계 span 트리:
+      agent.run
+        └ agent.generation                         (단일 generation 부모)
+            ├ agent.slot_compose.<name>            (슬롯 단위 부모 — 슬롯마다 1개)
+            │   ├ llm.slot_generation              (생성)
+            │   └ llm.slot_judge                   (환각 검증 — 같은 슬롯 부모 아래 형제)
+            └ llm.synthesize                       (종합 — generation 직속)
+    슬롯 생성과 검증이 *같은 슬롯 부모* 아래 형제로 묶여 슬롯 단위로 독립 trace 된다."""
     span_exporter.clear()
     with tempfile.TemporaryDirectory() as tmp:
         runner = VariantRegistry.build(
@@ -624,16 +694,39 @@ async def test_generation_spans_nest_under_single_parent(span_exporter) -> None:
     gen = by_name.get("agent.generation")
     assert gen is not None, "agent.generation 부모 span 이 있어야 한다"
     gen_id = gen.context.span_id
-    # 부모는 agent.run.
+    # agent.generation 의 부모는 agent.run.
     run_span = by_name.get("agent.run")
     assert run_span is not None
     assert gen.parent is not None and gen.parent.span_id == run_span.context.span_id
-    # 슬롯 생성·종합 span 이 모두 agent.generation 의 자식(parent.span_id == gen_id).
+
+    # 슬롯 부모(agent.slot_compose.<name>) 2개 — 모두 agent.generation 의 자식.
+    compose = [sp for sp in spans if sp.name.startswith("agent.slot_compose.")]
+    assert len(compose) == 2
+    for cs in compose:
+        assert cs.parent is not None and cs.parent.span_id == gen_id, (
+            "슬롯 부모 span 이 agent.generation 의 자식이어야 한다")
+
+    # 각 슬롯 부모 아래에 llm.slot_generation + llm.slot_judge 가 *형제* 로 중첩(슬롯 단위
+    # 독립 검증·trace) — 생성과 검증이 같은 슬롯 부모 span_id 를 parent 로 갖는다.
+    compose_ids = {cs.context.span_id for cs in compose}
     slot_gen = [sp for sp in spans if sp.name == "llm.slot_generation"]
+    slot_judge = [sp for sp in spans if sp.name == "llm.slot_judge"]
+    assert len(slot_gen) == 2 and len(slot_judge) == 2, "슬롯마다 생성 1 + 검증 1"
+    for sp in slot_gen + slot_judge:
+        assert sp.parent is not None and sp.parent.span_id in compose_ids, (
+            f"{sp.name} 이 슬롯 부모(agent.slot_compose) 아래에 있어야 한다")
+    # 같은 슬롯의 생성·검증은 *같은* 슬롯 부모를 공유한다(슬롯별 묶임 확인).
+    for cs in compose:
+        kids = {sp.name for sp in spans
+                if sp.parent is not None and sp.parent.span_id == cs.context.span_id}
+        assert {"llm.slot_generation", "llm.slot_judge"} <= kids, (
+            f"슬롯 부모 {cs.name} 아래 생성+검증이 함께 있어야 한다: {kids}")
+        # judge span 에 슬롯 식별자·verdict 가 남는다(어느 슬롯 검증인지 명확).
+    judge_attrs = dict(slot_judge[0].attributes)
+    assert "slot.name" in judge_attrs and "slot.verify_verdict" in judge_attrs
+
+    # 종합 span 은 generation 직속(슬롯 부모 아님).
     synth = [sp for sp in spans if sp.name == "llm.synthesize"]
-    assert len(slot_gen) == 2 and len(synth) == 1
-    for sp in slot_gen + synth:
-        assert sp.parent is not None and sp.parent.span_id == gen_id, (
-            f"{sp.name} 이 agent.generation 의 자식이어야 한다")
-    # 부모 span 에 검증 status 가 남는다.
+    assert len(synth) == 1 and synth[0].parent.span_id == gen_id
+    # generation 부모 span 에 검증 status.
     assert dict(gen.attributes).get("generation.verification_status") == "pass"

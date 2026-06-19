@@ -465,8 +465,13 @@ class SlotSearchHandle:
     현 단계는 직렬 검색 어댑터 — task 가 현 도구를 백그라운드로 감싼다. 외부 노드 병렬 검색이
     준비되면 *같은 인터페이스* 에 병렬 future 를 꽂는다(코드 무변경)."""
 
-    def __init__(self, tasks: dict[str, "asyncio.Task[SlotSearchResult]"]) -> None:
+    def __init__(self, tasks: dict[str, "asyncio.Task[SlotSearchResult]"],
+                 *, end_span: Any = None) -> None:
         self._tasks = tasks
+        # 슬롯 retrieval 부모 span(agent.retrieval) turn-local 종료 콜백. _fire_slot_searches
+        # 가 span 을 열고 task 들을 그 자식으로 발사한 뒤 여기에 종료 콜백을 싣는다. aclose 가
+        # 모든 task 정리 후 1회 호출(멱등). 미설정(단일노드 degrade 등)이면 no-op.
+        self._end_span = end_span
 
     @property
     def slot_names(self) -> list[str]:
@@ -505,6 +510,13 @@ class SlotSearchHandle:
             # cancel 후 회수 — CancelledError 포함 모든 예외를 삼킨다(정리 목적이라 개별
             # task 실패는 무관). 이미 완료됐으나 미수확된 task 의 예외도 같이 흡수된다.
             await asyncio.gather(*pending, return_exceptions=True)
+        # 모든 슬롯 검색 task(자식 agent.slot.* span 포함)가 끝났으니 부모 retrieval span 을
+        # 닫는다 — 모든 슬롯 검색이 그 안에 중첩되도록 하는 종료점(멱등 — _end_span 이 자체
+        # 방어). 미설정이면 no-op.
+        ender = self._end_span
+        if ender is not None:
+            self._end_span = None
+            ender()
 
 
 @dataclass
