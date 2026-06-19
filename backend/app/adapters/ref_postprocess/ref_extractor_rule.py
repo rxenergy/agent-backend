@@ -268,7 +268,12 @@ For each NEEDED reference, attach a follow_up_query reformulated to search WITHI
 referenced document, in NRC domain English terminology, specific to the user's question \
 angle (10-40 words). For each follow_up_query:
 - query_text: the search query string.
-- intent: (optional) brief note on what aspect of the user's need this addresses.
+- intent: ONE sentence stating which facet of THIS slot this follow-up closes — i.e. \
+exactly what fact must be brought back from the cited document for the slot's answer to be \
+complete (e.g. "the numerical acceptance limits RG 1.68 sets for preoperational test \
+programs"). This is the bridge rationale a later verification step reads to judge whether \
+the re-searched chunks actually close the gap — be specific, not a generic restatement of \
+the query.
 
 Rules for follow-up queries:
 1. Attach a follow_up_query only to NEEDED references (those in your necessity-filtered list).
