@@ -396,7 +396,7 @@ def span_exporter():
 @pytest.mark.asyncio
 async def test_span_enrichment_ttft_root_output_and_slot_link(span_exporter) -> None:
     """D1/D2/D3 — root(agent.run) span 에 output·ttft·토큰, slot 생성 span 에 검색 카운트 +
-    그 슬롯 검색 span(agent.slot.<name>)으로의 link 가 붙는지(슬롯 단위 검색→생성 귀인)."""
+    그 슬롯 검색 span(agent.slot_search.<name>)으로의 link 가 붙는지(슬롯 단위 검색→생성 귀인)."""
     span_exporter.clear()
     with tempfile.TemporaryDirectory() as tmp:
         runner = VariantRegistry.build(
@@ -424,11 +424,10 @@ async def test_span_enrichment_ttft_root_output_and_slot_link(span_exporter) -> 
         gattrs = dict(gs.attributes)
         assert "slot.num_necessary" in gattrs
         assert "slot.search_method" in gattrs
-    # 검색 span(agent.slot.<name>) — agent.slot_compose.<name> 와 접두사가 겹치지 않게 분리.
+    # 검색 span(agent.slot_search.<name>) — compose(생성·검증)와 이름 대칭(search↔compose).
     search_span_ids = {sp.context.span_id for sp in all_spans
-                       if sp.name.startswith("agent.slot.")
-                       and not sp.name.startswith("agent.slot_compose.")}
-    assert search_span_ids, "검색 span(agent.slot.<name>)이 있어야 link 대상이 된다"
+                       if sp.name.startswith("agent.slot_search.")}
+    assert search_span_ids, "검색 span(agent.slot_search.<name>)이 있어야 link 대상이 된다"
     compose_spans = [sp for sp in all_spans
                      if sp.name.startswith("agent.slot_compose.")]
     assert len(compose_spans) == 2
@@ -445,7 +444,7 @@ async def test_planning_and_retrieval_span_nesting(span_exporter) -> None:
         *밖*(planning 형제) 이다 — triage 는 독립.
       - intake.spec_driven_answer_spec(N1)·intake.spec_driven_query(N2)는 agent.planning
         의 자식으로 중첩된다.
-      - agent.retrieval 이 agent.run 의 자식이고, 슬롯 검색 span(agent.slot.<name>)들이
+      - agent.retrieval 이 agent.run 의 자식이고, 슬롯 검색 span(agent.slot_search.<name>)들이
         그 자식으로 중첩된다(planning 이후 슬롯 단위 retrieval trace).
       - generation span 인과 힌트(search_relation=sibling)가 붙는다(오독 방지)."""
     span_exporter.clear()
@@ -481,10 +480,9 @@ async def test_planning_and_retrieval_span_nesting(span_exporter) -> None:
     assert n1 is not None and pid(n1) == sid(plan)
     assert n2 is not None and pid(n2) == sid(plan)
 
-    # 슬롯 검색 span(agent.slot.<name>, slot_compose 제외)은 retrieval 의 자식.
+    # 슬롯 검색 span(agent.slot_search.<name>)은 retrieval 의 자식.
     search_spans = [sp for sp in all_spans
-                    if sp.name.startswith("agent.slot.")
-                    and not sp.name.startswith("agent.slot_compose.")]
+                    if sp.name.startswith("agent.slot_search.")]
     assert search_spans, "슬롯 검색 span 이 있어야 한다"
     for ss in search_spans:
         assert pid(ss) == sid(retr), "슬롯 검색 span 은 agent.retrieval 의 자식이어야 한다"
@@ -495,6 +493,39 @@ async def test_planning_and_retrieval_span_nesting(span_exporter) -> None:
     gattrs = dict(gen.attributes)
     assert gattrs.get("generation.search_relation") == "sibling"
     assert "generation.search_evidence_via" in gattrs
+
+
+@pytest.mark.asyncio
+async def test_unexpected_slot_exception_ends_spans_with_error_status(
+        span_exporter) -> None:
+    """OTel-native 예외 처리(_ManualSpan) — 슬롯 루프 중간에 *예상 못한* 예외가 나면 수동
+    span(agent.slot_compose·agent.generation)이 leak 되지 않고 record_exception + Status(ERROR)
+    로 닫힌다(start_as_current_span 와 동형). judge 콜백이 RuntimeError 를 던져 주입한다."""
+    from opentelemetry.trace import StatusCode
+
+    def judge_boom(draft: str) -> dict:
+        raise RuntimeError("judge exploded")
+
+    llm = _ScriptLLM([_TRIAGE_RETRIEVAL, _SPEC_JSON, _QUERIES_JSON,
+                      _SLOT1, _SLOT2, _SYNTH], judge_for=judge_boom)
+    span_exporter.clear()
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = VariantRegistry.build(
+            COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
+            _deps(Path(tmp), llm=llm, with_verify=True))
+        with pytest.raises(RuntimeError, match="judge exploded"):
+            await runner.run(_req())
+
+    spans = span_exporter.get_finished_spans()
+    by_name = {sp.name: sp for sp in spans}
+    # generation span 이 leak 없이 닫혔고 ERROR status.
+    gen = by_name.get("agent.generation")
+    assert gen is not None, "예외에도 agent.generation 이 종료(export)돼야 한다(leak 없음)"
+    assert gen.status.status_code == StatusCode.ERROR
+    # 열려 있던 슬롯 부모 span 도 ERROR 로 닫힌다(active_slot 안전판).
+    compose = [sp for sp in spans if sp.name.startswith("agent.slot_compose.")]
+    assert compose, "예외 시점에 열린 슬롯 부모 span 이 종료(export)돼야 한다"
+    assert any(sp.status.status_code == StatusCode.ERROR for sp in compose)
 
 
 def _prompt_render(tmp: Path) -> dict:

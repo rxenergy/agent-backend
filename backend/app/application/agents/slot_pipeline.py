@@ -145,7 +145,7 @@ class _SlotPipelineResult:
     num_second_pass: int = 0
     second_method: str = "skip"
     rationale2: str = ""
-    # 이 슬롯 검색-검증 span(agent.slot.<name>)의 context — 생성 루프가 llm.slot_generation
+    # 이 슬롯 검색-검증 span(agent.slot_search.<name>)의 context — 생성 루프가 llm.slot_generation
     # span 을 여기에 *link* 로 잇는다(D3). 검색이 생성보다 먼저 떠 부모-자식 불가 →
     # OTel link 로 슬롯 단위 검색→생성 귀인. span 미생성(0건 degrade)이면 None.
     span_context: Any = None
@@ -207,9 +207,10 @@ class _SlotPipelineMixin:
         `pre_tool_results` 는 호출부(composer_pipelined)가 슬롯 1차 검색을 이 함수 *밖*에서
         돌렸을 때 그 tool_results 를 앞에 합치기 위한 것(record 순서 보존). v2 는 None.
 
-        슬롯의 4 stage 도구 호출은 여기서 연 `agent.slot.<name>` span 하나의 자식으로 묶인다
-        — gather task 마다 contextvars 가 독립이라 슬롯끼리 섞이지 않는다(Phoenix 에서
-        agent.run > agent.slot.<name> > {도구} 로 슬롯 단위로 읽힌다)."""
+        슬롯의 4 stage 도구 호출은 여기서 연 `agent.slot_search.<name>` span 하나의 자식으로
+        묶인다 — gather task 마다 contextvars 가 독립이라 슬롯끼리 섞이지 않는다(Phoenix 에서
+        agent.retrieval > agent.slot_search.<name> > {도구} 로 슬롯 단위로 읽힌다). 이름이
+        생성/검증 부모(agent.slot_compose.<name>)와 대칭(search↔compose)이라 혼동이 없다."""
         tool_results: list[Any] = list(pre_tool_results or [])
         # verify LLM 호출 직전 — 본문 동일 청크는 최신판 1개로 접는다(CFR 연도판 등).
         # by_id 부터 일관되게 축소된 집합을 보도록 진입부에서 한 번 dedup.
@@ -223,7 +224,7 @@ class _SlotPipelineMixin:
                 tool_results=tool_results,
             )
 
-        with _TRACER.start_as_current_span(f"agent.slot.{slot_name}") as slot_span:
+        with _TRACER.start_as_current_span(f"agent.slot_search.{slot_name}") as slot_span:
             oi.set_kind(slot_span, oi.KIND_CHAIN)
             oi.set_io(slot_span, input_value=slot_query)
             slot_span.set_attribute("slot.name", slot_name)
@@ -499,7 +500,7 @@ class SlotSearchHandle:
 
         생성 루프가 조기 return(LLM-unavailable refuse 등)하거나 정상 종료할 때, 아직
         돌고 있는 백그라운드 슬롯 검색 task 가 남으면 (a) asyncio 가 "Task was destroyed
-        but it is pending" 경고를 내고, (b) 그 task 안에서 연 `agent.slot.<name>`·도구
+        but it is pending" 경고를 내고, (b) 그 task 안에서 연 `agent.slot_search.<name>`·도구
         span 이 flush 전에 버려져 Phoenix/Tempo 에서 dangling span 으로 남거나 유실된다.
         호출부가 `finally` 에서 이걸 부르면 미완료 task 를 cancel + 회수해 깔끔히 닫는다.
         결정성과 무관(이미 소비된 결과는 불변 — 미소비 task 만 정리)."""
@@ -510,7 +511,7 @@ class SlotSearchHandle:
             # cancel 후 회수 — CancelledError 포함 모든 예외를 삼킨다(정리 목적이라 개별
             # task 실패는 무관). 이미 완료됐으나 미수확된 task 의 예외도 같이 흡수된다.
             await asyncio.gather(*pending, return_exceptions=True)
-        # 모든 슬롯 검색 task(자식 agent.slot.* span 포함)가 끝났으니 부모 retrieval span 을
+        # 모든 슬롯 검색 task(자식 agent.slot_search.* span 포함)가 끝났으니 부모 retrieval span 을
         # 닫는다 — 모든 슬롯 검색이 그 안에 중첩되도록 하는 종료점(멱등 — _end_span 이 자체
         # 방어). 미설정이면 no-op.
         ender = self._end_span

@@ -33,6 +33,10 @@ import asyncio
 import time
 from typing import Any
 
+from opentelemetry import context as otel_context
+from opentelemetry import trace as otel_trace
+from opentelemetry.trace import Link, Status, StatusCode
+
 from app.application.agents.events import emit_reasoning, emit_step, emit_token
 from app.application.agents.composer import ComposerRunner
 from app.application.agents.registry import AgentDeps, register_variant
@@ -71,6 +75,47 @@ _TRACER = get_tracer("agent")
 _LOG = get_logger("agent.composer_pipelined")
 
 COMPOSER_PIPELINED_VARIANT_ID = "composer_pipelined"
+
+
+class _ManualSpan:
+    """비동기 파이프라인에서 `start_as_current_span`(컨텍스트 매니저)을 lexical 하게 쓸 수
+    없는 span(검색 task 보다 먼저 떠 re-indent 불가)을 OTel-native 하게 다루는 헬퍼.
+
+    `start_as_current_span` 이 자동으로 해 주는 것 — (1) span 을 current context 로 attach,
+    (2) 정상 종료 시 end, (3) *예외 시 record_exception + Status(ERROR)* — 을 수동 span 에서도
+    동일하게 보장한다. `end(exc=...)` 는 멱등(정상 1회 + 안전판 1회 중 먼저 실행된 쪽만 실효)
+    이고, 예외를 받으면 ERROR status·record_exception 을 남긴 뒤 닫는다(OTel 권장)."""
+
+    __slots__ = ("span", "_token", "_ended")
+
+    def __init__(self, name: str, *, kind: str, links: list[Link] | None = None,
+                 attach: bool = True):
+        self.span = _TRACER.start_span(name, links=links or None)
+        oi.set_kind(self.span, kind)
+        # attach=True 면 이 span 을 current context 로 → 이후 start_as_current_span 들이
+        # 이 span 을 부모로 잡는다(re-indent 없이 자식 중첩). attach=False 는 비동기 task 가
+        # 따로 부모로 캡처할 span(검색 부모)용 — current 로 만들지 않는다.
+        self._token = (otel_context.attach(
+            otel_trace.set_span_in_context(self.span)) if attach else None)
+        self._ended = False
+
+    def set(self, key: str, value: Any) -> "_ManualSpan":
+        if not self._ended:
+            self.span.set_attribute(key, value)
+        return self
+
+    def end(self, exc: BaseException | None = None) -> None:
+        """멱등 종료. exc 가 있으면 record_exception + Status(ERROR)(start_as_current_span 의
+        예외 처리와 동형). attach 했던 context 는 LIFO 로 detach 한다."""
+        if self._ended:
+            return
+        self._ended = True
+        if exc is not None:
+            self.span.record_exception(exc)
+            self.span.set_status(Status(StatusCode.ERROR, str(exc)[:500]))
+        if self._token is not None:
+            otel_context.detach(self._token)
+        self.span.end()
 
 # 슬롯 단위 환각 검증 — **LLM-as-judge**(composer_orchestrated_generation.design.v2 §1, 사용자
 # 결정). 결정론 등급 게이트(cite-범위·약귀속 룰)는 신뢰할 수 없어 폐기하고, 외부 verifier 모델이
@@ -296,9 +341,9 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         돈다. 배리어 없이 동시 발사 — gather 는 생성 루프가 슬롯별 await 로 대신한다.
 
         planning 직후의 슬롯 단위 retrieval 전체를 단일 부모 span(agent.retrieval)으로
-        묶는다. 각 슬롯 검색 task 는 `agent.slot.<name>` span 을 여는데(slot_pipeline),
+        묶는다. 각 슬롯 검색 task 는 `agent.slot_search.<name>` span 을 여는데(slot_pipeline),
         task 를 이 span context 안에서 create_task 하면 contextvars 캡처로 그 span 들이
-        agent.run > agent.retrieval > agent.slot.* 로 중첩된다. 검색은 백그라운드 진행이라
+        agent.run > agent.retrieval > agent.slot_search.* 로 중첩된다. 검색은 백그라운드 진행이라
         span 을 수동으로 열고(attach → task 발사 → 즉시 detach), 모든 task 정리 후
         handle.aclose 가 닫는다(generation span 과 동형 — 배리어 없이도 묶임 보존)."""
         spec_block = _render_spec_block(spec)
@@ -333,35 +378,28 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 )
 
         # agent.retrieval 부모 span — task 발사 동안만 OTel context 에 attach 해 각 슬롯
-        # 검색 task(agent.slot.*)가 이 span 을 부모로 캡처하게 한다. task 는 비동기 백그라운드
-        # 진행이라 span 은 즉시 닫지 않고(attach 직후 detach 만), 모든 task 정리 후 aclose 가
-        # _end_retrieval_span 으로 닫는다. detach 는 *생성 시점* current context 만 복원하므로
-        # 호출부의 root context 가 그대로 유지된다(생성 루프 span 들에 영향 없음).
-        from opentelemetry import context as _otel_context
-        from opentelemetry import trace as _otel_trace
-        retr_span = _TRACER.start_span("agent.retrieval")
-        oi.set_kind(retr_span, oi.KIND_RETRIEVER)
-        retr_span.set_attribute("retrieval.num_slots", len(spec.required_slots))
-        retr_span.set_attribute("retrieval.pipelined", True)
-        _retr_token = _otel_context.attach(
-            _otel_trace.set_span_in_context(retr_span))
+        # 검색 task(agent.slot_search.*)가 이 span 을 부모로 캡처하게 한다. task 는 비동기
+        # 백그라운드 진행이라 span 은 즉시 닫지 않고(attach 는 발사 window 동안만), 모든 task
+        # 정리 후 aclose 가 _end_retrieval_span 으로 닫는다. attach=False 로 만들어 *발사 window*
+        # 에서만 수동 attach/detach 하므로 호출부 root context 는 그대로(생성 루프에 영향 없음).
+        retr = _ManualSpan("agent.retrieval", kind=oi.KIND_RETRIEVER, attach=False)
+        retr.set("retrieval.num_slots", len(spec.required_slots))
+        retr.set("retrieval.pipelined", True)
+        _retr_token = otel_context.attach(
+            otel_trace.set_span_in_context(retr.span))
         try:
             tasks: dict[str, asyncio.Task[SlotSearchResult]] = {
                 s.name: asyncio.create_task(_search_slot(s.name))
                 for s in spec.required_slots
             }
         finally:
-            _otel_context.detach(_retr_token)
+            otel_context.detach(_retr_token)
 
-        _ended = {"done": False}
-
-        def _end_retrieval_span() -> None:
-            # 멱등 — 모든 슬롯 검색 task 정리 후 aclose 가 1회 호출. detach 는 task 발사 때
-            # 이미 했으므로 여기선 span.end 만(context 복원 불필요 — 이 콜백은 어느 context 든).
-            if _ended["done"]:
-                return
-            _ended["done"] = True
-            retr_span.end()
+        def _end_retrieval_span(exc: BaseException | None = None) -> None:
+            # 멱등 — 모든 슬롯 검색 task 정리 후 aclose 가 1회 호출. attach 는 발사 때 이미
+            # detach 했으므로 _ManualSpan.end 는 span.end 만 한다(token=None). 예외 전달 시
+            # record_exception + ERROR status(OTel 권장).
+            retr.end(exc)
 
         return SlotSearchHandle(tasks, end_span=_end_retrieval_span)
 
@@ -562,6 +600,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         # 생성 루프 전체를 try/finally 로 감싸 *어떤 종료 경로*(정상·조기 refuse·예외)에서도
         # 미소비 슬롯 검색 task 를 정리한다(orphan span/경고 방지 — 설계 §8/§7). handle.aclose
         # 는 이미 소비된 결과를 건드리지 않으므로 결정성 무관.
+        loop_exc: BaseException | None = None
         try:
             return await self._run_slot_generation_loop(
                 request, started, tool_calls, tool_result_refs,
@@ -576,14 +615,18 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 verify_pins=verify_pins, fq_all=fq_all,
                 streamed_parts=streamed_parts, cites=cites, root=root,
             )
+        except BaseException as exc:  # noqa: BLE001 — span 에 예외 기록 후 그대로 전파.
+            loop_exc = exc
+            raise
         finally:
             # 미소비 슬롯 검색 task 정리 + generation 부모 span 안전 종료(조기 refuse/예외
-            # 경로 — 정상 경로는 루프가 이미 멱등 종료). _end_generation_span 은 루프가 핀했고,
-            # 미설정(루프 진입 전 예외)이면 no-op.
+            # 경로 — 정상 경로는 루프가 이미 멱등 종료). 예외가 있으면 generation span 에
+            # record_exception + ERROR status(start_as_current_span 와 동형). _end_generation_span
+            # 은 루프가 핀했고, 미설정(루프 진입 전 예외)이면 no-op.
             await handle.aclose()
             ender = getattr(self, "_end_generation_span", None)
             if ender is not None:
-                ender()
+                ender(loop_exc)
                 self._end_generation_span = None  # turn-local 핀 해제(stale 호출 방지).
 
     async def _run_slot_generation_loop(
@@ -633,33 +676,32 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         # attach/detach 해 이후 start_as_current_span 들이 이 span 을 부모로 잡게 한다.
         # 본문 토큰이 흐르기 전(루프 진입 전)에 시작해, 종합까지 포함하고 answer_text 조립
         # 전에 닫는다(N5 finalize 는 generation 밖). 예외/조기 refuse 에도 finally 로 종료.
-        from opentelemetry import context as _otel_context
-        from opentelemetry import trace as _otel_trace
-        gen_span = _TRACER.start_span("agent.generation")
-        oi.set_kind(gen_span, oi.KIND_CHAIN)
-        gen_span.set_attribute("generation.num_slots", num_slots)
-        # 인과 힌트 — generation 은 슬롯 검색(agent.retrieval > agent.slot.*)과 *형제* span 이고
-        # (검색 task 가 생성보다 먼저 떠 부모-자식 중첩 불가), 인과 검색→생성은 각
-        # llm.slot_generation span 의 OTel *link*(D3)로만 담긴다. Phoenix waterfall 만 보면
-        # generation 이 검색보다 먼저 시작해(루프 진입 즉시 open) "근거 없이 생성"으로 인과를
-        # 거꾸로 읽을 위험이 있어, 그 오독을 막는 명시 속성을 남긴다(근거는 link 로 추적).
-        gen_span.set_attribute("generation.search_relation", "sibling")
-        gen_span.set_attribute(
-            "generation.search_evidence_via",
-            "otel.link on llm.slot_generation -> agent.slot.<name>")
-        _gen_token = _otel_context.attach(
-            _otel_trace.set_span_in_context(gen_span))
+        # agent.generation 부모 span — attach=True 로 current context 에 올려 이후
+        # start_as_current_span(슬롯 부모·종합)들이 이 span 을 부모로 잡게 한다(re-indent 없이).
+        gen = _ManualSpan("agent.generation", kind=oi.KIND_CHAIN, attach=True)
+        gen.set("generation.num_slots", num_slots)
+        # 인과 힌트 — generation 은 슬롯 검색(agent.retrieval > agent.slot_search.*)과 *형제*
+        # span 이고(검색 task 가 생성보다 먼저 떠 부모-자식 중첩 불가), 인과 검색→생성은 각
+        # 슬롯 부모(agent.slot_compose.<name>)의 OTel *link*(D3)로만 담긴다. Phoenix waterfall
+        # 만 보면 generation 이 검색보다 먼저 시작해 "근거 없이 생성"으로 인과를 거꾸로 읽을
+        # 위험이 있어, 그 오독을 막는 명시 속성을 남긴다(근거는 link 로 추적).
+        gen.set("generation.search_relation", "sibling")
+        gen.set("generation.search_evidence_via",
+                "otel.link on agent.slot_compose.<name> -> agent.slot_search.<name>")
 
-        def _end_generation_span() -> None:
-            # 멱등 — generation span 을 닫고 OTel context 를 복원한다. answer_text 조립 전(정상)
-            # 1회, 조기 refuse/예외 경로의 안전판(_generate_pipelined finally)에서 1회 — 둘 중
-            # 먼저 호출된 쪽만 실효(이중 detach/end 방지).
-            nonlocal gen_span
-            if gen_span is None:
-                return
-            _otel_context.detach(_gen_token)
-            gen_span.end()
-            gen_span = None
+        # 현재 열려 있는 슬롯 부모 span(_ManualSpan) — 루프 중간에 *예상 못한* 예외가 나면
+        # 그 슬롯 span 이 leak 되므로, generation ender 가 닫을 수 있게 추적한다(end 멱등이라
+        # 정상 경로엔 무영향). 한 번에 한 슬롯만 열린다(생성은 순차).
+        active_slot: list[_ManualSpan | None] = [None]
+
+        def _end_generation_span(exc: BaseException | None = None) -> None:
+            # 멱등 — (예외 시) 아직 열린 슬롯 span 을 먼저 닫고, generation span 을 닫고 context
+            # 복원(answer_text 조립 전 정상 1회 + 조기 refuse/예외 안전판 1회 중 먼저 실행된 쪽만
+            # 실효). exc 전달 시 두 span 모두 record_exception + ERROR status.
+            if active_slot[0] is not None:
+                active_slot[0].end(exc)
+                active_slot[0] = None
+            gen.end(exc)
 
         # generation span 을 루프 밖에서 닫을 수 있도록 인스턴스에 핀(조기 refuse/예외 시
         # _generate_pipelined 의 finally 가 호출). 한 turn 내 단일 호출이라 안전.
@@ -725,28 +767,23 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             slot_links = []
             search_ctx = getattr(pipe, "span_context", None)
             if search_ctx is not None:
-                from opentelemetry.trace import Link
                 slot_links = [Link(search_ctx)]
-            slot_span = _TRACER.start_span(
-                f"agent.slot_compose.{slot.name}", links=slot_links)
-            oi.set_kind(slot_span, oi.KIND_CHAIN)
-            slot_span.set_attribute("slot.name", slot.name)
-            slot_span.set_attribute("slot.facet", slot.facet or "")
-            slot_span.set_attribute("slot.index", idx)
-            _slot_tok = _otel_context.attach(
-                _otel_trace.set_span_in_context(slot_span))
-            _slot_ended = False
+            _slotspan = _ManualSpan(
+                f"agent.slot_compose.{slot.name}", kind=oi.KIND_CHAIN,
+                links=slot_links, attach=True)
+            _slotspan.set("slot.name", slot.name)
+            _slotspan.set("slot.facet", slot.facet or "")
+            _slotspan.set("slot.index", idx)
+            active_slot[0] = _slotspan  # leak 방지 — generation ender 가 닫을 수 있게 추적.
 
-            def _end_slot_span(verdict: str | None = None) -> None:
-                # 멱등 — 슬롯 부모 span 종료 + context 복원(정상 종료 1회, 조기 refuse 안전판 1회).
-                nonlocal _slot_ended
-                if _slot_ended:
-                    return
+            def _end_slot_span(verdict: str | None = None,
+                               exc: BaseException | None = None) -> None:
+                # 멱등 — 슬롯 부모 span 종료 + context 복원(정상 1회, 조기 refuse/예외 안전판 1회).
+                # exc 전달 시 record_exception + ERROR status(start_as_current_span 와 동형).
                 if verdict is not None:
-                    slot_span.set_attribute("slot.verify_verdict", verdict)
-                _otel_context.detach(_slot_tok)
-                slot_span.end()
-                _slot_ended = True
+                    _slotspan.set("slot.verify_verdict", verdict)
+                _slotspan.end(exc)
+                active_slot[0] = None
 
             await emit_step("slot_generation", "started", slot=slot.name,
                             facet=slot.facet or "-", num_chunks=len(sub_chunks),
@@ -755,7 +792,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             # 생성과 병렬로 도는 파이프라인에서 이 reasoning 방출이 생성 본문 스트림과 섞여
             # 답변이 깨지는(thinking 이 본문에 새는) 현상이 있었다. 검증 근거 자체는
             # verify_pins(rationale/rationale2 포함)로 그대로 모아 재현 핀(_build_qu_pin →
-            # spec_driven.verify)과 OTel span(agent.slot.<name> output_value)에 남으므로
+            # spec_driven.verify)과 OTel span(agent.slot_search.<name> output_value)에 남으므로
             # 관측/재현은 영향 없다 — UI thinking 으로 흘리는 한 줄만 제거한다.
             # await emit_reasoning(
             #     f"\n**슬롯 검증 (Node1) — {slot.name}**\n"
@@ -956,7 +993,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         # generation 단계(슬롯 루프 + 종합) 종료 — 부모 span 을 여기서 닫는다(answer_text
         # 조립·N5 finalize 는 generation 밖). 검증 집계 status 를 span 에 남겨 Phoenix 에서
         # 이 turn 의 환각 위험을 generation 노드 한 곳에서 읽는다.
-        gen_span.set_attribute("generation.verification_status", verification_status)
+        gen.set("generation.verification_status", verification_status)
         _end_generation_span()
 
         answer_text = body_text + (("\n\n" + closing) if closing else "")
