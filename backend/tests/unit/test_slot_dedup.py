@@ -90,5 +90,61 @@ def test_exception_safe_with_none_metadata() -> None:
     assert _ids(out) == ["b", "c"]
 
 
+def test_near_dup_punctuation_only_merges() -> None:
+    """띄어쓰기·문장부호만 다른 본문(>=0.95) → 최신 1개로 병합."""
+    a = _chunk("a", text="The reactor coolant system shall be designed to withstand.",
+               response_date="2010-01-01")
+    b = _chunk("b", text="The reactor coolant system shall be designed to withstand",
+               response_date="2020-01-01")
+    out = dedupe_latest_version([a, b])
+    assert _ids(out) == ["b"]
+
+
+def test_near_dup_numeric_revision_keeps_latest() -> None:
+    """revision 에 따라 수치만 달라진 동일 문장(>=0.95) → 최신 청크만 남고 오래된 값 제거."""
+    old = _chunk("old", text="Containment design pressure shall not exceed 1034 kPa gauge.",
+                 response_date="1997-01-01")
+    new = _chunk("new", text="Containment design pressure shall not exceed 1138 kPa gauge.",
+                 response_date="2025-01-01")
+    out = dedupe_latest_version([old, new])
+    assert _ids(out) == ["new"]
+
+
+def test_below_threshold_keeps_both() -> None:
+    """본문이 절반가량 다르면(<0.95) 병합하지 않고 둘 다 보존."""
+    a = _chunk("a", text="The reactor coolant system shall be designed to withstand loads.")
+    b = _chunk("b", text="Emergency core cooling must remain operable after a transient.")
+    out = dedupe_latest_version([a, b])
+    assert _ids(out) == ["a", "b"]
+
+
+def test_length_gate_keeps_superset_separate() -> None:
+    """한 청크가 다른 청크 본문에 긴 추가문단을 포함(길이비 <0.95) → 별개로 보존."""
+    short = _chunk("short", text="Containment design pressure shall not exceed 1138 kPa.")
+    long = _chunk(
+        "long",
+        text=(
+            "Containment design pressure shall not exceed 1138 kPa. "
+            + "Additional analysis covering thermal hydraulic transients, structural "
+            "margins, and post-accident monitoring is required for the licensing basis "
+            "and must be documented in the safety analysis report appendices in full."
+        ),
+    )
+    out = dedupe_latest_version([short, long])
+    assert _ids(out) == ["short", "long"]
+
+
+def test_three_near_dups_collapse_to_latest() -> None:
+    """near-dup 3개 클러스터 → 최신 1개만 남는다(다중 멤버 클러스터)."""
+    a = _chunk("a", text="The setpoint value shall be 100 percent of rated flow.",
+               response_date="2000-01-01")
+    b = _chunk("b", text="The setpoint value shall be 101 percent of rated flow.",
+               response_date="2010-01-01")
+    c = _chunk("c", text="The setpoint value shall be 102 percent of rated flow.",
+               response_date="2020-01-01")
+    out = dedupe_latest_version([a, b, c])
+    assert _ids(out) == ["c"]
+
+
 def test_empty_input() -> None:
     assert dedupe_latest_version([]) == []

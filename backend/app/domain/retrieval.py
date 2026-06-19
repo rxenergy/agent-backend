@@ -121,6 +121,18 @@ class RerankOutput(BaseModel):
     scores: dict[str, float] = Field(default_factory=dict)  # chunk_id → rerank 점수
 
 
+class SlotVerdict(str, Enum):
+    """verify_slot BINARY 판정 — 슬롯 1차 검색 결과 전체를 두 상태로만 분류한다(3-state 금지).
+
+    HAS_NECESSARY: 청크 식별자(necessary/neighbor/multihop)를 산출 → follow_up 경로(기존).
+    NONE_NECESSARY: 검색 결과 전체가 빗나가 쓸 청크가 없음 → 청크 대신 단일 opinion
+    (why_not_needed + what_is_needed)을 내고, retrieval.rescope 가 검색 스코프를 재계획해
+    1회 재검색한다(3차 홉 없음). 어느 청크라도 도움되면 HAS_NECESSARY 가 우선."""
+
+    HAS_NECESSARY = "has_necessary"
+    NONE_NECESSARY = "none_necessary"
+
+
 class VerifySlotInput(BaseModel):
     """retrieval.verify_slot 입력(spec_driven_v2 Node2 검증). 슬롯 1개의 1차 검색
     결과를 "사용자 질문 + answer_spec + 검색 쿼리" 기준으로 판정한다."""
@@ -155,6 +167,12 @@ class VerifySlotResult(BaseModel):
     # 합성한 요약 — 핀/ UI thinking 연속성용(verify_slot_v2 는 더 이상 자유 rationale 을 내지 않음).
     rationale: str = ""
     method: str = "llm"  # "llm" | "fallback"
+    # BINARY 판정(SlotVerdict). 기본 has_necessary → verdict 없는 기존 출력은 오늘과 동일.
+    verdict: str = SlotVerdict.HAS_NECESSARY.value
+    # none_necessary 일 때만 채워진다: 전체 청크 집합이 왜 불필요한지(why_not_needed) +
+    # 어떤 종류의 청크/정보가 필요한지(what_is_needed). retrieval.rescope 가 이걸 받아 스코프
+    # 를 재계획한다. address-not-content 불변 — 청크 본문 복사가 아니라 필요한 *종류*의 기술.
+    opinion: dict[str, str] = Field(default_factory=dict)
 
 
 class FollowUpQueryItem(BaseModel):
@@ -194,6 +212,53 @@ class FollowUpResult(BaseModel):
 
     follow_up_queries: list[FollowUpQueryItem] = Field(default_factory=list)
     ref_filter: dict[str, Any] = Field(default_factory=dict)
+
+
+class RescopeInput(BaseModel):
+    """retrieval.rescope 입력 — none_necessary 슬롯의 검색 스코프 재계획.
+
+    verify_slot 이 "이 슬롯 1차 검색 결과 전체가 불필요"(none_necessary)로 판정하면,
+    그 의견(why_not_needed/what_is_needed)과 1차 planning 스코프 요약(initial_scope)을
+    받아 planning 단계와 동일한 스코프 어휘(collection/status/design/canonical_id +
+    boost/filter mode)로 검색 스코프를 *새로* 잡는다(완전 재계획 — collection 전환 허용,
+    단 초기 스코프를 *고려 대상*으로 전달). follow_up(외부 문서 target_source_ids 산출)과
+    출력 계약이 달라 별도 도구로 둔다."""
+
+    model_config = ConfigDict(frozen=True)
+
+    query_text: str
+    answer_spec: str               # 렌더된 답변 사양 블록(_render_spec_block 산출)
+    slot_name: str
+    slot_query: str                # 1차 검색에 쓴 슬롯 쿼리(text)
+    why_not_needed: str            # verify_slot opinion — 1차 결과가 왜 빗나갔는지
+    what_is_needed: str            # verify_slot opinion — 어떤 종류의 청크/정보가 필요한지
+    # 1차 planning 스코프 요약(collection/status/design/canonical_id + mode). 재계획 시
+    # *고려 대상*(고정 아님) — 빈 dict 면 스코프 힌트 없이 재계획.
+    initial_scope: dict[str, Any] = Field(default_factory=dict)
+    max_queries: int = 3
+
+
+class RescopeQueryItem(BaseModel):
+    """재계획된 검색 쿼리 1개 — planning(FormulatedQuery)과 동일 표현. query_text +
+    결정형 게이트로 해소된 target(boost)/filters(hard-scope). scope_audit 는 무시/기각된
+    채널 감사(silent drop 금지)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    query_text: str
+    target: dict[str, list[str]] = Field(default_factory=dict)
+    filters: dict[str, Any] = Field(default_factory=dict)
+    scope_audit: dict[str, Any] = Field(default_factory=dict)
+
+
+class RescopeResult(BaseModel):
+    """retrieval.rescope 도구 출력. `method`("llm"|"fallback")로 silent degrade 방지 —
+    fallback 은 LLM 미가용/파싱 실패 시 빈 queries(파이프라인이 재검색 skip)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    queries: list[RescopeQueryItem] = Field(default_factory=list)
+    method: str = "llm"  # "llm" | "fallback"
 
 
 class DocumentFetchSectionInput(BaseModel):

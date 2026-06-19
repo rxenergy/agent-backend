@@ -259,3 +259,18 @@ class SpecDrivenVerifySource(_SpecDrivenPromptSource):
         self, prompt_dir: str | Path, *, profile_id: str = "spec_driven_verify_v2"
     ) -> None:
         super().__init__(prompt_dir, profile_id=profile_id)
+
+
+class SpecDrivenRescopeSource(_SpecDrivenPromptSource):
+    """spec_driven_v2 retrieval.rescope — none_necessary 슬롯의 스코프 재계획 프롬프트
+    source(json_schema guided). verify_slot 이 none_necessary 판정 시, opinion + 1차
+    planning 스코프를 받아 검색 스코프를 새로 잡는다(planning 스코프 어휘 재사용).
+    secondary_llm(Node2)에서 호출된다 — verify/follow_up 과 같은 노드."""
+
+    registry_key = "spec_driven_rescope_prompts"
+    has_schema = True
+
+    def __init__(
+        self, prompt_dir: str | Path, *, profile_id: str = "spec_driven_rescope_v1"
+    ) -> None:
+        super().__init__(prompt_dir, profile_id=profile_id)

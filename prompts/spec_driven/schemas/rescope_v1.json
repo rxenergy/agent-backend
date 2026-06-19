@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "spec_driven_rescope_v1",
+  "description": "spec_driven_v2 retrieval.rescope output. queries = re-planned search queries for one slot whose first-pass search was entirely off-target. query_text = compact English regulatory noun phrase (BM25 lexical anchors). Each query carries scope channels, each with a {boost|filter} mode: collection (corpus document family), status (regulatory currency — RG/SRP/DSRS only), design (NuScale design family — nuscale_* only), canonical_id (normalized document id for exact targeting). status applies ONLY to regulatory collections and design ONLY to NuScale collections — mutually exclusive (the code drops a channel set on the wrong collection). Re-scoping MAY switch collection / flip boost<->filter relative to the initial scope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reasoning", "queries"],
+  "properties": {
+    "reasoning": {"type": "string", "description": "1-2 sentence rationale written *before* building the queries: how the diagnosis (why_not_needed / what_is_needed) changes the scope relative to the initial scope. Guided decoding decodes this first (leading CoT)."},
+    "queries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["query_text"],
+        "properties": {
+          "query_text": {"type": "string"},
+          "collection": {
+            "type": ["string", "null"],
+            "enum": ["10CFR", "DSRS", "FR", "RG", "SRP", "nuscale_Affidavit", "nuscale_Audit", "nuscale_DCA", "nuscale_etc", "nuscale_FSAR", "nuscale_Inspection", "nuscale_Letter", "nuscale_Meeting", "nuscale_RAI", "nuscale_SER", "nuscale_TechReport", "nuscale_Topical_Report", null]
+          },
+          "collection_mode": {
+            "type": "string",
+            "enum": ["boost", "filter"],
+            "default": "boost",
+            "description": "How to apply collection: 'boost' = additive in-scope boost, excludes nothing (recall-safe, default); 'filter' = hard-restrict the search population to that collection. Switch decisively from the initial collection when the diagnosis pins a different family."
+          },
+          "status": {
+            "type": ["string", "null"],
+            "enum": ["current", "history", "draft", "withdrawn", "AdditionalInformation", null],
+            "description": "Regulatory currency. ONLY for RG/SRP/DSRS collections (10CFR/FR and NuScale documents have no status — leave null). Default 'current' unless the diagnosis asks for history/draft/withdrawn."
+          },
+          "status_mode": {
+            "type": "string",
+            "enum": ["boost", "filter"],
+            "default": "boost",
+            "description": "How to apply status: 'boost' (default) or 'filter'."
+          },
+          "design": {
+            "type": ["string", "null"],
+            "enum": ["US600", "US460", "PreApp", null],
+            "description": "NuScale design family. ONLY for nuscale_* collections (regulatory documents have no design — leave null). US600 = certified DCA baseline (~50 MWe/module); US460 = later SDAA (~77 MWe/module); PreApp = pre-application. Default 'US600' unless the diagnosis names US460 / the SDAA / Docket 05200050 / pre-application material."
+          },
+          "design_mode": {
+            "type": "string",
+            "enum": ["boost", "filter"],
+            "default": "boost",
+            "description": "How to apply design: 'boost' (default, additive) or 'filter'."
+          },
+          "canonical_id": {
+            "type": ["string", "null"],
+            "description": "Normalized document id for version/section targeting. NRC_MANUAL forms: RG-{division}.{num}, SRP-{ch}.{sec}, DSRS-{sec}, 10CFR-Part{N} for a single 10 CFR Part (10 CFR 50.46 -> 10CFR-Part50, GDC -> 10CFR-Part50; do NOT emit 10CFR-Part1-50). NuScale FSAR forms (nuscale_FSAR only): FSAR-Part02-Ch{N} for a Tier-2 chapter 1-21 (ECCS->Ch06, accident analysis->Ch15), or FSAR-Part{01,07,08,09,10}. Revision NOT included. Do NOT invent one for title-keyword documents. null when not confidently mappable. The code re-validates and drops on failure."
+          },
+          "canonical_id_mode": {
+            "type": "string",
+            "enum": ["boost", "filter"],
+            "default": "boost",
+            "description": "How to apply canonical_id: 'boost' (default) or 'filter' (hard-restrict to that exact document grouping)."
+          }
+        }
+      }
+    }
+  }
+}

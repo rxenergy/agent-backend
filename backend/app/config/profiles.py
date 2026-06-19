@@ -65,6 +65,7 @@ from app.application.prompting.spec_driven_source import (
     SpecDrivenGenerationV2Source,
     SpecDrivenQuerySource,
     SpecDrivenQueryV2Source,
+    SpecDrivenRescopeSource,
     SpecDrivenTriageSource,
     SpecDrivenTriageV2Source,
     SpecDrivenVerifySource,
@@ -313,6 +314,7 @@ async def build_container(settings: Settings) -> AppContainer:
     spec_driven_v2_triage_source: Any = None
     spec_driven_v2_general_source: Any = None
     spec_driven_v2_verify_source: Any = None
+    spec_driven_v2_rescope_source: Any = None
     summarizer: ConversationSummarizer | None = None
     corpus_map: Any = None
 
@@ -568,6 +570,46 @@ async def build_container(settings: Settings) -> AppContainer:
                     hint="secondary_llm is openai_compat but tool init failed; single-node degrade",
                 )
 
+        # retrieval.rescope — verify_slot 이 none_necessary(1차 검색 전체 빗나감)로 판정한
+        # 슬롯의 검색 스코프를 재계획한다. verify/follow_up 과 같은 **sub 노드**(Node2 =
+        # secondary_llm)에서 돌고, 같은 가드(secondary_llm 이 structured-output provider 일
+        # 때만 배선)를 쓴다. 미배선/실패는 graceful skip(none_necessary 슬롯 재검색 없음 →
+        # 그 슬롯 기여 0, 단일노드 degrade). verify·follow_up 과 같은 Node2 를 공유하므로 셋의
+        # 동시 호출이 같은 vLLM 예산을 두고 경쟁한다(아래 캡 — verify/follow_up 과 동일 손잡이).
+        rescope_tool = None
+        _rescope_entry = next(
+            (e for e in settings.llm_pool if e.id == secondary_llm_id), None
+        )
+        if (
+            settings.spec_driven_v2_verify_enabled
+            and _rescope_entry is not None
+            and _rescope_entry.provider in _STRUCTURED_PROVIDERS
+        ):
+            try:
+                from app.adapters.rescope_llm import RescopeLlm
+                from app.adapters.tools.retrieval_rescope import RetrievalRescopeTool
+
+                _rescope_source = SpecDrivenRescopeSource(Path(settings.prompt_local_dir))
+                spec_driven_v2_rescope_source = _rescope_source
+                rescope_tool = RetrievalRescopeTool(
+                    rescoper=RescopeLlm(
+                        llm=secondary_llm, source=_rescope_source,
+                        # 동시 슬롯 호출 전역 캡 — verify/follow_up 과 동일 손잡이
+                        # (max_queries). 셋이 같은 Node2 vLLM 을 공유하므로 KV cache 적체가
+                        # 보이면 SPEC_DRIVEN_MAX_QUERIES / DOCUMENTS_REF_MAX_CONCURRENCY 로 함께 낮춘다.
+                        max_concurrency=settings.spec_driven_max_queries,
+                    ),
+                    # 동시 슬롯 캡(러너 _verify_sem 과 동일 취지의 tool 레벨 캡).
+                    max_concurrency=settings.spec_driven_v2_verify_concurrency,
+                )
+            except Exception as _exc:
+                structlog.get_logger("retrieval.rescope.boot").warning(
+                    "rescope_tool_disabled",
+                    error=str(_exc),
+                    llm_id=secondary_llm_id,
+                    hint="secondary_llm is openai_compat but tool init failed; no re-scope re-search",
+                )
+
         # 검색·범위·용어 도구. retrieval.search = 내부 retriever 재사용 + Reranker 정렬
         # (실 cross-encoder 는 배포 시 주입, dev/test 는 identity 폴백 — seam 보존).
         # scope=CorpusMap 결정론. 용어 정규화/확장은 용어집(ISO 25964 lookup).
@@ -612,6 +654,8 @@ async def build_container(settings: Settings) -> AppContainer:
             tools["retrieval.follow_up"] = follow_up_tool
         if verify_slot_tool is not None:
             tools["retrieval.verify_slot"] = verify_slot_tool
+        if rescope_tool is not None:
+            tools["retrieval.rescope"] = rescope_tool
         tool_executor = ToolExecutor(registry=registry, tools=tools, event_sink=event_sink)
 
         # 분류 프롬프트 source(registry 호스팅) — boot 시 fragment sha 검증(fail-fast).
@@ -734,6 +778,7 @@ async def build_container(settings: Settings) -> AppContainer:
         spec_driven_v2_triage_source=spec_driven_v2_triage_source,
         spec_driven_v2_general_source=spec_driven_v2_general_source,
         spec_driven_v2_verify_source=spec_driven_v2_verify_source,
+        spec_driven_v2_rescope_source=spec_driven_v2_rescope_source,
         secondary_llm=secondary_llm,
         summarizer=summarizer,
         tunables={

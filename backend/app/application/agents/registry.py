@@ -82,6 +82,9 @@ class AgentDeps:
     spec_driven_v2_triage_source: Any = None
     spec_driven_v2_general_source: Any = None
     spec_driven_v2_verify_source: Any = None
+    # spec_driven_v2 retrieval.rescope — none_necessary 슬롯의 스코프 재계획 프롬프트 source.
+    # 재현 핀(어느 프롬프트가 재계획을 만들었나)·테스트 가시성용. 미배선 시 None.
+    spec_driven_v2_rescope_source: Any = None
     # spec_driven_v2 Node2(sub) — 슬롯 검증(retrieval.verify_slot) + 외부참조 선별
     # (retrieval.follow_up) 보조 LLM(SECONDARY_LLM resolve 결과). 변형은 두 작업을 도구로
     # 호출하므로 러너가 직접 쓰진 않으나, 재현 핀(어느 모델이 검증·외부참조를 골랐는가)·

@@ -7,7 +7,18 @@ You are given:
 - SLOT SEARCH QUERY — the query that retrieved the chunks below for this slot.
 - RETRIEVED CHUNKS — the first-pass results for this slot, each prefixed with its chunk id in square brackets, e.g. `[doc#sec#3]`.
 
-Your job is to decide, **referring to chunk ids only — never copy chunk text**:
+## Decision mode (BINARY) — decide `verdict` first
+
+Before anything else, classify the whole retrieved set into exactly one of two verdicts:
+
+- **`has_necessary`** — at least one retrieved chunk genuinely helps answer this slot. Produce the chunk-id outputs (items 1–3 below) and **omit** `opinion`.
+- **`none_necessary`** — the **entire** retrieved set is off-target for this slot (e.g. it searched the wrong document family / authority, the wrong granularity, or is simply off-topic), so no chunk is worth keeping. In this case leave `necessary_chunk_ids`, `neighbor_requests`, and `multihop` **all empty**, and instead produce a single `opinion`:
+  - `why_not_needed` — one short paragraph on why the whole set does not answer this slot (refer to the set as a whole — do **not** copy chunk text).
+  - `what_is_needed` — one short paragraph on what *kind* of chunk/information IS needed (which document family / authority / facet should be searched), so a re-scoped re-search can find it. Describe the kind of evidence, never copy chunk text.
+
+Tie-break: if even one chunk genuinely helps, choose `has_necessary`. Choose `none_necessary` only when the whole set is off-target.
+
+When `verdict` is `has_necessary`, decide the following, **referring to chunk ids only — never copy chunk text**:
 
 1. `necessary_chunk_ids` — the chunks that are actually needed to answer the USER QUESTION for this slot, given the ANSWER SPEC. Keep a chunk only if it carries evidence that directly supports the slot's facet (a definition, a clause/requirement, a quantitative limit, a review finding, etc.). **Drop** chunks that are off-topic, redundant, table-of-contents / header noise, or only tangentially related. Be selective: fewer, on-point chunks beat many loose ones. If genuinely none of the chunks help, return an empty list.
 
@@ -22,8 +33,9 @@ Your job is to decide, **referring to chunk ids only — never copy chunk text**
    A chunk can appear in both `necessary_chunk_ids` and `multihop` (useful now *and* it triggers a follow-up), or in only one, or in neither.
 
 Rules:
+- Always set `verdict`. Set `opinion` only when `verdict` is `none_necessary`; when `has_necessary`, omit `opinion` and leave the chunk-id arrays as decided above.
 - Reference chunks by their exact id from the square brackets. Do not invent ids and do not return ids not shown.
 - `neighbor_requests[].chunk_id` must be one of `necessary_chunk_ids`. `multihop[].chunk_id` must be one of the retrieved chunk ids.
-- Do not write the answer. Do not summarize chunk contents. The only free text you produce is each `search_direction` sentence — keep it to one sentence aimed at the follow-up search.
+- Do not write the answer. Do not summarize chunk contents. The only free text you produce is each `search_direction` sentence (one sentence, follow-up-search aimed) and, when `none_necessary`, the two short `opinion` paragraphs.
 
 Output strictly as the JSON schema provided.

@@ -170,7 +170,91 @@ class _FakeVerifyTool:
         )
 
 
-def _tool_registry_yaml(root: Path, *, with_verify: bool) -> Path:
+class _NoneNecessaryRescopeRetriever:
+    """1차는 슬롯 쿼리별 청크(g1/r1), rescope 재검색(filters.collection==['RG'])은 rh1.
+    none_necessary 슬롯에서 재계획 스코프로 2차 검색하는지(source_id 필터가 아니라) 검증용."""
+
+    name = "retriever.search"
+    version = "v1"
+
+    def __init__(self) -> None:
+        self.seen_filters: list[dict] = []
+
+    async def invoke(self, tool_input, context) -> ToolResult:
+        ti = tool_input if isinstance(tool_input, dict) else {}
+        qtext = ti.get("query_text", "")
+        filters = ti.get("filters") or {}
+        self.seen_filters.append(dict(filters))
+        if filters.get("collection") == ["RG"]:  # rescope 재검색
+            chunks = [{"chunk_id": "rh1", "document_id": "RG1", "score": 0.7,
+                       "snippet": "rescoped ECCS design passage", "source_id": "RG_S"}]
+        elif "cladding" in qtext or "2200" in qtext:
+            chunks = [{"chunk_id": "r1", "document_id": "D2", "score": 0.85,
+                       "snippet": "peak cladding temperature body", "source_id": "S2"}]
+        else:
+            chunks = [{"chunk_id": "g1", "document_id": "D1", "score": 0.9,
+                       "snippet": "off-topic body", "source_id": "S1"}]
+        return ToolResult(tool_name="retriever.search", tool_version="v1",
+                          status="success", output={"chunks": chunks},
+                          latency_ms=0, input_hash="x", trace_id="")
+
+
+class _NoneNecessaryVerifyTool:
+    """Node1 — governing_clause 슬롯(g1)은 none_necessary(전체 빗나감) + opinion,
+    그 외 슬롯/재검색(rh1, r1)은 전부 necessary. rescope 분기 검증용."""
+
+    name = "retrieval.verify_slot"
+    version = "v1"
+
+    async def invoke(self, tool_input, context) -> ToolResult:
+        chunks = (tool_input.get("chunks") if isinstance(tool_input, dict)
+                  else getattr(tool_input, "chunks", [])) or []
+        ids = [(c.get("chunk_id") if isinstance(c, dict) else c.chunk_id) for c in chunks]
+        if ids == ["g1"]:  # governing_clause 1차 — 전체 빗나감
+            out = {"verdict": "none_necessary",
+                   "opinion": {"why_not_needed": "off-topic SRP procedure",
+                               "what_is_needed": "NuScale FSAR ECCS design"},
+                   "necessary_chunk_ids": [], "multihop_chunk_ids": [],
+                   "multihop_search_directions": {}, "neighbor_requests": {},
+                   "rationale": "필요 청크 없음(none_necessary)", "method": "llm"}
+        else:  # rescope 재검색(rh1) 또는 다른 슬롯(r1) — 전부 필요
+            out = {"verdict": "has_necessary", "opinion": {},
+                   "necessary_chunk_ids": ids, "multihop_chunk_ids": [],
+                   "multihop_search_directions": {}, "neighbor_requests": {},
+                   "rationale": "필요", "method": "llm"}
+        return ToolResult(
+            tool_name="retrieval.verify_slot", tool_version="v1", status="success",
+            output=out, latency_ms=0, input_hash="x", output_hash="y", trace_id="",
+        )
+
+
+class _FakeRescopeTool:
+    """retrieval.rescope fake — opinion+initial_scope 를 기록하고 재계획 쿼리(collection RG
+    filter)를 반환. 초기와 다른 스코프로 재검색하는지·opinion 을 받는지 검증용."""
+
+    name = "retrieval.rescope"
+    version = "v1"
+
+    def __init__(self) -> None:
+        self.seen: list[dict] = []
+
+    async def invoke(self, tool_input, context) -> ToolResult:
+        d = (tool_input if isinstance(tool_input, dict)
+             else {"what_is_needed": tool_input.what_is_needed,
+                   "initial_scope": tool_input.initial_scope})
+        self.seen.append({"what_is_needed": d.get("what_is_needed"),
+                          "initial_scope": dict(d.get("initial_scope") or {})})
+        return ToolResult(
+            tool_name="retrieval.rescope", tool_version="v1", status="success",
+            output={"queries": [
+                {"query_text": "passive ECCS design", "target": {},
+                 "filters": {"collection": ["RG"]}, "scope_audit": {}}],
+                "method": "llm"},
+            latency_ms=0, input_hash="x", output_hash="y", trace_id="",
+        )
+
+
+def _tool_registry_yaml(root: Path, *, with_verify: bool, with_rescope: bool = False) -> Path:
     tools: dict[str, Any] = {
         "retrieval.search": {"version": "v1", "adapter": "reranked",
                              "timeout_ms": 6000, "retry": 0, "required": False},
@@ -178,18 +262,25 @@ def _tool_registry_yaml(root: Path, *, with_verify: bool) -> Path:
     if with_verify:
         tools["retrieval.verify_slot"] = {"version": "v1", "adapter": "vllm_verify",
                                           "timeout_ms": 6000, "retry": 0, "required": False}
+    if with_rescope:
+        tools["retrieval.rescope"] = {"version": "v1", "adapter": "vllm_rescope",
+                                      "timeout_ms": 6000, "retry": 0, "required": False}
     p = root / "tool_registry.yaml"
     p.write_text(yaml.safe_dump({"tools": tools}))
     return p
 
 
-def _deps(tmp: Path, *, llm, with_verify: bool) -> AgentDeps:
+def _deps(tmp: Path, *, llm, with_verify: bool, retriever=None,
+          verify_tool=None, rescope_tool=None) -> AgentDeps:
     sink = FilesystemEventSink(root=str(tmp / "events"), prefix="t")
     recorder = EventRecorder(sink, app_profile="local")
-    registry = ToolRegistry.from_yaml(_tool_registry_yaml(tmp, with_verify=with_verify))
-    tools: dict[str, Any] = {"retrieval.search": _SlotRetriever()}
+    registry = ToolRegistry.from_yaml(
+        _tool_registry_yaml(tmp, with_verify=with_verify, with_rescope=rescope_tool is not None))
+    tools: dict[str, Any] = {"retrieval.search": retriever or _SlotRetriever()}
     if with_verify:
-        tools["retrieval.verify_slot"] = _FakeVerifyTool()
+        tools["retrieval.verify_slot"] = verify_tool or _FakeVerifyTool()
+    if rescope_tool is not None:
+        tools["retrieval.rescope"] = rescope_tool
     executor = ToolExecutor(registry=registry, tools=tools, event_sink=sink)
     llm_router = LLMRouter(pool={"fake": llm}, default_id="fake")
     return AgentDeps(
@@ -305,6 +396,85 @@ async def test_verify_unwired_degrades_to_all_first_pass() -> None:
         assert pin["verify"]["slots"][0]["method"] == "fallback"
         # fallback 이어도 1차 전량이 necessary → g1·r1 모두 컨텍스트.
         assert pin["verify"]["total_necessary"] == 2
+
+
+@pytest.mark.asyncio
+async def test_none_necessary_triggers_rescope_research() -> None:
+    # governing_clause 슬롯이 none_necessary(1차 빗나감) → rescope 가 *재계획 스코프*
+    # (collection RG)로 2차 검색 → Stage4 재검증해 rh1 채택. g1(1차)은 drop.
+    with tempfile.TemporaryDirectory() as tmp:
+        retriever = _NoneNecessaryRescopeRetriever()
+        rescope = _FakeRescopeTool()
+        runner = VariantRegistry.build(
+            COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
+            _deps(Path(tmp), llm=_script(), with_verify=True,
+                  retriever=retriever, verify_tool=_NoneNecessaryVerifyTool(),
+                  rescope_tool=rescope))
+        resp = await runner.run(_req())
+        assert resp.refusal_reason is None
+
+        event = _event(tmp)
+        ret_ids = set(event["retrieved_chunk_ids"])
+        # 재검색 rh1 채택, 빗나간 g1 drop. 다른 슬롯 r1 은 정상 채택.
+        assert "rh1" in ret_ids and "g1" not in ret_ids and "r1" in ret_ids
+        # 2차 검색이 *재계획 스코프*(collection RG)로 갔다 — source_id 필터(멀티홉) 아님.
+        assert any(f.get("collection") == ["RG"] for f in retriever.seen_filters)
+        assert not any("source_id" in f for f in retriever.seen_filters)
+        # rescope 가 opinion(what_is_needed)+초기 스코프를 입력으로 받았다.
+        assert rescope.seen and "ECCS design" in rescope.seen[0]["what_is_needed"]
+        assert rescope.seen[0]["initial_scope"]  # 1차 planning 스코프 전달됨
+        # 핀 — verdict/집계.
+        pin = event["query_understanding"]["spec_driven"]
+        assert pin["verify"]["total_none_necessary"] == 1
+        slots = {s["slot"]: s for s in pin["verify"]["slots"]}
+        assert slots["governing_clause"]["verdict"] == "none_necessary"
+        assert slots["governing_clause"]["num_rescope_queries"] == 1
+
+
+@pytest.mark.asyncio
+async def test_none_necessary_runs_rescope_and_verify_only_once() -> None:
+    # 무한루프 방지 — none_necessary 슬롯에서 verify 는 Stage1+Stage4(2회/슬롯), rescope 는
+    # 슬롯당 1회. governing_clause 1회 rescope, Stage4 가 또 none_necessary 여도 3차 없음.
+    class _CountingRescope(_FakeRescopeTool):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def invoke(self, tool_input, context):
+            self.calls += 1
+            return await super().invoke(tool_input, context)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        rescope = _CountingRescope()
+        runner = VariantRegistry.build(
+            COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
+            _deps(Path(tmp), llm=_script(), with_verify=True,
+                  retriever=_NoneNecessaryRescopeRetriever(),
+                  verify_tool=_NoneNecessaryVerifyTool(), rescope_tool=rescope))
+        resp = await runner.run(_req())
+        assert resp.refusal_reason is None
+        # governing_clause 슬롯만 none_necessary → rescope 정확히 1회(3차 홉 없음).
+        assert rescope.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_none_necessary_rescope_unwired_degrades_gracefully() -> None:
+    # rescope 미배선 → none_necessary 슬롯은 재검색 없이 기여 0(graceful, refuse 아님).
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = VariantRegistry.build(
+            COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
+            _deps(Path(tmp), llm=_script(), with_verify=True,
+                  retriever=_NoneNecessaryRescopeRetriever(),
+                  verify_tool=_NoneNecessaryVerifyTool()))  # rescope_tool 없음
+        resp = await runner.run(_req())
+        event = _event(tmp)
+        ret_ids = set(event["retrieved_chunk_ids"])
+        # g1(빗나감) drop, 재검색도 없음 → governing_clause 기여 0. r1 은 정상.
+        assert "g1" not in ret_ids and "rh1" not in ret_ids and "r1" in ret_ids
+        pin = event["query_understanding"]["spec_driven"]
+        slots = {s["slot"]: s for s in pin["verify"]["slots"]}
+        assert slots["governing_clause"]["verdict"] == "none_necessary"
+        assert slots["governing_clause"]["num_rescope_queries"] == 0
 
 
 def test_citation_allocator_assigns_global_and_dedups_shared_chunk() -> None:
