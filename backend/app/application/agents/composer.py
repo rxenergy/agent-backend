@@ -10,11 +10,10 @@ from app.application.agents.events import (
     emit_step,
     emit_token,
 )
-from app.application.agents.registry import AgentDeps, register_variant
-from app.application.agents.spec_driven_v1 import (
+from app.application.agents.composer_base import (
     _NOISE_FILTER,
     _SEARCH_TOOL,
-    SpecDrivenRunner,
+    ComposerBase,
     _assemble_final_chunks,
     _parse_chunks,
     _render_spec_block,
@@ -25,6 +24,7 @@ from app.application.agents.spec_driven_v1 import (
     _to_citations,
     _topic_signature,
 )
+from app.application.agents.registry import AgentDeps, register_variant
 from app.application.intake.spec_driven_answer_spec import (
     SpecDrivenAnswerSpecInstantiator,
 )
@@ -54,17 +54,16 @@ _CITE_RE = re.compile(r"\s*\[cite-\d+\]")
 _CITE_N_RE = re.compile(r"\[cite-(\d+)\]")
 
 
-class ComposerRunner(SpecDrivenRunner):
-    """composer — spec_driven_v1 의 N0~N3.5(Triage·Define Spec·Query Formulation·
-    Retrieval·Follow-up·세션메모리·재현핀)를 *그대로 계승*하고, **N4 Generation 만 슬롯
-    단위 파이프라인**으로 대체하는 variant
-    (docs/plans/spec_driven_slotwise_generation.design.v1.md).
+class ComposerRunner(ComposerBase):
+    """composer — N0~N3.5(Triage·Define Spec·Query Formulation·Retrieval·Follow-up·
+    세션메모리·재현핀)를 직접 수행하고, **N4 Generation 만 슬롯 단위 파이프라인**으로
+    구성하는 variant (docs/plans/spec_driven_slotwise_generation.design.v1.md).
 
-    spec_driven_v1.py 는 *건드리지 않는다* — `SpecDrivenRunner` 를 상속해 N0~N3.5·세션·
-    재현·gap/general 의 헬퍼 메서드(`_session_load`/`_post_gate`/`_session_update`/
-    `_build_prior_context`/`_session_pin`/`_generate`/`_refuse`/`_run_general`)와 모듈
-    함수(`_parse_chunks`/`_select_with_slot_floor`/`_assemble_final_chunks`/…)를 재사용하고,
-    `run()` 만 오버라이드해 N4 구간을 슬롯 파이프라인으로 바꾼다.
+    `ComposerBase`(composer_base.py)를 상속해 세션·재현·gap/general 의 헬퍼 메서드
+    (`_session_load`/`_post_gate`/`_session_update`/`_build_prior_context`/`_session_pin`/
+    `_generate`/`_refuse`/`_run_general`/`run_stream`)와 모듈 함수(`_parse_chunks`/
+    `_select_with_slot_floor`/`_assemble_final_chunks`/…)를 재사용하고, `run()` 을 직접
+    구현해 N0~N3.5 검색 후 N4 를 슬롯 파이프라인으로 생성한다.
 
     N4 슬롯 파이프라인:
       N4.0 Slot Plan       — required_slots 를 생성 순서로 정렬 + 슬롯별 CONTEXT 서브셋 배정

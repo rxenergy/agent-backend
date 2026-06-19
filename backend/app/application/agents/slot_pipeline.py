@@ -25,7 +25,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.application.agents.spec_driven_v1 import (
+from app.application.agents.composer_base import (
     _NOISE_FILTER,
     _SEARCH_TOOL,
     _parse_chunks,
@@ -150,7 +150,7 @@ class _SlotPipelineResult:
 class _SlotPipelineMixin:
     """`_run_slot_pipeline`(4-stage) 을 제공하는 믹스인. 상속하는 러너는
     `self._tools`(ToolExecutor)·`self._follow_up_fetch_k`·`self._follow_up_keep_k`·
-    `self._min_token_count` 를 보유해야 한다(SpecDrivenRunner 가 모두 제공)."""
+    `self._min_token_count` 를 보유해야 한다(ComposerBase 가 모두 제공)."""
 
     async def _slot_first_pass_search(
         self, *, ctx: ToolExecutionContext,

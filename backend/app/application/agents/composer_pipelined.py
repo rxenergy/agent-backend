@@ -36,17 +36,17 @@ from typing import Any
 from app.application.agents.events import emit_reasoning, emit_step, emit_token
 from app.application.agents.composer import ComposerRunner
 from app.application.agents.registry import AgentDeps, register_variant
+from app.application.agents.composer_base import (
+    _render_spec_block,
+    _sha16,
+    _source_ids_of,
+    _to_citations,
+)
 from app.application.agents.slot_pipeline import (
     SlotCitationAllocator,
     SlotSearchHandle,
     SlotSearchResult,
     _SlotPipelineMixin,
-)
-from app.application.agents.spec_driven_v1 import (
-    _render_spec_block,
-    _sha16,
-    _source_ids_of,
-    _to_citations,
 )
 from app.application.intake.spec_driven_answer_spec import (
     SpecDrivenAnswerSpecInstantiator,
@@ -572,7 +572,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         evidence_gap: bool = False,
         synth_mode: str = "off", synth_hash: str | None = None,
     ) -> dict[str, Any]:
-        from app.application.agents.spec_driven_v1 import _scope_summary
+        from app.application.agents.composer_base import _scope_summary
         return {
             "spec_driven": {
                 "route": "retrieval",

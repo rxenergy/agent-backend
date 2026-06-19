@@ -20,7 +20,7 @@ def test_shipped_variants_self_register() -> None:
     """ADR-0004: importing app.application.agents triggers @register_variant
     on every shipped runner module — no edits to profiles.py required."""
     known = VariantRegistry.known()
-    assert "spec_driven_v1" in known
+    assert "composer" in known
 
 
 def test_yaml_registry_aligns_with_code_registry(tmp_path) -> None:

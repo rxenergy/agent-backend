@@ -219,36 +219,8 @@ class ComposerPersonaSource(_SpecDrivenPromptSource):
 
 
 # spec_driven_v2 — 2-노드(DGX Spark) 분산 변형 전용 프롬프트 source. base 로직은 동일하고
-# 기본 profile_id 만 `*_v2` 로 바꿔 registry 의 v2 블록을 읽는다. 초기 v2 블록은 v1 fragment
-# 를 그대로 참조(동일 sha)하므로 동작은 v1 과 같으나, v2 전용 프롬프트 진화를 v1 과 격리한다
-# (설계 spec_driven_agent.design.v2). policy_hash 는 본문 sha16 이라 동일 fragment 면 v1==v2.
-class SpecDrivenTriageV2Source(SpecDrivenTriageSource):
-    def __init__(self, prompt_dir: str | Path) -> None:
-        super().__init__(prompt_dir, profile_id="spec_driven_triage_v2")
-
-
-class SpecDrivenGeneralV2Source(SpecDrivenGeneralSource):
-    def __init__(self, prompt_dir: str | Path) -> None:
-        super().__init__(prompt_dir, profile_id="spec_driven_general_v2")
-
-
-class SpecDrivenAnswerSpecV2Source(SpecDrivenAnswerSpecSource):
-    def __init__(self, prompt_dir: str | Path) -> None:
-        super().__init__(prompt_dir, profile_id="spec_driven_answer_spec_v2")
-
-
-class SpecDrivenQueryV2Source(SpecDrivenQuerySource):
-    def __init__(self, prompt_dir: str | Path) -> None:
-        super().__init__(prompt_dir, profile_id="spec_driven_query_v2")
-
-
-class SpecDrivenGenerationV2Source(SpecDrivenGenerationSource):
-    def __init__(self, prompt_dir: str | Path) -> None:
-        super().__init__(prompt_dir, profile_id="spec_driven_generation_v2")
-
-
 class SpecDrivenVerifySource(_SpecDrivenPromptSource):
-    """spec_driven_v2 Node2 — 슬롯 단위 검증 프롬프트 source(json_schema guided).
+    """composer_pipelined Node2 — 슬롯 단위 검증 프롬프트 source(json_schema guided).
     슬롯 1개의 청크 전체를 한 프롬프트로 합쳐 단일 호출 → 필요 청크 + 멀티홉 청크 식별자
     리스트 산출(verify_slot_v2). secondary_llm(Node2 = sub)에서 호출된다."""
 

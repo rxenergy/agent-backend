@@ -58,15 +58,10 @@ from app.application.prompting.spec_driven_source import (
     ComposerSlotVerifySource,
     ComposerSynthesizeSource,
     SpecDrivenAnswerSpecSource,
-    SpecDrivenAnswerSpecV2Source,
     SpecDrivenGeneralSource,
-    SpecDrivenGeneralV2Source,
     SpecDrivenGenerationSource,
-    SpecDrivenGenerationV2Source,
     SpecDrivenQuerySource,
-    SpecDrivenQueryV2Source,
     SpecDrivenTriageSource,
-    SpecDrivenTriageV2Source,
     SpecDrivenVerifySource,
 )
 from app.application.prompting.hybrid_source import HybridPromptSource
@@ -307,12 +302,6 @@ async def build_container(settings: Settings) -> AppContainer:
     # composer 다중 페르소나(composer_persona_framework.design.v1 §10) — persona_id → profile
     # fragment source. 미배선(빈 dict)이면 페르소나 variant 가 profile 없이 graceful.
     composer_persona_sources: dict[str, Any] = {}
-    spec_driven_v2_answer_spec_source: Any = None
-    spec_driven_v2_query_source: Any = None
-    spec_driven_v2_generation_source: Any = None
-    spec_driven_v2_triage_source: Any = None
-    spec_driven_v2_general_source: Any = None
-    spec_driven_v2_verify_source: Any = None
     summarizer: ConversationSummarizer | None = None
     corpus_map: Any = None
 
@@ -545,7 +534,6 @@ async def build_container(settings: Settings) -> AppContainer:
                 # 구성해야 하므로 여기서 만든다. AgentDeps 로도 같은 인스턴스를 넘겨 재현 핀
                 # 일관. 슬롯 1개의 청크 전체를 한 프롬프트로 합쳐 단일 호출(verify_slot_v2).
                 _verify_source = SpecDrivenVerifySource(Path(settings.prompt_local_dir))
-                spec_driven_v2_verify_source = _verify_source
                 verify_slot_tool = RetrievalVerifySlotTool(
                     slot_verifier=SlotVerifierLlm(
                         llm=secondary_llm, source=_verify_source,
@@ -664,24 +652,6 @@ async def build_container(settings: Settings) -> AppContainer:
             )
             for pid in ("reviewer", "designer", "operator")
         }
-        # spec_driven_v2 — 2-노드 분산 변형 전용 프롬프트 source(registry 호스팅, sha 핀).
-        # 초기엔 v1 fragment 를 그대로 참조(동일 sha)하나 profile_id 만 `*_v2` 로 분리해
-        # v2 전용 프롬프트 진화를 v1 과 격리한다(설계 spec_driven_agent.design.v2).
-        spec_driven_v2_answer_spec_source = SpecDrivenAnswerSpecV2Source(
-            Path(settings.prompt_local_dir)
-        )
-        spec_driven_v2_query_source = SpecDrivenQueryV2Source(
-            Path(settings.prompt_local_dir)
-        )
-        spec_driven_v2_generation_source = SpecDrivenGenerationV2Source(
-            Path(settings.prompt_local_dir)
-        )
-        spec_driven_v2_triage_source = SpecDrivenTriageV2Source(
-            Path(settings.prompt_local_dir)
-        )
-        spec_driven_v2_general_source = SpecDrivenGeneralV2Source(
-            Path(settings.prompt_local_dir)
-        )
         if settings.classifier_backend == "rule":
             classifier = RuleClassifier()
         elif settings.classifier_backend == "llm":
@@ -728,12 +698,6 @@ async def build_container(settings: Settings) -> AppContainer:
         composer_query_source=composer_query_source,
         composer_slot_v2_source=composer_slot_v2_source,
         composer_persona_sources=composer_persona_sources,
-        spec_driven_v2_answer_spec_source=spec_driven_v2_answer_spec_source,
-        spec_driven_v2_query_source=spec_driven_v2_query_source,
-        spec_driven_v2_generation_source=spec_driven_v2_generation_source,
-        spec_driven_v2_triage_source=spec_driven_v2_triage_source,
-        spec_driven_v2_general_source=spec_driven_v2_general_source,
-        spec_driven_v2_verify_source=spec_driven_v2_verify_source,
         secondary_llm=secondary_llm,
         summarizer=summarizer,
         tunables={

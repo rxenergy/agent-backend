@@ -17,21 +17,9 @@
 
 variants:
 
-  # spec_driven_v1 — 검색 앞단 두 모델 노드(N1 Define Spec → N2 Query Formulation)를 둔
-  # 선형 검색 Agent(ReAct·결정론 워크플로우 둘 다 최소화). 설계:
-  # docs/plans/spec_driven_agent.design.v1.md. N1/N2 는 application instantiator(utility
-  # LLM + json_schema, registry 도구 아님), N3 만 retrieval.search 도구. 명시적 참조 우선
-  # (리터럴 키워드 → BM25 lexical, collection boost). 분류기·scenario·메모리 없음(단일턴).
-  # v1 은 coverage 재검색·검증 미수행(stub). 근거 0건이면 gap-answer(거부 아님).
-  spec_driven_v1:
-    compatible_llms: ["*"]
-    required_tools:
-      - retrieval.search
-    required_scenarios: []
-    capability_tags: [spec_driven, retrieval, stateless, keyword_fidelity]
-
-  # composer — spec_driven_v1 의 N0~N3.5 를 계승하고 N4 Generation 만 슬롯 단위 파이프라인
-  # (슬롯별 순차 생성 + 슬롯 groundedness 게이트 + 최종 종합)으로 대체한 variant. 설계:
+  # composer — N0~N3.5(검색 앞단 두 모델 노드 + 검색·follow-up)를 수행하고 N4 Generation
+  # 만 슬롯 단위 파이프라인(슬롯별 순차 생성 + 슬롯 groundedness 게이트 + 최종 종합)으로
+  # 구성한 variant. 설계:
   # docs/plans/spec_driven_slotwise_generation.design.v1.md. 검색·도구·세션·재현은 동일
   # (retrieval.search). 슬롯 CONTEXT 서브셋으로 1024 local-window 한계를 완화하고, 외부
   # 슬롯 병렬검색과 검색-생성 파이프라인으로 지연을 단축(후속 연동).
@@ -70,20 +58,8 @@ variants:
     required_scenarios: []
     capability_tags: [spec_driven, retrieval, slotwise, composition, stateless, persona]
 
-  # spec_driven_v2 — spec_driven_v1 의 선형 4-노드 흐름을 상속하되 LLM 업무를 두 DGX
-  # Spark vLLM 노드로 분할한다(Node1=요청 LLM: N1/N2/N3.5/N4, Node2=SECONDARY_LLM:
-  # 슬롯 단위 1차 검색 결과 검증). 설계: docs/plans/spec_driven_agent.design.v2.md.
-  # required_tools 는 retrieval.search 만 — retrieval.verify_slot(Node2)·retrieval.follow_up
-  # 는 graceful skip(미배선 시 단일노드 degrade)이라 필수에서 제외한다(원칙 6).
-  spec_driven_v2:
-    compatible_llms: ["*"]
-    required_tools:
-      - retrieval.search
-    required_scenarios: []
-    capability_tags: [spec_driven, retrieval, stateless, keyword_fidelity, dual_node]
-
-  # composer_pipelined — composer 의 슬롯 단위 생성(즉시 토큰 스트리밍)과 spec_driven_v2 의
-  # 슬롯별 검색-검증 파이프라인을 결합해 *배리어를 제거* 한 variant. 설계:
+  # composer_pipelined — composer 의 슬롯 단위 생성(즉시 토큰 스트리밍)과 슬롯별 검색-검증
+  # 파이프라인(Node2 = SECONDARY_LLM 검증)을 결합해 *배리어를 제거* 한 variant. 설계:
   # docs/plans/spec_driven_slot_pipeline_streaming.design.v1.md. N2 직후 슬롯별 검색-검증
   # future 를 즉시 발사(SlotSearchHandle)하고, 생성 루프가 슬롯 i 직전 그 future 만 await
   # 해 먼저 준비된 슬롯을 다른 슬롯 대기 없이 스트리밍한다(검색-생성 겹침으로 지연 단축).

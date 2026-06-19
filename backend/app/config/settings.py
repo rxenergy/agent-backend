@@ -54,15 +54,14 @@ class Settings(BaseSettings):
     # 만으로는 부족 — 활성 리스트에 있어야 container.runners 에 들어가 선택 가능. composer
     # (비파이프라인) 페르소나는 A/B 필요 시 env(AGENT_VARIANTS_ENABLED)로 추가.
     agent_variants_enabled: list[str] = [
-        "spec_driven_v1",
         "composer_pipelined",
         "composer_pipelined_reviewer",
         "composer_pipelined_designer",
         "composer_pipelined_operator",
     ]
-    default_variant: str = "spec_driven_v1"
+    default_variant: str = "composer_pipelined"
 
-    # spec_driven_v1 — N2 per-slot 멀티쿼리 상한 + N3 1차 floor 정렬 budget.
+    # composer 계열 검색 — N2 per-slot 멀티쿼리 상한 + N3 1차 floor 정렬 budget.
     # max_context_chunks 는 더 이상 최종 cap 이 아니다(최종 크기는 아래 token budget 이
     # 지배) — N3 floor 정렬 단계의 예산일 뿐. 명시 필드여야 SPEC_DRIVEN_* env override 가
     # 동작한다(model_config extra="ignore" 라 getattr 로만 읽으면 미선언 env 가 무시됨).
