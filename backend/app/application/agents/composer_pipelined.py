@@ -47,6 +47,7 @@ from app.application.agents.slot_pipeline import (
     SlotSearchHandle,
     SlotSearchResult,
     _SlotPipelineMixin,
+    _SlotPipelineResult,
 )
 from app.application.intake.spec_driven_answer_spec import (
     SpecDrivenAnswerSpecInstantiator,
@@ -293,6 +294,32 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         return SlotSearchHandle(tasks)
 
     # ------------------------------------------------------------------
+    # 슬롯 future 소비 — task 예외를 그 슬롯만 degrade(method="error")로 흡수(설계 §7).
+    # ------------------------------------------------------------------
+    async def _consume_slot_result(self, handle: SlotSearchHandle,
+                                   slot_name: str) -> SlotSearchResult:
+        """슬롯 검색-검증 future 를 소비한다. task 가 내부 예외를 던지면(검색·검증 전체
+        실패) 전체 턴을 죽이는 대신(설계 §7 — "전체 실패 아님") *그 슬롯만* 빈 기여로
+        degrade 한다: `method="error"` 핀 + structlog. 생성 루프는 빈 CONTEXT 로 그 슬롯을
+        생성 시도하고 한계를 명시한다(composer fallback 계승). 정상 결과는 그대로 반환."""
+        try:
+            return await handle.result(slot_name)
+        except Exception as exc:  # noqa: BLE001 — 슬롯 1개 실패를 1급으로 흡수(turn 보존).
+            _LOG.warning(
+                "slot_search_failed", node=f"slot:{slot_name}",
+                variant=self.spec.variant_id,
+                error_type=type(exc).__name__, error=str(exc)[:500],
+            )
+            return SlotSearchResult(
+                slot_name=slot_name, necessary=[], second_pass=[],
+                pipeline=_SlotPipelineResult(
+                    slot_name=slot_name, method="error", num_first_pass=0,
+                    necessary=[], multihop_ids=[],
+                    rationale=f"⚠ 슬롯 검색-검증 실패({type(exc).__name__}) → 빈 CONTEXT 로 생성",
+                ),
+            )
+
+    # ------------------------------------------------------------------
     # N4 파이프라인 — 슬롯 *생성 순서*(depends_on 위상정렬)로 future 소비 + 즉시 스트리밍.
     # ------------------------------------------------------------------
     async def _generate_pipelined(
@@ -303,8 +330,6 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         triage_pin: dict[str, Any], formulation_method: str, queries,
         truncated: bool, sess: dict[str, Any], post,
     ) -> AgentResponse:
-        metrics = get_metrics()
-
         # 생성 순서 = depends_on 위상정렬(composer 와 동일). 의존 슬롯이 먼저 생성돼 PRIOR 로 흐른다.
         ordered: list[SpecSlot] = (
             list(spec.slot_order()) if spec.required_slots else []
@@ -336,15 +361,53 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         # 처음부터 올바른 전역 번호로 생성하게 한다(사후 재번호 없음 → 스트리밍 토큰=최종 번호).
         # 중복 chunk 는 최초 등장 슬롯의 cite 재사용(References 단일화). 생성 순차라 결정적.
         cites = SlotCitationAllocator(self._context_builder)
+
+        num_slots = len(ordered)
+        # 생성 루프 전체를 try/finally 로 감싸 *어떤 종료 경로*(정상·조기 refuse·예외)에서도
+        # 미소비 슬롯 검색 task 를 정리한다(orphan span/경고 방지 — 설계 §8/§7). handle.aclose
+        # 는 이미 소비된 결과를 건드리지 않으므로 결정성 무관.
+        try:
+            return await self._run_slot_generation_loop(
+                request, started, tool_calls, tool_result_refs,
+                llm=llm, llm_id=llm_id, ctx=ctx, record=record,
+                spec=spec, triage=triage, handle=handle,
+                triage_pin=triage_pin, formulation_method=formulation_method,
+                queries=queries, truncated=truncated, sess=sess, post=post,
+                ordered=ordered, stages=stages, num_slots=num_slots,
+                inject=inject, convo_summary=convo_summary,
+                memory_refs=memory_refs, memory_ids_used=memory_ids_used,
+                slot_outputs=slot_outputs, slot_pins=slot_pins,
+                verify_pins=verify_pins, fq_all=fq_all,
+                streamed_parts=streamed_parts, cites=cites,
+            )
+        finally:
+            await handle.aclose()
+
+    async def _run_slot_generation_loop(
+        self, request: AgentRequest, started: float,
+        tool_calls: list[ToolCallRecord], tool_result_refs: list[str], *,
+        llm: LLMPort, llm_id: str, ctx: ToolExecutionContext, record,
+        spec: AnswerSpec, triage, handle: SlotSearchHandle,
+        triage_pin: dict[str, Any], formulation_method: str, queries,
+        truncated: bool, sess: dict[str, Any], post,
+        ordered: list[SpecSlot], stages: list[str], num_slots: int,
+        inject: bool, convo_summary: str | None,
+        memory_refs: tuple[MemoryRef, ...], memory_ids_used: list[str],
+        slot_outputs: list[dict[str, Any]], slot_pins: list[dict[str, Any]],
+        verify_pins: list[dict[str, Any]], fq_all: list[dict[str, Any]],
+        streamed_parts: list[str], cites: SlotCitationAllocator,
+    ) -> AgentResponse:
+        """N4 슬롯 생성 루프 본체. `_generate_pipelined` 가 try/finally(handle.aclose)로
+        감싸 호출한다 — 어떤 종료 경로든 미소비 검색 task 가 정리되도록 분리했다."""
+        metrics = get_metrics()
         total_multihop = 0
         total_second_pass = 0
         total_second_necessary = 0
         total_neighbor = 0
 
-        num_slots = len(ordered)
         for idx, slot in enumerate(ordered):
-            # === 슬롯 future 소비(배리어 없음 — 이 슬롯만 await) ===
-            res = await handle.result(slot.name)
+            # === 슬롯 future 소비(배리어 없음 — 이 슬롯만 await; 실패는 그 슬롯만 degrade) ===
+            res = await self._consume_slot_result(handle, slot.name)
             pipe = res.pipeline
             # 슬롯 검색-검증 tool_results 를 *여기서* 순차 record(결정성·순서 — §6).
             for r in pipe.tool_results:
@@ -505,8 +568,14 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                     )
                     closing = synth.text.strip()
                     synth_mode = "model"
-                except LLMUnavailableError:
+                except LLMUnavailableError as exc:
+                    # 종합 LLM 미가용은 거부가 아니라 닫음 블록 생략으로 degrade(본문은 이미
+                    # 스트리밍됨). 핀(synth_mode)뿐 아니라 span 에도 명시해 실패를 1급으로
+                    # 가시화한다(CLAUDE.md #6 — 매끈한 정상 종료로 둔갑시키지 않는다).
                     synth_mode = "skipped_unavailable"
+                    sy.record_exception(exc)
+                    sy.set_attribute("synthesize.skipped", True)
+                    sy.set_attribute("llm.upstream_error", str(exc)[:500])
             await emit_step("synthesize", "ok", mode=synth_mode)
 
         answer_text = body_text + (("\n\n" + closing) if closing else "")

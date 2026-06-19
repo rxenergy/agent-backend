@@ -307,6 +307,51 @@ async def test_verify_unwired_degrades_to_all_first_pass() -> None:
         assert pin["verify"]["total_necessary"] == 2
 
 
+@pytest.mark.asyncio
+async def test_slot_task_exception_degrades_one_slot_not_whole_turn() -> None:
+    """B1(설계 §7) — 슬롯 검색-검증 task 가 예외를 던져도 전체 턴이 죽지 않고 *그 슬롯만*
+    method="error" 로 degrade 한다. `_consume_slot_result` 가 task 예외를 흡수하는지 직접 검증."""
+    import asyncio
+
+    from app.application.agents.composer_pipelined import COMPOSER_PIPELINED_VARIANT_ID
+    from app.application.agents.slot_pipeline import SlotSearchHandle
+
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = VariantRegistry.build(
+            COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
+            _deps(Path(tmp), llm=_script(), with_verify=True))
+
+        async def _boom() -> Any:
+            raise RuntimeError("search backend exploded")
+
+        handle = SlotSearchHandle({"governing_clause": asyncio.create_task(_boom())})
+        res = await runner._consume_slot_result(handle, "governing_clause")
+        # 전체 턴 크래시 대신 그 슬롯만 빈 기여 + method="error" 로 degrade.
+        assert res.pipeline.method == "error"
+        assert res.necessary == [] and res.second_pass == []
+        assert "RuntimeError" in res.pipeline.rationale
+
+
+@pytest.mark.asyncio
+async def test_handle_aclose_cancels_pending_slot_tasks() -> None:
+    """B2 — 미소비 슬롯 검색 task 는 aclose() 로 cancel·회수돼 orphan(유실 span/경고)을 막는다."""
+    import asyncio
+
+    from app.application.agents.slot_pipeline import SlotSearchHandle
+
+    started = asyncio.Event()
+
+    async def _slow() -> Any:
+        started.set()
+        await asyncio.sleep(3600)  # 소비되지 않고 백그라운드에 남음.
+
+    task = asyncio.create_task(_slow())
+    handle = SlotSearchHandle({"s1": task})
+    await started.wait()  # task 가 실제로 돌기 시작했음을 보장.
+    await handle.aclose()
+    assert task.cancelled()  # 정리됨(orphan 아님).
+
+
 def test_citation_allocator_assigns_global_and_dedups_shared_chunk() -> None:
     """SlotCitationAllocator — 슬롯별 전역 cite 배정 + 슬롯 간 공유 chunk 단일화(직접 단위)."""
     from app.application.agents.slot_pipeline import SlotCitationAllocator

@@ -483,6 +483,23 @@ class SlotSearchHandle:
         """모든 슬롯 결과를 슬롯 등록 순서로 모은다(전량 필요한 마무리 집계용)."""
         return [await self.result(n) for n in self._tasks]
 
+    async def aclose(self) -> None:
+        """미소비 슬롯 검색 task 를 정리한다(orphan 방지).
+
+        생성 루프가 조기 return(LLM-unavailable refuse 등)하거나 정상 종료할 때, 아직
+        돌고 있는 백그라운드 슬롯 검색 task 가 남으면 (a) asyncio 가 "Task was destroyed
+        but it is pending" 경고를 내고, (b) 그 task 안에서 연 `agent.slot.<name>`·도구
+        span 이 flush 전에 버려져 Phoenix/Tempo 에서 dangling span 으로 남거나 유실된다.
+        호출부가 `finally` 에서 이걸 부르면 미완료 task 를 cancel + 회수해 깔끔히 닫는다.
+        결정성과 무관(이미 소비된 결과는 불변 — 미소비 task 만 정리)."""
+        pending = [t for t in self._tasks.values() if not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            # cancel 후 회수 — CancelledError 포함 모든 예외를 삼킨다(정리 목적이라 개별
+            # task 실패는 무관). 이미 완료됐으나 미수확된 task 의 예외도 같이 흡수된다.
+            await asyncio.gather(*pending, return_exceptions=True)
+
 
 @dataclass
 class _SlotPack:
