@@ -72,6 +72,27 @@ _LOG = get_logger("agent.composer_pipelined")
 
 COMPOSER_PIPELINED_VARIANT_ID = "composer_pipelined"
 
+# 슬롯 단위 환각 검증 — **LLM-as-judge**(composer_orchestrated_generation.design.v2 §1, 사용자
+# 결정). 결정론 등급 게이트(cite-범위·약귀속 룰)는 신뢰할 수 없어 폐기하고, 외부 verifier 모델이
+# 슬롯 출력 ↔ CONTEXT entailment 를 판정(verdict)하고 그 *이유*(rationale)를 직접 설명한다
+# (feedback_model_over_rule: 표현·판정=모델). 환각이 없으면(supported) pass — 표시 없음.
+#
+# verdict → OpenWebUI alert 종류(presentation-only lookup — 판정이 아니라 *렌더 매핑*. OpenWebUI
+# marked+AlertRenderer.svelte 가 렌더하는 GitHub alert 5종 NOTE/TIP/IMPORTANT/WARNING/CAUTION
+# 중에서 고른다 — 미렌더 `[!DANGER]` 금지). alert *본문*은 정적 템플릿이 아니라 모델 rationale.
+_VERDICT_SUPPORTED = "supported"   # 환각 없음 → pass(무표시).
+_VERDICT_PARTIAL = "partial"       # 부분 입증 → [!CAUTION].
+_VERDICT_UNSUPPORTED = "unsupported"  # 근거 미입증 → [!WARNING].
+# 판정 자체가 안 돈 경우(verifier 미배선/실패) — 결정론 룰로 대체하지 않는다(사용자 결정:
+# 결정론 신뢰 불가). 검증 불가를 솔직히 표시([!NOTE])하되 본문은 그대로 둔다.
+_VERDICT_SKIPPED = "skipped"
+
+_VERDICT_ALERT = {
+    _VERDICT_PARTIAL: "CAUTION",
+    _VERDICT_UNSUPPORTED: "WARNING",
+    _VERDICT_SKIPPED: "NOTE",
+}
+
 
 class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
     """composer_pipelined 러너 — `_SlotPipelineMixin`(v2 4-stage 검색-검증) + `ComposerRunner`
@@ -93,6 +114,9 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         # 이라 요청별 추종이 아님. 빈 값이면 핀에서 생략(미배선/단일노드).
         self._relevance_llm_id = relevance_llm_id
         self._multihop_llm_id = multihop_llm_id
+        # generation 부모 span(agent.generation) turn-local 종료 콜백. _run_slot_generation_loop
+        # 가 매 turn 핀하고 _generate_pipelined finally 가 안전 종료한다(미설정=no-op).
+        self._end_generation_span = None
 
     # ------------------------------------------------------------------
     # run() — N0~N2 계승(composer 동형), N3 부터 슬롯 future 발사 + 파이프라인 생성.
@@ -320,6 +344,90 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             )
 
     # ------------------------------------------------------------------
+    # 슬롯 단위 환각 검증 — LLM-as-judge(design.v2 §1, 사용자 결정). 결정론 등급 게이트 폐기.
+    # verifier 모델이 슬롯 출력 ↔ CONTEXT entailment 를 판정(verdict)하고 *그 이유*(rationale)를
+    # 직접 설명한다. 생성과 분리된 별도 콜(self-verification 금지 — 외부 verifier). 환각 없으면
+    # (supported) pass(무표시). alert *본문*은 정적 템플릿이 아니라 모델 rationale 이다.
+    # ------------------------------------------------------------------
+    async def _judge_slot(
+        self, llm: LLMPort, text: str,
+        sub_chunks: list[RetrievedChunk], pack,
+    ) -> dict[str, Any]:
+        """LLM judge 호출 → {verdict, rationale, unsupported_claims}. verifier source 미배선/
+        실패면 verdict=skipped(결정론 룰로 대체하지 않는다 — 사용자 결정: 결정론 신뢰 불가).
+        판정은 슬롯 CONTEXT(귀속 청크)만 근거로 한다(prior knowledge 불가)."""
+        skipped = {"verdict": _VERDICT_SKIPPED, "rationale": "", "unsupported_claims": []}
+        if self._slot_verify_source is None or not text.strip():
+            return skipped
+        sub_ids = {c.chunk_id for c in sub_chunks}
+        prompt = "\n\n".join([
+            self._slot_verify_source.prompt_body.strip(),
+            "# CONTEXT\n" + self._render_context_subset(pack, sub_ids),
+            "# SECTION DRAFT\n" + text,
+        ])
+        from app.ports.llm import GrammarSpec
+        grammar = (GrammarSpec(kind="json_schema", value=self._slot_verify_source.schema)
+                   if self._slot_verify_source.schema else None)
+        try:
+            with _TRACER.start_as_current_span("llm.slot_judge") as js:
+                oi.set_kind(js, oi.KIND_EVALUATOR)
+                res = await llm.generate(
+                    prompt,
+                    model_options=self._slot_verify_source.model_options or None,
+                    grammar=grammar,
+                )
+                oi.set_llm(js, model_name=res.model_id, prompt=prompt,
+                           completion=res.text)
+        except LLMUnavailableError:
+            return skipped
+        import json
+        try:
+            obj = json.loads(res.text)
+        except Exception:  # noqa: BLE001 — 파싱 실패는 판정 불가(skipped, 결정론 대체 안 함).
+            return skipped
+        verdict = str(obj.get("verdict", "")).lower()
+        if verdict not in (_VERDICT_SUPPORTED, _VERDICT_PARTIAL, _VERDICT_UNSUPPORTED):
+            # 보수적 — 알 수 없는 판정은 partial 로(supported 로 봐주지 않는다).
+            verdict = _VERDICT_PARTIAL
+        return {
+            "verdict": verdict,
+            "rationale": str(obj.get("rationale", "")).strip(),
+            "unsupported_claims": [str(s) for s in obj.get("unsupported_claims", []) or []],
+        }
+
+    @classmethod
+    def _render_judge_alert(cls, judge: dict[str, Any], label: str) -> str:
+        """judge 결과 → 슬롯 본문 *뒤* 에 붙일 OpenWebUI alert. supported(환각 없음)면 빈 문자열
+        (pass — 무표시). 그 외엔 verdict 에 맞는 alert 종류를 고르고, **본문은 모델 rationale**
+        (정적 템플릿 아님 — 슬롯 단위 검증 결과 설명). 근거 미입증 문장(unsupported_claims)이
+        있으면 `<details>` 로 접어 덧붙인다(OpenWebUI 렌더 지원)."""
+        verdict = judge.get("verdict", _VERDICT_SUPPORTED)
+        if verdict == _VERDICT_SUPPORTED:
+            return ""  # 환각 없음 → pass.
+        alert = _VERDICT_ALERT.get(verdict, "CAUTION")
+        label_ko = {
+            _VERDICT_PARTIAL: "부분 입증",
+            _VERDICT_UNSUPPORTED: "근거 미입증",
+            _VERDICT_SKIPPED: "검증 불가",
+        }.get(verdict, "검증 주의")
+        rationale = judge.get("rationale", "").strip()
+        if not rationale:
+            # 모델이 이유를 안 냈을 때만 최소 안내(skipped 등). 정적 단정 회피.
+            rationale = ("이 구획(`%s`)의 근거 검증 설명이 제공되지 않았습니다 — 자동 검증을 "
+                         "수행하지 못했습니다." % label) if verdict == _VERDICT_SKIPPED else (
+                         "이 구획(`%s`)의 일부 진술이 제공 근거로 충분히 입증되지 않았습니다." % label)
+        # alert 본문 = 모델이 설명한 검증 이유. blockquote 안에서 줄바꿈은 `> ` prefix.
+        body_lines = "\n".join(f"> {ln}" if ln else ">"
+                               for ln in rationale.splitlines())
+        out = (f"> [!{alert}]\n> **근거 검증: {label_ko}** — `{label}`\n>\n{body_lines}\n")
+        claims = judge.get("unsupported_claims") or []
+        if claims:
+            items = "\n".join(f"> - {c}" for c in claims)
+            out += (">\n> <details><summary>근거 미입증 문장</summary>\n>\n"
+                    + items + "\n> </details>\n")
+        return out
+
+    # ------------------------------------------------------------------
     # 재현 원본 — 슬롯별 CONTEXT + 전역 cite 맵 스냅샷(설계 §3.2). composer 는 단일 pack 을
     # write_context_snapshot 하나, pipelined 는 슬롯별 sub-pack 다수 + 전역 cite 배정이라
     # 슬롯 배열 + cite 맵을 한 파일로 남긴다(SlotCitationAllocator 상태 소멸 방지).
@@ -410,7 +518,14 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 streamed_parts=streamed_parts, cites=cites, root=root,
             )
         finally:
+            # 미소비 슬롯 검색 task 정리 + generation 부모 span 안전 종료(조기 refuse/예외
+            # 경로 — 정상 경로는 루프가 이미 멱등 종료). _end_generation_span 은 루프가 핀했고,
+            # 미설정(루프 진입 전 예외)이면 no-op.
             await handle.aclose()
+            ender = getattr(self, "_end_generation_span", None)
+            if ender is not None:
+                ender()
+                self._end_generation_span = None  # turn-local 핀 해제(stale 호출 방지).
 
     async def _run_slot_generation_loop(
         self, request: AgentRequest, started: float,
@@ -452,6 +567,35 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         # OTel span(64KB cap·만료)이 아니라 event_sink 에 남겨 만료·절단과 무관히 재현한다.
         prompt_render_calls: list[dict[str, Any]] = []
         snapshot_slots: list[dict[str, Any]] = []
+
+        # N4 Generation 전체를 단일 부모 span(agent.generation)으로 묶는다 — 슬롯별
+        # llm.slot_generation·llm.synthesize 가 그 아래로 중첩돼 Phoenix 에서 generation
+        # 단계가 한 노드로 접힌다(흩어진 슬롯 span 정리). re-indent 없이 OTel context 에
+        # attach/detach 해 이후 start_as_current_span 들이 이 span 을 부모로 잡게 한다.
+        # 본문 토큰이 흐르기 전(루프 진입 전)에 시작해, 종합까지 포함하고 answer_text 조립
+        # 전에 닫는다(N5 finalize 는 generation 밖). 예외/조기 refuse 에도 finally 로 종료.
+        from opentelemetry import context as _otel_context
+        from opentelemetry import trace as _otel_trace
+        gen_span = _TRACER.start_span("agent.generation")
+        oi.set_kind(gen_span, oi.KIND_CHAIN)
+        gen_span.set_attribute("generation.num_slots", num_slots)
+        _gen_token = _otel_context.attach(
+            _otel_trace.set_span_in_context(gen_span))
+
+        def _end_generation_span() -> None:
+            # 멱등 — generation span 을 닫고 OTel context 를 복원한다. answer_text 조립 전(정상)
+            # 1회, 조기 refuse/예외 경로의 안전판(_generate_pipelined finally)에서 1회 — 둘 중
+            # 먼저 호출된 쪽만 실효(이중 detach/end 방지).
+            nonlocal gen_span
+            if gen_span is None:
+                return
+            _otel_context.detach(_gen_token)
+            gen_span.end()
+            gen_span = None
+
+        # generation span 을 루프 밖에서 닫을 수 있도록 인스턴스에 핀(조기 refuse/예외 시
+        # _generate_pipelined 의 finally 가 호출). 한 turn 내 단일 호출이라 안전.
+        self._end_generation_span = _end_generation_span
 
         for idx, slot in enumerate(ordered):
             # === 슬롯 future 소비(배리어 없음 — 이 슬롯만 await; 실패는 그 슬롯만 degrade) ===
@@ -598,18 +742,35 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                     )
 
             text = self._strip_leading_heading(result.text.strip())
-            _, verdict = await self._verify_slot(
-                llm, slot, text, allowed_cites, sub_chunks, sub_pack,
-                request, spec,
-                prior_sections=self._prior_sections_block(slot_outputs, slot),
-            )
-            verdict["streamed_before_verify"] = True
+
+            # === LLM-as-judge 환각 검증 + 인라인 설명 alert(design.v2 §1·§2, 사용자 결정) ===
+            # 슬롯 본문이 이미 라이브 스트리밍됐으므로(streamed_before_verify) 화면을 못 되돌린다
+            # → verifier 모델이 슬롯↔CONTEXT entailment 를 판정(verdict)하고 *그 이유*(rationale)를
+            # 설명하면, 본문 *뒤* 에 OpenWebUI alert 로 사후 노출한다. 결정론 등급 게이트는 폐기
+            # (신뢰 불가) — 환각 없으면(supported) pass(무표시), 그 외엔 모델 rationale 을 alert
+            # 본문으로 보여 슬롯 단위 검증 결과를 설명한다. self-verification 금지(외부 콜).
+            judge = ({"verdict": _VERDICT_SKIPPED, "rationale": "", "unsupported_claims": []}
+                     if self._slot_verify == "off"
+                     else await self._judge_slot(llm, text, sub_chunks, sub_pack))
+            verdict = {
+                "verdict": judge["verdict"],
+                "rationale": judge.get("rationale", ""),
+                "unsupported_claims": judge.get("unsupported_claims", []),
+                "streamed_before_verify": True,
+            }
+            alert = ("" if self._slot_verify == "off"
+                     else self._render_judge_alert(judge, label))
+            ss.set_attribute("slot.verify_verdict", judge["verdict"])
+            if alert:
+                # 본문 직후에 alert 를 스트리밍(빈 줄로 본문과 분리). answer_text 재구성용으로도
+                # 합쳐 화면=기록 일치를 보존한다.
+                await emit_token("\n\n" + alert)
 
             # cite-N 은 이미 전역(생성 전 배정) — 사후 재매핑 불필요. 이 슬롯이 *새로* 등장
             # 시킨 chunk id(References·retrieved_chunk_ids 누적은 allocator 가 전역 보관).
             sec_global_ids = list(slot_pack.new_chunk_ids)
 
-            section = f"{header}{text}\n\n"
+            section = f"{header}{text}" + (f"\n\n{alert}" if alert else "") + "\n\n"
             await emit_token("\n\n")  # 슬롯 사이 구분.
             streamed_parts.append(section)
 
@@ -623,18 +784,38 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 "fallback_context": fallback_ctx,
                 "attributed_chunks": attributed,
                 "verdict": verdict,
+                "verify_verdict": judge["verdict"],
                 "completion_tokens": int(result.token_usage.get("completion_tokens", 0)),
             })
             total_prompt_tokens += int(result.token_usage.get("prompt_tokens", 0))
             total_completion_tokens += int(result.token_usage.get("completion_tokens", 0))
             await emit_step("slot_generation", "ok", slot=slot.name,
-                            l0=verdict["l0"], l1=verdict.get("l1"),
-                            regen=verdict.get("regen", 0))
+                            verdict=judge["verdict"])
 
         await emit_step("slot_search", "ok", necessary=len(cites.all_chunk_ids),
                         multihop=total_multihop, second_pass=total_second_pass)
 
         evidence_gap = not slot_outputs or not cites.all_chunk_ids
+
+        # === 환각 검증 집계(design.v2 §2.2·§4) — 슬롯 verdict 분포를 전체 status 로 환산 ===
+        # judge verdict 집계(판정=모델 / 집계=코드): unsupported 1개+ → FAIL, partial 만 →
+        # PARTIAL, 전부 supported → PASS, 검증 슬롯 0(off/gap) → SKIPPED. skipped(verifier 미배선/
+        # 실패)는 PARTIAL 로 본다(검증 못 했음을 보수적으로 — supported 로 봐주지 않는다).
+        # AgentResponse.verification_status 와 smr_agent custom field 양쪽에 노출(v3.1 동형).
+        verdict_counts = {v: 0 for v in
+                          (_VERDICT_SUPPORTED, _VERDICT_PARTIAL,
+                           _VERDICT_UNSUPPORTED, _VERDICT_SKIPPED)}
+        for p in slot_pins:
+            verdict_counts[p["verify_verdict"]] = \
+                verdict_counts.get(p["verify_verdict"], 0) + 1
+        if not slot_pins or self._slot_verify == "off":
+            verification_status = VerificationStatus.SKIPPED.value
+        elif verdict_counts[_VERDICT_UNSUPPORTED]:
+            verification_status = VerificationStatus.FAIL.value
+        elif verdict_counts[_VERDICT_PARTIAL] or verdict_counts[_VERDICT_SKIPPED]:
+            verification_status = VerificationStatus.PARTIAL.value
+        else:
+            verification_status = VerificationStatus.PASS.value
 
         body_text = "".join(streamed_parts).strip()
 
@@ -676,7 +857,34 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                     sy.set_attribute("llm.upstream_error", str(exc)[:500])
             await emit_step("synthesize", "ok", mode=synth_mode)
 
+        # generation 단계(슬롯 루프 + 종합) 종료 — 부모 span 을 여기서 닫는다(answer_text
+        # 조립·N5 finalize 는 generation 밖). 검증 집계 status 를 span 에 남겨 Phoenix 에서
+        # 이 turn 의 환각 위험을 generation 노드 한 곳에서 읽는다.
+        gen_span.set_attribute("generation.verification_status", verification_status)
+        _end_generation_span()
+
         answer_text = body_text + (("\n\n" + closing) if closing else "")
+
+        # === 답변 말미 검증 요약(design.v2 §2.2) — 환각이 검출된 슬롯이 1개+ 일 때만 1줄 노출.
+        # 전부 supported/검증 off 면 군더더기 금지로 생략. 닫음 블록 *뒤*, References 앞. 카운트
+        # 집계는 코드지만 슬롯별 *설명*은 위의 alert(모델 rationale)가 이미 담당한다.
+        flagged = (verdict_counts[_VERDICT_UNSUPPORTED] + verdict_counts[_VERDICT_PARTIAL]
+                   + verdict_counts[_VERDICT_SKIPPED])
+        if self._slot_verify != "off" and flagged and slot_pins:
+            parts = []
+            if verdict_counts[_VERDICT_UNSUPPORTED]:
+                parts.append(f"근거 미입증 {verdict_counts[_VERDICT_UNSUPPORTED]}개")
+            if verdict_counts[_VERDICT_PARTIAL]:
+                parts.append(f"부분 입증 {verdict_counts[_VERDICT_PARTIAL]}개")
+            if verdict_counts[_VERDICT_SKIPPED]:
+                parts.append(f"검증 불가 {verdict_counts[_VERDICT_SKIPPED]}개")
+            summary = (
+                f"\n\n> [!NOTE]\n> **근거 검증 요약** — 총 {len(slot_pins)}개 구획 중 "
+                f"{verdict_counts[_VERDICT_SUPPORTED]}개 통과, " + ", ".join(parts)
+                + ". 각 구획의 상세 사유는 위 검증 표시를 참고하세요."
+            )
+            answer_text += summary
+            await emit_token(summary)
 
         citations = _to_citations(cites.all_candidates)
         chunk_ids = list(cites.all_chunk_ids)
@@ -688,6 +896,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             cites.all_chunk_ids, total_neighbor=total_neighbor,
             evidence_gap=evidence_gap,
             synth_mode=synth_mode, synth_hash=synth_hash,
+            verification_status=verification_status, verdict_counts=verdict_counts,
         )
         combined_hash = _sha16(
             "|".join(p["rendered_prompt_hash"] for p in slot_pins)
@@ -699,7 +908,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             answer_text=answer_text,
             citations=citations,
             refusal_reason=None,
-            verification_status=VerificationStatus.SKIPPED.value,
+            verification_status=verification_status,
             scenario_object="n_a", scenario_depth="n_a",
             latency_ms=int((time.monotonic() - started) * 1000),
             token_usage={},
@@ -761,6 +970,8 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         global_chunk_ids: list[str], *, total_neighbor: int = 0,
         evidence_gap: bool = False,
         synth_mode: str = "off", synth_hash: str | None = None,
+        verification_status: str | None = None,
+        verdict_counts: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         from app.application.agents.composer_base import _scope_summary
         return {
@@ -836,6 +1047,13 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                     "synthesize": {"enabled": self._synthesize, "mode": synth_mode,
                                    "rendered_prompt_hash": synth_hash},
                     "slot_verify": self._slot_verify,
+                    # 환각 검증 요약(design.v2 §5) — LLM-judge verdict 분포 + 전체 status.
+                    # 슬롯별 verdict·rationale 은 slots[].verdict 에 이미 들어 있다(재현·감사).
+                    "verification": {
+                        "method": "llm_judge",
+                        "status": verification_status,
+                        "verdict_counts": verdict_counts or {},
+                    },
                 },
                 "evidence_gap": evidence_gap,
                 "session": self._session_pin(sess, post),
@@ -909,7 +1127,13 @@ def _make_pipelined(
         synthesize_source=getattr(deps, "composer_synthesize_source", None),
         slot_verify_source=getattr(deps, "composer_slot_verify_source", None),
         slot_max_tokens=t.get("composer_slot_max_tokens", 8192),
-        slot_verify=t.get("composer_slot_verify", "off"),
+        # composer_pipelined 는 환각 검증 alert 가 LLM-as-judge 에 의존하므로 검증을 *기본*
+        # 활성한다(design.v2 §1 — 사용자 결정: 결정론 신뢰 불가, 모델로 검증·설명). slot_verify
+        # ≠ "off" 면 _judge_slot 이 슬롯마다 verifier 모델을 호출한다. slot_verify_source(vLLM)
+        # 미배선이면 judge 가 verdict="skipped" 를 돌려 [!NOTE](검증 불가) 로 솔직히 표시한다
+        # (결정론 룰로 대체하지 않음). composer 의 기본(off)은 불변(A/B).
+        slot_verify=t.get("composer_pipelined_slot_verify",
+                          t.get("composer_slot_verify", "judge")),
         synthesize=t.get("composer_synthesize", True),
         slot_context_k=t.get("composer_slot_context_k", 12),
         prior_full_k=t.get("composer_prior_full_k", 2),

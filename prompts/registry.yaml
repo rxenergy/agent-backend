@@ -277,9 +277,10 @@ composer_persona_prompts:
 composer_slot_verify_prompts:
   composer_slot_verify_v1:
     profile_version: v1
-    prompt:        {path: spec_driven/composer_slot_verify_v1.md,            version: v1, sha256: "eb921608e28d1cbe6a88162db11aba62dc51a0aeb88f75e2b0b73b2ae378751e"}
-    output_schema: {path: spec_driven/schemas/composer_slot_verify_v1.json,  version: v1, sha256: "cd0245c1c62a37d13f2cead80cc38876daf9d1cf63f027fed9c8eb1ce6ea27c2"}
-    model_options: {temperature: 0.0, max_tokens: 500}
+    prompt:        {path: spec_driven/composer_slot_verify_v1.md,            version: v1, sha256: "bc4df68bfffa13244cd2585b66c5d6583c30dc1fe6ee290bba8f28a58aa1d6bf"}
+    output_schema: {path: spec_driven/schemas/composer_slot_verify_v1.json,  version: v1, sha256: "66f12bb4c9822bc299ad3e458cab7531a5b18364110e751fa5f540e7527e3337"}
+    # rationale(설명) 필드가 추가돼 출력이 길어지므로 max_tokens 상향(verdict+rationale+claims).
+    model_options: {temperature: 0.0, max_tokens: 800}
 
 prompt_profiles:
 

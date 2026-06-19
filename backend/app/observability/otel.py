@@ -74,8 +74,25 @@ def install_metrics(
     _METRICS_INSTALLED = True
 
 
+# 관측 가치 없는 주기/프로브 엔드포인트 — health check·readiness·모델 목록 폴링은
+# 클라이언트(OpenWebUI·로드밸런서·k8s probe)가 수초마다 때려 trace 를 노이즈로 채운다.
+# 정규식(쉼표 구분, ASGI 표준 excluded_urls 형식). OTEL_EXCLUDED_URLS 로 override.
+_DEFAULT_EXCLUDED_URLS = "health,ready,v1/models"
+
+
 def instrument_fastapi(app) -> None:  # noqa: ANN001 (fastapi.FastAPI lazy-imported)
-    FastAPIInstrumentor.instrument_app(app)
+    import os
+    # excluded_urls — 주기 호출(/health·/ready·/v1/models)은 server 스팬 자체를 안 만든다.
+    # 실제 작업(POST /v1/chat/completions)만 trace. 빈값이면 제외 없음(전부 수집).
+    excluded = os.getenv("OTEL_EXCLUDED_URLS", _DEFAULT_EXCLUDED_URLS).strip() or None
+    # exclude_spans=["send","receive"] — ASGI 자동계측이 *모든 http.send 이벤트*마다 자식
+    # 스팬(`POST /v1/chat/completions http send`)을 만든다. 일반 JSON 응답은 1~2개지만,
+    # SSE 스트리밍(/v1/chat/completions)은 토큰 프레임마다 send 이벤트가 발생해 답변 한 건이
+    # 수백 개의 `http send` 스팬을 낳는다 → trace 비대·Phoenix 지연. 이 send/receive 스팬은
+    # 우리 워크플로우 관측에 가치가 없다(server 스팬 1개 + agent.run 자식이면 충분). 끈다.
+    # 부모 server 스팬(요청당 1개)·agent.run·노드 스팬은 그대로 유지된다.
+    FastAPIInstrumentor.instrument_app(
+        app, excluded_urls=excluded, exclude_spans=["send", "receive"])
 
 
 def install_logs(

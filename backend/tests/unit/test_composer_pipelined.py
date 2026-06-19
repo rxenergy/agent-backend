@@ -29,6 +29,7 @@ from app.application.agents.registry import AgentDeps, VariantRegistry
 from app.application.context.pack import ContextBuilder
 from app.application.events.recorder import EventRecorder
 from app.application.prompting.spec_driven_source import (
+    ComposerSlotVerifySource,
     SpecDrivenAnswerSpecSource,
     SpecDrivenGeneralSource,
     SpecDrivenGenerationSource,
@@ -95,12 +96,23 @@ class _ScriptLLM:
     """순차 스크립트: N0→N1→N2(stream_capture) → 슬롯1→슬롯2(stream) → 종합(stream).
 
     슬롯 검색-검증 future 가 N2 직후 *동시* 발사되나 검증은 도구(_FakeVerifyTool)가 처리하므로
-    이 LLM 의 cursor 와 무관하다 — cursor 는 N0/N1/N2 + 슬롯 생성 + 종합만 소비한다."""
+    이 LLM 의 cursor 와 무관하다 — cursor 는 N0/N1/N2 + 슬롯 생성 + 종합만 소비한다.
 
-    def __init__(self, gen_texts: list[str]) -> None:
+    LLM-as-judge(_judge_slot)는 *별도* 로 `generate` 를 호출한다(judge 프롬프트에 `# SECTION
+    DRAFT` 마커). cursor 순서를 깨지 않도록 judge 호출은 main cursor 를 *건드리지 않고*
+    `judge_for(draft)` 콜백으로 verdict JSON 을 돌려준다(기본=supported). 테스트가 슬롯별
+    환각 시나리오를 주입한다."""
+
+    def __init__(self, gen_texts: list[str], judge_for=None) -> None:
         self._gen = list(gen_texts)
         self._i = 0
         self.model_id = "fake"
+        # draft 본문 → judge JSON(verdict/rationale/unsupported_claims). 기본=모두 supported.
+        self._judge_for = judge_for or (lambda draft: {
+            "verdict": "supported",
+            "rationale": "CONTEXT 의 근거로 모든 진술이 뒷받침됩니다.",
+            "unsupported_claims": [],
+        })
 
     def _next(self, prompt: str = "") -> str:
         t = self._gen[min(self._i, len(self._gen) - 1)]
@@ -112,6 +124,13 @@ class _ScriptLLM:
         return t
 
     async def generate(self, prompt, *, model_options=None, grammar=None) -> LLMResult:
+        # LLM-as-judge 호출 — judge 프롬프트면 main cursor 를 소비하지 않고 verdict JSON 반환.
+        if "# SECTION DRAFT" in prompt:
+            idx = prompt.rfind("# SECTION DRAFT\n")
+            draft = prompt[idx + len("# SECTION DRAFT\n"):] if idx >= 0 else ""
+            return LLMResult(text=json.dumps(self._judge_for(draft), ensure_ascii=False),
+                             token_usage={"prompt_tokens": 1, "completion_tokens": 1},
+                             model_id=self.model_id)
         return LLMResult(text=self._next(prompt),
                          token_usage={"prompt_tokens": 1, "completion_tokens": 1},
                          model_id=self.model_id)
@@ -183,7 +202,8 @@ def _tool_registry_yaml(root: Path, *, with_verify: bool) -> Path:
     return p
 
 
-def _deps(tmp: Path, *, llm, with_verify: bool) -> AgentDeps:
+def _deps(tmp: Path, *, llm, with_verify: bool,
+          with_judge: bool = True) -> AgentDeps:
     sink = FilesystemEventSink(root=str(tmp / "events"), prefix="t")
     recorder = EventRecorder(sink, app_profile="local")
     registry = ToolRegistry.from_yaml(_tool_registry_yaml(tmp, with_verify=with_verify))
@@ -202,6 +222,9 @@ def _deps(tmp: Path, *, llm, with_verify: bool) -> AgentDeps:
         spec_driven_generation_source=SpecDrivenGenerationSource(_REPO_PROMPTS),
         spec_driven_triage_source=SpecDrivenTriageSource(_REPO_PROMPTS),
         spec_driven_general_source=SpecDrivenGeneralSource(_REPO_PROMPTS),
+        # LLM-as-judge verifier source(실제 prompt/schema) — 미배선이면 verdict=skipped.
+        composer_slot_verify_source=(
+            ComposerSlotVerifySource(_REPO_PROMPTS) if with_judge else None),
         tunables={"citation_contract_path": str(_CONTRACT), "retriever_top_k": 3,
                   "spec_driven_max_queries": 6, "spec_driven_max_context_chunks": 10,
                   "spec_driven_v2_verify_concurrency": 3,
@@ -484,3 +507,133 @@ def test_citation_allocator_assigns_global_and_dedups_shared_chunk() -> None:
     # 전역 References 는 g1·r1 두 건만(중복 cite-0 후보 미생성).
     assert [c.citation_id for c in alloc.all_candidates] == ["cite-0", "cite-1"]
     assert alloc.all_chunk_ids == ["g1", "r1"]
+
+
+# ----------------------------------------------------------------------------
+# LLM-as-judge 환각 검증 + 모델 rationale alert + generation 부모 span(design.v2 §1·§2·§8).
+# ----------------------------------------------------------------------------
+def test_judge_alert_uses_model_rationale_not_static_template() -> None:
+    """alert *본문* 이 모델 rationale 이고(정적 템플릿 아님), supported=무표시, verdict→OpenWebUI
+    5종 매핑(미렌더 [!DANGER] 금지), unsupported_claims 는 <details> 로 접힌다(직접 단위)."""
+    from app.application.agents.composer_pipelined import ComposerPipelinedRunner as R
+
+    # supported → 환각 없음 → pass(무표시).
+    assert R._render_judge_alert(
+        {"verdict": "supported", "rationale": "모두 근거 있음"}, "X") == ""
+    # unsupported → [!WARNING], 본문은 모델 rationale 그대로.
+    rationale = "‘2200°F’ 값은 CONTEXT 에 없고 외부 지식에서 온 것으로 보입니다."
+    warn = R._render_judge_alert(
+        {"verdict": "unsupported", "rationale": rationale,
+         "unsupported_claims": ["최대 피복재 온도 2200°F."]}, "정량 요건")
+    assert warn.startswith("> [!WARNING]")
+    assert rationale in warn  # 정적 문구가 아니라 모델 설명이 본문.
+    assert "[!DANGER]" not in warn and "[!CRITICAL]" not in warn
+    assert "<details>" in warn and "최대 피복재 온도 2200°F." in warn
+    # partial → [!CAUTION].
+    cau = R._render_judge_alert(
+        {"verdict": "partial", "rationale": "일부만 근거 있음"}, "Y")
+    assert cau.startswith("> [!CAUTION]") and "일부만 근거 있음" in cau
+    # skipped(verifier 미배선/실패) → [!NOTE], 결정론 룰로 대체하지 않음.
+    sk = R._render_judge_alert({"verdict": "skipped", "rationale": ""}, "Z")
+    assert sk.startswith("> [!NOTE]")
+
+
+@pytest.mark.asyncio
+async def test_unsupported_verdict_surfaces_warning_alert_with_rationale() -> None:
+    """LLM judge 가 슬롯1을 unsupported 로 판정 → 본문 뒤 [!WARNING] alert(모델 rationale 설명)
+    + 말미 검증 요약 + verification_status=fail + 재현 핀(slots[].verdict·rationale)."""
+    bad_rationale = "‘2200°F’ 수치가 CONTEXT 에 없어 근거가 없습니다."
+
+    def judge_for(draft: str) -> dict:
+        # 슬롯2 본문(피복재 온도)만 unsupported, 슬롯1은 supported.
+        if "피복재" in draft or "2200" in draft:
+            return {"verdict": "unsupported", "rationale": bad_rationale,
+                    "unsupported_claims": ["최대 피복재 온도 2200°F 이하."]}
+        return {"verdict": "supported", "rationale": "근거 있음.",
+                "unsupported_claims": []}
+
+    llm = _ScriptLLM([_TRIAGE_RETRIEVAL, _SPEC_JSON, _QUERIES_JSON,
+                      _SLOT1, _SLOT2, _SYNTH], judge_for=judge_for)
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = VariantRegistry.build(
+            COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
+            _deps(Path(tmp), llm=llm, with_verify=True))
+        resp = await runner.run(_req())
+        assert resp.refusal_reason is None
+        # 환각 슬롯 본문 뒤에 OpenWebUI [!WARNING] alert + *모델 rationale* 설명.
+        assert "> [!WARNING]" in resp.answer_text
+        assert bad_rationale in resp.answer_text  # 정적 문구 아닌 모델 설명.
+        assert "근거 검증 요약" in resp.answer_text
+        assert resp.verification_status == "fail"
+        # 재현 핀 — 슬롯 verdict + rationale + verification 요약.
+        pin = _event(tmp)["query_understanding"]["spec_driven"]
+        verdicts = [s["verdict"]["verdict"] for s in pin["generation"]["slots"]]
+        assert "unsupported" in verdicts and "supported" in verdicts
+        rationales = [s["verdict"].get("rationale") for s in pin["generation"]["slots"]]
+        assert bad_rationale in rationales
+        ver = pin["generation"]["verification"]
+        assert ver["method"] == "llm_judge" and ver["status"] == "fail"
+        assert ver["verdict_counts"]["unsupported"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_all_supported_emits_no_alert_and_pass_status() -> None:
+    """judge 가 전 슬롯 supported(환각 없음) → alert·검증 요약 0(pass — 무표시),
+    verification_status=pass."""
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = VariantRegistry.build(
+            COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
+            _deps(Path(tmp), llm=_script(), with_verify=True))  # 기본 judge=supported.
+        resp = await runner.run(_req())
+        assert "[!WARNING]" not in resp.answer_text
+        assert "[!CAUTION]" not in resp.answer_text
+        assert "근거 검증 요약" not in resp.answer_text
+        assert resp.verification_status == "pass"
+
+
+@pytest.mark.asyncio
+async def test_judge_unwired_marks_skipped_not_deterministic_pass() -> None:
+    """verifier source 미배선 → verdict=skipped(결정론 룰로 대체하지 않음 — 사용자 결정).
+    [!NOTE] 검증 불가 표시 + status=partial(supported 로 봐주지 않음)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = VariantRegistry.build(
+            COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
+            _deps(Path(tmp), llm=_script(), with_verify=True, with_judge=False))
+        resp = await runner.run(_req())
+        assert "> [!NOTE]" in resp.answer_text  # 검증 불가 표시.
+        assert resp.verification_status == "partial"
+        pin = _event(tmp)["query_understanding"]["spec_driven"]
+        verdicts = {s["verdict"]["verdict"] for s in pin["generation"]["slots"]}
+        assert verdicts == {"skipped"}
+
+
+@pytest.mark.asyncio
+async def test_generation_spans_nest_under_single_parent(span_exporter) -> None:
+    """generation 단계가 단일 부모 span(agent.generation)으로 묶이고, 슬롯별
+    llm.slot_generation·llm.synthesize 가 그 *자식*으로 중첩된다(design.v2 §8 — Phoenix 에서
+    generation 단계가 한 노드로 접힘). 부모는 agent.run 의 자식."""
+    span_exporter.clear()
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = VariantRegistry.build(
+            COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
+            _deps(Path(tmp), llm=_script(), with_verify=True))
+        await runner.run(_req())
+
+    spans = span_exporter.get_finished_spans()
+    by_name = {sp.name: sp for sp in spans}
+    gen = by_name.get("agent.generation")
+    assert gen is not None, "agent.generation 부모 span 이 있어야 한다"
+    gen_id = gen.context.span_id
+    # 부모는 agent.run.
+    run_span = by_name.get("agent.run")
+    assert run_span is not None
+    assert gen.parent is not None and gen.parent.span_id == run_span.context.span_id
+    # 슬롯 생성·종합 span 이 모두 agent.generation 의 자식(parent.span_id == gen_id).
+    slot_gen = [sp for sp in spans if sp.name == "llm.slot_generation"]
+    synth = [sp for sp in spans if sp.name == "llm.synthesize"]
+    assert len(slot_gen) == 2 and len(synth) == 1
+    for sp in slot_gen + synth:
+        assert sp.parent is not None and sp.parent.span_id == gen_id, (
+            f"{sp.name} 이 agent.generation 의 자식이어야 한다")
+    # 부모 span 에 검증 status 가 남는다.
+    assert dict(gen.attributes).get("generation.verification_status") == "pass"

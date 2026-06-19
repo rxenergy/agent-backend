@@ -6,12 +6,16 @@
       "enum": ["supported", "partial", "unsupported"],
       "description": "Whether the section draft's factual claims are entailed by CONTEXT."
     },
+    "rationale": {
+      "type": "string",
+      "description": "One short paragraph (in the SAME language as the SECTION DRAFT) explaining WHY this verdict was reached — which specific claim(s) are or are not grounded in CONTEXT, and the background/reason. For a 'supported' verdict, briefly state that all factual claims are grounded. This is shown to the reader as the hallucination-check explanation."
+    },
     "unsupported_claims": {
       "type": "array",
       "items": {"type": "string"},
       "description": "Verbatim draft sentences CONTEXT does not support (may be empty)."
     }
   },
-  "required": ["verdict"],
+  "required": ["verdict", "rationale"],
   "additionalProperties": false
 }
