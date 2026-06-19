@@ -96,3 +96,29 @@ variants:
       - retrieval.search
     required_scenarios: []
     capability_tags: [spec_driven, retrieval, slotwise, composition, pipelined, dual_node, stateless]
+
+  # composer_pipelined 다중 페르소나 — composer_pipelined 와 동형이나 검색 목적·답 척추가
+  # 다른 사용자 역할(심사자/설계자/운영자)을 variant 로 분리(composer_persona_framework.
+  # design.v1). 선택은 AGENT_VARIANT 결정론. 동일 ComposerPipelinedRunner + 동일 프롬프트
+  # source 공유, 차이는 바인딩된 Persona + persona profile fragment 로만. composer 페르소나와
+  # 동일 fragment(persona/{id}_v1.md) 재사용. required_tools/compatible_llms 는 pipelined 동형.
+  composer_pipelined_reviewer:
+    compatible_llms: ["*"]
+    required_tools:
+      - retrieval.search
+    required_scenarios: []
+    capability_tags: [spec_driven, retrieval, slotwise, composition, pipelined, dual_node, stateless, persona]
+
+  composer_pipelined_designer:
+    compatible_llms: ["*"]
+    required_tools:
+      - retrieval.search
+    required_scenarios: []
+    capability_tags: [spec_driven, retrieval, slotwise, composition, pipelined, dual_node, stateless, persona]
+
+  composer_pipelined_operator:
+    compatible_llms: ["*"]
+    required_tools:
+      - retrieval.search
+    required_scenarios: []
+    capability_tags: [spec_driven, retrieval, slotwise, composition, pipelined, dual_node, stateless, persona]

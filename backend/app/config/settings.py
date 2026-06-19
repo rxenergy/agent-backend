@@ -47,9 +47,18 @@ class Settings(BaseSettings):
 
     service_version: str = "0.2.0"
 
-    # Agent variant pool + default selection
+    # Agent variant pool + default selection. 메인 에이전트는 composer_pipelined(배리어 제거
+    # 슬롯 파이프라인)이며, 페르소나 variant(composer_persona_framework.design.v1) — 중립
+    # `composer_pipelined` + 심사자/설계자/운영자 — 를 활성화한다. API model 필드
+    # `<variant>@<llm>` 로 요청별 선택, /v1/models 가 조합을 노출(드롭다운). 등록(register)
+    # 만으로는 부족 — 활성 리스트에 있어야 container.runners 에 들어가 선택 가능. composer
+    # (비파이프라인) 페르소나는 A/B 필요 시 env(AGENT_VARIANTS_ENABLED)로 추가.
     agent_variants_enabled: list[str] = [
         "spec_driven_v1",
+        "composer_pipelined",
+        "composer_pipelined_reviewer",
+        "composer_pipelined_designer",
+        "composer_pipelined_operator",
     ]
     default_variant: str = "spec_driven_v1"
 

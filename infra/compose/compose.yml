@@ -77,15 +77,25 @@ services:
       - qdrant_data:/qdrant/storage
 
   phoenix:
-    image: arizephoenix/phoenix:${PHOENIX_VERSION:-version-7.12.0}
+    image: arizephoenix/phoenix:${PHOENIX_VERSION:-version-17.8.1}
     container_name: phoenix
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
-      # Phoenix 는 PHOENIX_WORKING_DIR 미설정 시 $HOME/.phoenix (= /root/.phoenix)
-      # 에 SQLite(phoenix.db) 를 쓴다. 그 경로는 마운트되지 않은 컨테이너 쓰기
-      # 레이어라 `down` (컨테이너 제거) 시 트레이스/실험 데이터가 전부 소실된다.
-      # 명시적으로 phoenix_data 볼륨 경로를 가리켜 영속화한다.
+      # 스토리지 백엔드: 공유 Postgres 인스턴스의 별도 'phoenix' DB.
+      # (OpenWebUI 와 동일 패턴 — infra/postgres/00_databases.sql 에서 프로비저닝)
+      # 이전 SQLite(phoenix.db) 는 GraphQL resolver 쿼리·무한 누적·라이브
+      # 스트리밍 폴링(StreamToggleRefetchQuery) 의 조합으로 UI 렌더가 느렸다.
+      # Postgres 는 동시 read/write 와 인덱싱으로 그 병목을 해소한다.
+      PHOENIX_SQL_DATABASE_URL: postgresql://agent:agent@postgres:5432/phoenix
+      # WORKING_DIR 는 Postgres 백엔드에서도 export/임시 파일 경로로 쓰이므로 유지.
       PHOENIX_WORKING_DIR: /data/phoenix
+      # trace 무한 누적이 곧 UI 쿼리 비용. 0=무한(기본). 운영 기준 N일로 자동 정리.
+      PHOENIX_DEFAULT_RETENTION_POLICY_DAYS: ${PHOENIX_RETENTION_DAYS:-30}
+      # air-gapped(onprem) 대비: 외부 폰트 등 리소스 fetch 비활성화 → 렌더 블록 방지.
+      PHOENIX_ALLOW_EXTERNAL_RESOURCES: ${PHOENIX_ALLOW_EXTERNAL_RESOURCES:-false}
     ports:
       - "6006:6006"
       - "9091:9090"

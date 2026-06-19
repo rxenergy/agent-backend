@@ -47,3 +47,6 @@ infra/opensearch/snapshots/*
 export/*
 
 docs/adr
+
+# Phoenix 콜드 백업 아카이브 (수십~수백 MB, 커밋 금지)
+infra/backups/phoenix/*.tar.gz

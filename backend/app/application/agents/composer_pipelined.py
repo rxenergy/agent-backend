@@ -58,7 +58,7 @@ from app.domain.errors import RefusalReason, VerificationStatus
 from app.domain.interaction import AgentRequest, AgentResponse, ToolCallRecord
 from app.domain.memory import MemoryRef, MemoryReviewStatus, StalenessStatus
 from app.domain.retrieval import RetrievedChunk
-from app.domain.spec_driven import AnswerSpec, SpecSlot
+from app.domain.spec_driven import PERSONAS, AnswerSpec, Persona, SpecSlot
 from app.observability import openinference as oi
 from app.observability.logging import get_logger
 from app.observability.metrics import get_metrics
@@ -199,7 +199,8 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             )
             spec = await n1.instantiate(request.query_text,
                                         reasoning_label="답변 사양 정의",
-                                        prior_context=prior_context)
+                                        prior_context=prior_context,
+                                        persona_profile=self._persona_profile())
             await emit_step("define_spec", "ok", method=spec.instantiation_method,
                             num_slots=len(spec.required_slots),
                             num_refs=len(spec.explicit_references))
@@ -216,7 +217,8 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 policy_hash=self._query_source.policy_hash,
             )
             queries, formulation_method = await n2.formulate(
-                request.query_text, spec, reasoning_label="검색 쿼리 생성")
+                request.query_text, spec, reasoning_label="검색 쿼리 생성",
+                persona_profile=self._persona_profile())
             truncated = False
             if len(queries) > self._max_queries:
                 truncated = True
@@ -575,6 +577,13 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             "spec_driven": {
                 "route": "retrieval",
                 "triage": triage_pin,
+                # 페르소나 재현 핀 — variant_id(=composer_pipelined_designer 등)가 이미 기록하나
+                # 보강(EU AI Act Art.12 / persona_framework.design.v1 §5.3). 중립은 None.
+                "persona": (
+                    {"persona_id": self._persona.persona_id,
+                     "profile_source_id": self._persona.profile_source_id}
+                    if self._persona else None
+                ),
                 "spec": {
                     "intent": spec.intent,
                     "method": spec.instantiation_method,
@@ -644,14 +653,17 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         }
 
 
-@register_variant(COMPOSER_PIPELINED_VARIANT_ID)
-def _build_composer_pipelined(
-    spec: VariantSpec, deps: AgentDeps
+def _make_pipelined(
+    spec: VariantSpec, deps: AgentDeps, persona: "Persona | None"
 ) -> "ComposerPipelinedRunner":
-    """composer_pipelined 팩토리 — composer(슬롯 생성) + v2(슬롯 검색-검증) source 를 함께
+    """composer_pipelined 공통 팩토리 — composer(슬롯 생성) + v2(슬롯 검색-검증) source 를 함께
     주입한다. composer v2 source(N1 답변설계·N2 검색설계·슬롯 role)를 기본으로, 미배선이면
     base v1 source 로 graceful. 검증/외부참조는 retrieval.verify_slot/follow_up 도구(profiles.py
-    가 배선)로 호출 — 미배선이면 단일노드 degrade(v2 동형)."""
+    가 배선)로 호출 — 미배선이면 단일노드 degrade(v2 동형).
+
+    persona(composer_persona_framework.design.v1) — 생성 시점에 1개 바인딩(런타임 추론 없음).
+    None=중립(현행 동작 불변, 회귀 0). composer 와 동일 fragment·동일 Persona 상수를 공유한다
+    (단일 진실 — N1/N2/N4 가 같은 fragment 를 소비). persona profile source 는 미배선이면 None."""
     t = deps.tunables
     use_v2 = t.get("composer_prompts_v2", True)
     answer_spec_source = (
@@ -663,6 +675,10 @@ def _build_composer_pipelined(
     slot_source = (
         getattr(deps, "composer_slot_v2_source", None) if use_v2 else None
     ) or getattr(deps, "composer_slot_source", None)
+    persona_sources = getattr(deps, "composer_persona_sources", None) or {}
+    persona_profile_source = (
+        persona_sources.get(persona.persona_id) if persona else None
+    )
     # 노드 분리 가시화(원칙 5) — relevance(verify_slot)·multihop(follow_up) 둘 다 worker
     # (secondary_llm) 노드에서 돈다(profiles.py 배선). main(생성)과 물리 분리. 인스턴스의
     # model_id(HttpLLM=served-model-name, fake=fake-echo)를 핀에 노출. 미배선 시 빈 값.
@@ -707,4 +723,30 @@ def _build_composer_pipelined(
         synthesize=t.get("composer_synthesize", True),
         slot_context_k=t.get("composer_slot_context_k", 12),
         prior_full_k=t.get("composer_prior_full_k", 2),
+        persona=persona,
+        persona_profile_source=persona_profile_source,
     )
+
+
+@register_variant(COMPOSER_PIPELINED_VARIANT_ID)
+def _build_composer_pipelined(
+    spec: VariantSpec, deps: AgentDeps
+) -> "ComposerPipelinedRunner":
+    # 중립 baseline — persona 미바인딩(현행 동작 불변, 회귀 0).
+    return _make_pipelined(spec, deps, persona=None)
+
+
+# 페르소나 variant — `composer_pipelined_{persona_id}`. composer 와 동일 패턴: 공통 팩토리에
+# Persona 상수만 바인딩, 선택은 AGENT_VARIANT 결정론(런타임 추론 없음). 같은 fragment 공유.
+def _register_pipelined_persona_variants() -> None:
+    for persona in PERSONAS.values():
+        def _factory(spec: VariantSpec, deps: AgentDeps,
+                     _persona: Persona = persona) -> "ComposerPipelinedRunner":
+            return _make_pipelined(spec, deps, persona=_persona)
+
+        register_variant(
+            f"{COMPOSER_PIPELINED_VARIANT_ID}_{persona.persona_id}"
+        )(_factory)
+
+
+_register_pipelined_persona_variants()
