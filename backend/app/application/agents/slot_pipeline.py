@@ -55,6 +55,32 @@ _PKG_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 # 같은 그룹으로 접는다 — 띄어쓰기/문장부호 차이나 revision 간 수치만 다른 청크를 흡수(사용자 결정).
 _SIMILARITY_THRESHOLD = 0.95
 
+# Stage 4 그룹별 재검증 근거(rationale2)를 합칠 때의 총 char cap. 그룹이 많아도 UI
+# thinking·핀이 bloat 되지 않게 한다(어댑터 SlotVerifierLlm._RATIONALE_CHARS_CAP=4000 와 일관).
+_RATIONALE2_CHARS_CAP = 4000
+
+
+def _second_pass_verify_context(
+    *, slot_query: str, fq: dict[str, Any], what_is_needed: str, research_mode: bool,
+) -> str:
+    """Stage 4 그룹 재검증에 넣을 `slot_query` 자리 맥락 문자열을 만든다(순수 함수).
+
+    verify_slot_v2 의 `SLOT SEARCH QUERY` 정의는 "아래 청크들을 가져온 쿼리"다. 2차 청크는
+    1차가 아니라 *이 그룹의 재검색 쿼리* 가 가져왔으므로, 그 쿼리와 함께 "왜 이 다리로 갔는지"
+    (멀티홉 search_direction 의 산물인 intent / rescope what_is_needed)를 실어 검증기가 *체인
+    관련성* — 이 청크들이 그 다리를 닫는가 — 을 판정하게 한다. 원 슬롯 요구도 함께 보여 슬롯
+    facet 정렬을 유지한다. 빈 줄은 생략(결정형 — 같은 입력 같은 출력)."""
+    intent = str(fq.get("intent") or "").strip()
+    lines = [f"[원 슬롯 요구] {slot_query}", f"재검색 쿼리: {fq.get('query_text', '')}"]
+    # 다리 근거 — rescope 경로는 슬롯 공통 진단(what_is_needed), follow_up 경로는 쿼리별 intent.
+    rationale = what_is_needed.strip() if research_mode else intent
+    if rationale:
+        lines.append(f"검색 근거: {rationale}")
+    # follow_up 경로에서 intent 가 검색 근거로 안 쓰였고(=별도) 존재하면 의도로 덧붙인다.
+    if intent and rationale != intent:
+        lines.append(f"의도: {intent}")
+    return "\n".join(lines)
+
 
 def _content_key(c: RetrievedChunk) -> str | None:
     """동일내용 판정 키 = 정규화된 본문(text 우선, 없으면 snippet). 공백 collapse +
@@ -424,10 +450,14 @@ class _SlotPipelineMixin:
                     fq_list = []
                     rescope_method = "fallback"
 
-            # === Stage 3 — 2차 검색(score 게이트 keep_k) ===
+            # === Stage 3 — 2차 검색(score 게이트 keep_k), *쿼리 그룹* 유지 ===
             # follow_up 경로: 참조 문서(target_source_ids) 내부 검색. rescope 경로: 재계획
             # 스코프(target/filters)로 검색. research_mode 로 검색 filter 를 분기한다.
-            second_pass_raw: list[RetrievedChunk] = []
+            # 평탄화하지 않고 쿼리(fq)별 그룹으로 묶는다 — Stage 4 가 각 그룹을 *그 쿼리의
+            # 다리 근거*(search_direction/intent/what_is_needed) 위에서 따로 재검증하기 위함.
+            # 그룹은 서로소다: 전역 seen 으로 같은 청크는 처음 찾은 쿼리 그룹에만 귀속한다
+            # (한 청크는 한 번만, 자기 다리 맥락에서 검증). 1차 by_id 와 겹치는 청크도 제외.
+            second_pass_groups: list[tuple[dict[str, Any], list[RetrievedChunk]]] = []
             if research_mode:
                 searchable = [fq for fq in fq_list if fq.get("query_text")]
             else:
@@ -458,57 +488,93 @@ class _SlotPipelineMixin:
                     return_exceptions=True,
                 )
                 seen: set[str] = set()
-                for sub_res in sub_results:
+                for fq, sub_res in zip(searchable, sub_results):
                     if isinstance(sub_res, BaseException):
                         continue
                     tool_results.append(sub_res)
                     found = _parse_chunks(
                         sub_res.output if sub_res.status == "success" else None
                     )
+                    grp: list[RetrievedChunk] = []
                     for c in found[: self._follow_up_keep_k]:  # type: ignore[attr-defined]
                         if c.chunk_id not in by_id and c.chunk_id not in seen:
                             seen.add(c.chunk_id)
-                            second_pass_raw.append(c)
+                            grp.append(c)
+                    if grp:
+                        # 그룹 내 본문 동일 중복은 최신판 1개로 접는다(재검증 직전).
+                        second_pass_groups.append((fq, dedupe_latest_version(grp)))
 
-            # === Stage 4 — 2차 검색 결과 Node1 재검증("검색 후엔 항상 relevance") ===
-            # 2차 청크를 동일 retrieval.verify_slot 도구로 한 번 더 검증해 *답변에 필요한* 청크만
-            # N4 로 보낸다. 멀티홉 출력은 무시한다(3차 홉 없음 — 두번째 Node1 호출 후 바로 N4).
-            # 미배선/실패/fallback → 2차 전량 보존(단일노드 degrade). 빈 2차는 스킵(호출 낭비 방지).
-            # 2차 검색도 본문 동일 중복을 가질 수 있어 재검증 직전 최신판 1개로 접는다.
-            second_pass_raw = dedupe_latest_version(second_pass_raw)
-            second_pass = second_pass_raw
-            num_second_pass = len(second_pass_raw)
+            # === Stage 4 — 2차 검색 결과 Node1 *그룹별* 재검증("검색 후엔 항상 relevance") ===
+            # 각 쿼리 그룹을 동일 retrieval.verify_slot 도구로 한 번씩 재검증한다 — slot_query
+            # 자리에 그 그룹의 *검색 맥락*(원 슬롯 요구 + 재검색 쿼리 + 다리 근거 + intent)을
+            # 실어, 검증기가 "이 청크들이 *이 다리*를 닫는가"를 그 근거 위에서 판정하게 한다.
+            # 멀티홉이 N갈래면 verify 도 N회(gather 동시 실행). 멀티홉 출력은 무시(3차 홉 없음).
+            # 미배선/실패/fallback → 그 그룹 전량 보존(단일노드 degrade). 빈 2차는 스킵.
+            second_pass: list[RetrievedChunk] = []
+            num_second_pass = sum(len(ch) for _, ch in second_pass_groups)
             second_method = "skip"
             rationale2 = ""
-            if second_pass_raw:
-                sp_by_id = {c.chunk_id: c for c in second_pass_raw}
-                second_method = "fallback"  # 기본 = 검증 실패 시 전량 보존
-                try:
-                    v2 = await self._tools.invoke(  # type: ignore[attr-defined]
-                        _VERIFY_TOOL,
-                        {
-                            "query_text": request.query_text,
-                            "answer_spec": spec_block,
-                            "slot_name": slot_name,
-                            "slot_query": slot_query,
-                            "chunks": [c.model_dump(mode="json") for c in second_pass_raw],
-                        },
-                        ctx,
+            if second_pass_groups:
+                what_is_needed = str(opinion.get("what_is_needed", ""))
+
+                async def _verify_group(
+                    fq: dict[str, Any], group_chunks: list[RetrievedChunk],
+                ) -> tuple[Any | None, str, list[RetrievedChunk], str]:
+                    """한 그룹 재검증 → (tool_result, method, kept_chunks, rationale).
+                    tool_result 는 호출부가 그룹 원순서로 순차 record(결정성)."""
+                    sp_by_id = {c.chunk_id: c for c in group_chunks}
+                    group_query = _second_pass_verify_context(
+                        slot_query=slot_query, fq=fq,
+                        what_is_needed=what_is_needed, research_mode=research_mode,
                     )
-                    tool_results.append(v2)
-                    if v2.status == "success" and v2.output:
-                        second_method = str(v2.output.get("method", "llm"))
-                        keep = [i for i in (v2.output.get("necessary_chunk_ids") or [])
-                                if i in sp_by_id]
-                        rationale2 = str(v2.output.get("rationale", ""))
-                        if second_method != "fallback":
-                            # 검증 통과 청크만 보존(원순서 유지). fallback 이면 전량 유지.
-                            second_pass = [sp_by_id[i] for i in keep if i in sp_by_id]
-                except Exception:  # noqa: BLE001 — ToolUnknown/실패 → 2차 전량 보존(degrade).
-                    second_method = "fallback"
-                    second_pass = second_pass_raw
-                    # adapter fallback 과 일관 — 빈 근거 대신 실패 사유를 실어 UI thinking 노출.
-                    rationale2 = "⚠ 검증 도구 호출 실패 → 2차 검색 청크 전량 보존"
+                    try:
+                        v2 = await self._tools.invoke(  # type: ignore[attr-defined]
+                            _VERIFY_TOOL,
+                            {
+                                "query_text": request.query_text,
+                                "answer_spec": spec_block,
+                                "slot_name": slot_name,
+                                "slot_query": group_query,
+                                "chunks": [c.model_dump(mode="json") for c in group_chunks],
+                            },
+                            ctx,
+                        )
+                        if v2.status == "success" and v2.output:
+                            m = str(v2.output.get("method", "llm"))
+                            rat = str(v2.output.get("rationale", ""))
+                            if m == "fallback":
+                                # 검증 fallback → 그 그룹 전량 보존(degrade).
+                                return v2, m, group_chunks, rat
+                            keep = [sp_by_id[i] for i in (v2.output.get("necessary_chunk_ids") or [])
+                                    if i in sp_by_id]
+                            return v2, m, keep, rat
+                        # 비정상 응답 → 전량 보존.
+                        return v2, "fallback", group_chunks, ""
+                    except Exception:  # noqa: BLE001 — ToolUnknown/실패 → 그 그룹 전량 보존.
+                        return (None, "fallback", group_chunks,
+                                "⚠ 검증 도구 호출 실패 → 2차 검색 청크 전량 보존")
+
+                group_outs = await asyncio.gather(
+                    *(_verify_group(fq, ch) for fq, ch in second_pass_groups)
+                )
+                # 그룹 *원순서* 로 tool_results record(결정성) + 통과 청크 union(by_id, 순서보존).
+                methods: list[str] = []
+                rationales: list[str] = []
+                sp_union: dict[str, RetrievedChunk] = {}
+                for v2, m, kept, rat in group_outs:
+                    if v2 is not None:
+                        tool_results.append(v2)
+                    methods.append(m)
+                    if rat:
+                        rationales.append(rat)
+                    for c in kept:
+                        if c.chunk_id not in sp_union:
+                            sp_union[c.chunk_id] = c
+                second_pass = list(sp_union.values())
+                # 그룹 method 합성 — 하나라도 llm 이면 llm, 아니면 fallback(전량 보존 발생).
+                second_method = "llm" if "llm" in methods else "fallback"
+                # rationale2 — 그룹 근거를 합치되 어댑터 cap 과 일관되게 절단.
+                rationale2 = " | ".join(rationales)[:_RATIONALE2_CHARS_CAP]
 
             # slot span output — CHAIN span 은 자식 처리 후 자기 output 을 구조화 summary 로
             # 단다(intake 노드 패턴). 미설정 시 Phoenix 가 자식 LLM 의 assistant 메시지를
