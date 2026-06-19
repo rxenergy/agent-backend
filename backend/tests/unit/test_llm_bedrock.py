@@ -414,6 +414,59 @@ async def test_bedrock_stream_decodes_event_stream(monkeypatch):
     assert usage["completion_tokens"] == 9
 
 
+async def test_bedrock_stream_json_schema_forces_tool_and_streams_input(monkeypatch):
+    """스트리밍 경로에서 json_schema grammar → 단일 강제 도구(tool_choice). Claude 가
+    스키마 준수 input 을 `input_json_delta.partial_json` 으로 흘리면 그 partial JSON 을
+    content 로 누적 forward 한다(호출부 버퍼가 합쳐 유효 JSON). 강제 도구가 걸리면
+    thinking 은 비활성(payload 에 thinking 없음) — 비스트리밍 forced-tool 과 동형."""
+    schema = {"type": "object", "properties": {"verdict": {"type": "string"}}}
+    frames = b"".join(
+        _event_stream_frame(ev)
+        for ev in [
+            {"type": "message_start",
+             "message": {"model": "anthropic.claude-opus-4-8",
+                         "usage": {"input_tokens": 5}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "name": "structured_output"}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "input_json_delta", "partial_json": '{"verdict":'}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "input_json_delta", "partial_json": ' "supported"}'}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use"},
+             "usage": {"output_tokens": 6}},
+            {"type": "message_stop"},
+        ]
+    )
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, content=frames)
+
+    llm = HttpLLM(
+        provider="bedrock",
+        endpoint="",
+        model="anthropic.claude-opus-4-8",
+        region="us-east-1",
+    )
+    _patch_async_client(monkeypatch, _mock_transport(handler))
+
+    contents: list[str] = []
+    async for delta in llm.generate_stream(
+        "hi", grammar=GrammarSpec(kind="json_schema", value=schema)
+    ):
+        if delta.content:
+            contents.append(delta.content)
+
+    # 강제 도구가 payload 에 실렸고(스키마=input_schema, tool_choice 강제), thinking 은 꺼짐.
+    assert captured["body"]["tool_choice"] == {"type": "tool", "name": "structured_output"}
+    assert captured["body"]["tools"][0]["input_schema"] == schema
+    assert "thinking" not in captured["body"]
+    # partial_json 조각이 합쳐져 유효 JSON 이 된다(_parse / json.loads 호환).
+    assert json.loads("".join(contents)) == {"verdict": "supported"}
+
+
 async def test_bedrock_stream_exception_frame_raises(monkeypatch):
     from app.adapters.llm.http import LLMUnavailableError
 

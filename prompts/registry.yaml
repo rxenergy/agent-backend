@@ -161,8 +161,9 @@ spec_driven_answer_spec_prompts:
   # composer N1 — 책임 재분배(answer_spec_query_responsibility_split.design.v1): 검색 지식
   # (address map·BM25·keyword 규칙)을 N2 로 이관하고, 답변 설계(role/depends_on/depth/
   # scope_hint)만 남긴 v2 프롬프트·스키마. spec_driven_v1/v2 variant 는 불변(A/B 비교) —
-  # composer 만 이 profile 을 쓴다. max_tokens — 검색토큰 제거로 슬롯 JSON 이 가벼워졌으나
-  # role/scope_hint/reasoning 이 추가돼 비슷 → 3000 유지(truncate→fallback 강등 방지).
+  # composer 만 이 profile 을 쓴다. max_tokens — role/scope_hint/reasoning 에 더해
+  # multi-facet 질의(8개+ 슬롯, 각 deep depth)에선 slot JSON 이 길어져 3000 으로는
+  # truncate→fallback 강등 위험 → 6000 상향(N2 8192 와 정합, 구조화 출력이라 토큰 비용 허용).
   # v3(persona_framework.design.v1 §10) — hidden-intent 단락을 페르소나 인지형으로 일반화
   # (# PERSONA 블록이 앞서면 그 spine 이 분해를 주도, 없으면 검토자 기본 읽기로 net-neutral).
   # 답변 설계 골격·스키마는 v2 동형 — 기존 answer_spec_v2.md 는 base spec_driven_v2 가 계속
@@ -171,7 +172,7 @@ spec_driven_answer_spec_prompts:
     profile_version: v3
     prompt:        {path: spec_driven/answer_spec_v3.md,            version: v3, sha256: "f42e12f0fc2afee872a1d888207eb2f7214a0567eec68a01d7bd3e55c6139cee"}
     output_schema: {path: spec_driven/schemas/answer_spec_v2.json,  version: v2, sha256: "b594a4449b289516a6488e72ca82170475805f2bf0bc704b20b0264ab4ac2ce4"}
-    model_options: {temperature: 0.0, max_tokens: 3000}
+    model_options: {temperature: 0.0, max_tokens: 6000}
 
 spec_driven_query_prompts:
   spec_driven_query_v1:
@@ -190,13 +191,16 @@ spec_driven_query_prompts:
   # address map·BM25/keyword 규칙·facet→document family)을 흡수해 *검색 설계자* 가 된 v2
   # 프롬프트. 입력 계약이 keywords(완성 토큰) → scope_hint(개념 의도)로 바뀌어 N2 가
   # query_text 를 생성하는 비중이 커진다. 출력 스키마는 v1 동형(FormulatedQuery 불변).
-  # composer 만 이 profile 을 쓴다(spec_driven_v1/v2 불변 — A/B). max_tokens — 슬롯당 1쿼리
-  # + 스코프 4채널은 v1 과 동일 → 1400 유지.
+  # composer 만 이 profile 을 쓴다(spec_driven_v1/v2 불변 — A/B). max_tokens — N2 가 검색
+  # 설계자(scope_hint→query_text 생성·reasoning·슬롯별 GDC departure 분화)가 되며 슬롯이
+  # 많은 multi-facet 질의에선 8개+ 쿼리에 긴 note 가 붙어 1400 으로는 JSON 이 중간 절단됨
+  # (finish_reason=length → fallback 강등). 헤더 충돌 없는 충분 상한으로 8192 상향
+  # (강제 도구 JSON 은 사용자에게 안 보이는 구조화 출력이라 토큰 비용은 truncate 회귀 대비 허용).
   composer_query_v1:
     profile_version: v1
     prompt:        {path: spec_driven/query_formulation_v2.md,            version: v2, sha256: "da84fc854eff14db0bbc1369d5fd2ce766b522f05f023af7ab2abd67c5d88488"}
     output_schema: {path: spec_driven/schemas/query_formulation_v1.json,  version: v1, sha256: "6a93ef879516d1923328e47ef7ab9a1955238c94620bd70ca4526bd8e9462d29"}
-    model_options: {temperature: 0.0, max_tokens: 1400}
+    model_options: {temperature: 0.0, max_tokens: 8192}
 
 spec_driven_generation_prompts:
   spec_driven_generation_v1:

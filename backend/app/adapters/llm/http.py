@@ -226,7 +226,7 @@ class HttpLLM(LLMPort):
                             yield delta
                     else:
                         async for delta in self._stream_anthropic(
-                            prompt, max_tokens, temperature
+                            prompt, max_tokens, temperature, grammar
                         ):
                             yield delta
                     return
@@ -644,7 +644,8 @@ class HttpLLM(LLMPort):
         )
 
     async def _stream_anthropic(
-        self, prompt: str, max_tokens: int, temperature: float
+        self, prompt: str, max_tokens: int, temperature: float,
+        grammar: GrammarSpec | None = None,
     ) -> AsyncIterator[LLMTokenDelta]:
         url = self._anthropic_url(stream=True)
         headers = self._anthropic_base_headers()
@@ -663,11 +664,27 @@ class HttpLLM(LLMPort):
         # there. For other models pass the configured value.
         if not _rejects_sampling_params(self._model):
             payload["temperature"] = temperature
+        # 구조화 출력(json_schema grammar): vLLM `guided_json` 이 없는 Anthropic/Bedrock
+        # 에선 스키마를 **단일 강제 도구**(tool_choice={type:"tool"})로 강제한다
+        # (`_call_anthropic` 비스트리밍과 동형). Claude 가 스키마 준수 `tool_use.input` 을
+        # 스트리밍 `input_json_delta` 로 흘리면 그 partial JSON 을 content 로 forward 한다.
+        # 강제 도구가 걸리면 thinking 은 비활성되므로(Anthropic 제약), reasoning 표시는
+        # 호출부의 구조화 `reasoning` 필드 backstop(extract_reasoning)이 담당한다.
+        forced_json = grammar is not None and grammar.kind == "json_schema" \
+            and isinstance(grammar.value, dict)
+        if forced_json:
+            payload["tools"] = [{
+                "name": _STRUCTURED_TOOL_NAME,
+                "description": "Return the answer strictly as this JSON object.",
+                "input_schema": grammar.value,
+            }]
+            payload["tool_choice"] = {"type": "tool", "name": _STRUCTURED_TOOL_NAME}
         # Auto-enable adaptive thinking with visible summary on models that
         # support it. The runner forwards `thinking_delta` text into the
         # OpenAI-compat `delta.reasoning_content` field so OpenWebUI shows
-        # it in its reasoning pane.
-        if _supports_adaptive_thinking(self._model):
+        # it in its reasoning pane. 강제 도구와 thinking 은 양립 불가라 forced_json
+        # 이면 thinking 을 끈다(400 회피).
+        elif _supports_adaptive_thinking(self._model):
             payload["thinking"] = {
                 "type": "adaptive",
                 "display": "summarized",
@@ -737,11 +754,17 @@ class HttpLLM(LLMPort):
                             text = delta.get("thinking") or ""
                             if text:
                                 yield LLMTokenDelta(reasoning=text)
-                        # signature_delta / input_json_delta intentionally
-                        # not forwarded — signature is an opaque attestation
-                        # token (only matters when replaying thinking blocks
-                        # in a follow-up turn, which the runner doesn't do),
-                        # and tool_use streaming isn't wired here.
+                        elif dtype == "input_json_delta" and forced_json:
+                            # 강제 도구의 input(스키마 준수 JSON)이 partial JSON 문자열로
+                            # 도착 — content 로 누적 forward 한다. 호출부 버퍼가 합치면
+                            # 완결 JSON 이 되어 `json.loads`(_parse) 가 그대로 파싱한다.
+                            partial = delta.get("partial_json") or ""
+                            if partial:
+                                yield LLMTokenDelta(content=partial)
+                        # signature_delta intentionally not forwarded — it is an
+                        # opaque attestation token (only matters when replaying
+                        # thinking blocks in a follow-up turn, which the runner
+                        # doesn't do). Non-forced tool_use streaming isn't wired.
                     elif etype == "content_block_stop":
                         block_types.pop(int(evt.get("index", -1)), None)
                     elif etype == "message_delta":
