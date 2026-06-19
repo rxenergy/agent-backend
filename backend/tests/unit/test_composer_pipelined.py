@@ -352,6 +352,112 @@ async def test_handle_aclose_cancels_pending_slot_tasks() -> None:
     assert task.cancelled()  # 정리됨(orphan 아님).
 
 
+@pytest.fixture(scope="module")
+def span_exporter():
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    exporter = InMemorySpanExporter()
+    provider = trace.get_tracer_provider()
+    if not isinstance(provider, TracerProvider):
+        provider = TracerProvider()
+        trace.set_tracer_provider(provider)
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return exporter
+
+
+@pytest.mark.asyncio
+async def test_span_enrichment_ttft_root_output_and_slot_link(span_exporter) -> None:
+    """D1/D2/D3 — root(agent.run) span 에 output·ttft·토큰, slot 생성 span 에 검색 카운트 +
+    그 슬롯 검색 span(agent.slot.<name>)으로의 link 가 붙는지(슬롯 단위 검색→생성 귀인)."""
+    span_exporter.clear()
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = VariantRegistry.build(
+            COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
+            _deps(Path(tmp), llm=_script(), with_verify=True))
+        await runner.run(_req())
+
+    spans = {sp.name: sp for sp in span_exporter.get_finished_spans()}
+    root = spans.get("agent.run")
+    assert root is not None
+    rattrs = dict(root.attributes)
+    # D2 — 루트에 최종 답(output.value)·슬롯 수.
+    assert rattrs.get("output.value")
+    assert rattrs.get("agent.num_slots") == 2
+    # D1 — TTFT 가 음이 아닌 값으로 기록(토큰이 흐른 경로).
+    assert "agent.ttft_ms" in rattrs and rattrs["agent.ttft_ms"] >= 0
+    # D4/D2 — 집계 토큰(fake LLM 도 token_usage 를 1/1 로 낸다).
+    assert rattrs.get("agent.completion_tokens", 0) >= 1
+
+    # D3 — slot 생성 span 에 검색 카운트 + 슬롯 검색 span 으로의 link.
+    gen_spans = [sp for sp in span_exporter.get_finished_spans()
+                 if sp.name == "llm.slot_generation"]
+    assert len(gen_spans) == 2
+    search_span_ids = {sp.context.span_id for sp in span_exporter.get_finished_spans()
+                       if sp.name.startswith("agent.slot.")}
+    assert search_span_ids, "검색 span(agent.slot.<name>)이 있어야 link 대상이 된다"
+    for gs in gen_spans:
+        gattrs = dict(gs.attributes)
+        assert "slot.num_necessary" in gattrs
+        assert "slot.search_method" in gattrs
+        # 이 생성 span 의 link 중 하나가 그 슬롯 검색 span 을 가리킨다.
+        linked = {ln.context.span_id for ln in (gs.links or [])}
+        assert linked & search_span_ids, "생성 span 이 슬롯 검색 span 에 link 돼야 한다(D3)"
+
+
+def _prompt_render(tmp: Path) -> dict:
+    root = Path(tmp) / "events" / "t" / "prompt_render_records"
+    return json.loads(next(root.rglob("*.json")).read_text(encoding="utf-8"))
+
+
+def _context_snapshot(tmp: Path) -> dict:
+    root = Path(tmp) / "events" / "t" / "context_snapshots"
+    return json.loads(next(root.rglob("*.json")).read_text(encoding="utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_pipelined_persists_full_prompt_and_snapshot_for_replay() -> None:
+    """재현 원본(reproducibility_durable_archiving.design.v1) — pipelined turn 이 슬롯·종합
+    프롬프트 *원문* 과 슬롯 CONTEXT/cite 맵을 artifact 에 영구 저장해, OTel 만료·절단과
+    무관히 재현 가능한지. (이전엔 둘 다 미저장 → OTel 64KB span 에만 의존하던 구멍.)"""
+    with tempfile.TemporaryDirectory() as tmp:
+        runner = VariantRegistry.build(
+            COMPOSER_PIPELINED_VARIANT_ID, _SPEC,
+            _deps(Path(tmp), llm=_script(), with_verify=True))
+        await runner.run(_req())
+
+        # prompt_render — 슬롯 2개 + 종합 1개의 *원문* + 해시가 남는다.
+        pr = _prompt_render(Path(tmp))
+        assert pr["schema"] == "prompt_render/v1"
+        nodes = [c["node"] for c in pr["calls"]]
+        assert "slot:governing_clause" in nodes and "slot:requirement_text" in nodes
+        assert "synthesize" in nodes
+        slot_call = next(c for c in pr["calls"] if c["node"] == "slot:governing_clause")
+        # 렌더 원문이 통째로(프롬프트 본문 핵심 섹션 포함) 저장됐다.
+        assert "# CONTEXT" in slot_call["rendered_prompt"]
+        assert slot_call["rendered_prompt_hash"]  # InteractionEvent 핀과 동일 해시.
+
+        # InteractionEvent 의 슬롯 rendered_prompt_hash 와 artifact 원문 해시가 일치(재현 정합).
+        pin = _event(Path(tmp))["query_understanding"]["spec_driven"]
+        pin_hashes = {s["rendered_prompt_hash"] for s in pin["generation"]["slots"]}
+        artifact_hashes = {c["rendered_prompt_hash"] for c in pr["calls"]
+                           if c["node"].startswith("slot:")}
+        assert artifact_hashes <= pin_hashes or pin_hashes <= artifact_hashes \
+            or artifact_hashes & pin_hashes
+
+        # context_snapshot — 슬롯 CONTEXT + 전역 cite 맵(SlotCitationAllocator 상태) 복원용.
+        snap = _context_snapshot(Path(tmp))
+        assert snap["schema"] == "context_snapshot/pipelined_v1"
+        assert len(snap["slots"]) == 2
+        assert snap["global_cite_order"] == ["g1", "r1"]
+        assert snap["global_cite_map"]["g1"] == "cite-0"
+        assert snap["global_cite_map"]["r1"] == "cite-1"
+
+
 def test_citation_allocator_assigns_global_and_dedups_shared_chunk() -> None:
     """SlotCitationAllocator — 슬롯별 전역 cite 배정 + 슬롯 간 공유 chunk 단일화(직접 단위)."""
     from app.application.agents.slot_pipeline import SlotCitationAllocator

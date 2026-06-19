@@ -24,6 +24,41 @@ from app.ports.tool import Tool, ToolExecutionContext
 _TRACER = get_tracer("tool")
 
 
+# 검색 span 에 실을 문서 상한 — 점수 분포 진단엔 상위 N 이면 충분하고, 전량(top_k 가 수십~
+# 수백)을 속성으로 펴면 span 이 다시 부푼다(C1 과 같은 부담). RETRIEVER 미리보기 목적.
+_RETRIEVAL_DOC_SPAN_CAP = 30
+
+
+def _enrich_retrieval_span(span: Any, output: Any) -> None:
+    """검색류 도구 output({"chunks": [...]})을 OpenInference RETRIEVER 스키마로 span 에 단다.
+
+    chunks 가 없으면(검색 아님) 아무것도 하지 않는다 — 모든 도구를 공통 경로로 통과시키되
+    검색만 추가 enrich(원칙 2 — 도구는 정책, executor 는 횡단 관측). 본문(content)은 싣지
+    않는다(C1 — 거대 본문 회피); id/score/source 만 단다. 상위 N 개로 제한."""
+    if not isinstance(output, dict):
+        return
+    chunks = output.get("chunks")
+    if not isinstance(chunks, list) or not chunks:
+        return
+    oi.set_kind(span, oi.KIND_RETRIEVER)
+    docs: list[dict[str, Any]] = []
+    for raw in chunks[:_RETRIEVAL_DOC_SPAN_CAP]:
+        if not isinstance(raw, dict):
+            continue
+        docs.append({
+            "id": raw.get("chunk_id"),
+            "score": raw.get("score"),
+            # content 는 생략(본문 거대 — 미리보기는 id/score 로 충분, 본문은 artifact).
+            "metadata": {
+                k: raw.get(k) for k in ("document_id", "source_id", "page")
+                if raw.get(k) is not None
+            },
+        })
+    if docs:
+        oi.set_retrieval_documents(span, docs)
+    span.set_attribute("retrieval.num_chunks", len(chunks))
+
+
 def _hash_payload(payload: Any) -> str:
     if isinstance(payload, BaseModel):
         data = payload.model_dump(mode="json")
@@ -104,6 +139,11 @@ class ToolExecutor:
                     if final.error_code:
                         span.set_attribute("tool.error_code", final.error_code)
                     oi.set_io(span, output_value=final.output or {})
+                    # 검색류 도구(output 에 chunks 리스트)는 RETRIEVER kind + 문서별 id/score
+                    # 를 OpenInference 스키마로 단다(D5) — Phoenix 가 RETRIEVER span 에서
+                    # 문서 목록·점수를 구조화 렌더한다(generic IO 만으론 안 보임). 다른 도구는
+                    # 영향 없음(chunks 없으면 skip). _enrich_retrieval 이 방어적으로 처리.
+                    _enrich_retrieval_span(span, final.output)
                     await self._record(context.interaction_id, final)
                     if final.status == "failed":
                         if spec.required:

@@ -243,7 +243,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 spec=spec, triage=triage, handle=handle,
                 triage_pin=triage_pin, formulation_method=formulation_method,
                 queries=queries, truncated=truncated,
-                sess=sess, post=post,
+                sess=sess, post=post, root=root,
             )
 
     # ------------------------------------------------------------------
@@ -320,6 +320,35 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             )
 
     # ------------------------------------------------------------------
+    # 재현 원본 — 슬롯별 CONTEXT + 전역 cite 맵 스냅샷(설계 §3.2). composer 는 단일 pack 을
+    # write_context_snapshot 하나, pipelined 는 슬롯별 sub-pack 다수 + 전역 cite 배정이라
+    # 슬롯 배열 + cite 맵을 한 파일로 남긴다(SlotCitationAllocator 상태 소멸 방지).
+    # ------------------------------------------------------------------
+    async def _write_pipelined_snapshot(
+        self, interaction_id: str, snapshot_slots: list[dict[str, Any]],
+        cites: SlotCitationAllocator,
+    ) -> None:
+        if not snapshot_slots:
+            return
+        # 전역 cite 순서(chunk_id 부여 순) — 슬롯 간 공유 chunk 재현 + References 단일화 복원.
+        cite_map = {
+            (getattr(c, "parent_chunk_id", None) or c.chunk_id): c.citation_id
+            for c in cites.all_candidates if getattr(c, "kind", "chunk") == "chunk"
+        }
+        try:
+            await self._sink.write_context_snapshot(
+                interaction_id,
+                {"schema": "context_snapshot/pipelined_v1",
+                 "interaction_id": interaction_id,
+                 "slots": snapshot_slots,
+                 "global_cite_order": list(cites.all_chunk_ids),
+                 "global_cite_map": cite_map},
+            )
+        except Exception:  # noqa: BLE001 — 아카이브 실패가 응답을 막지 않는다.
+            _LOG.warning("context_snapshot_persist_failed",
+                         interaction_id=interaction_id, variant=self.spec.variant_id)
+
+    # ------------------------------------------------------------------
     # N4 파이프라인 — 슬롯 *생성 순서*(depends_on 위상정렬)로 future 소비 + 즉시 스트리밍.
     # ------------------------------------------------------------------
     async def _generate_pipelined(
@@ -328,7 +357,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         llm: LLMPort, llm_id: str, ctx: ToolExecutionContext, record,
         spec: AnswerSpec, triage, handle: SlotSearchHandle,
         triage_pin: dict[str, Any], formulation_method: str, queries,
-        truncated: bool, sess: dict[str, Any], post,
+        truncated: bool, sess: dict[str, Any], post, root,
     ) -> AgentResponse:
         # 생성 순서 = depends_on 위상정렬(composer 와 동일). 의존 슬롯이 먼저 생성돼 PRIOR 로 흐른다.
         ordered: list[SpecSlot] = (
@@ -378,7 +407,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 memory_refs=memory_refs, memory_ids_used=memory_ids_used,
                 slot_outputs=slot_outputs, slot_pins=slot_pins,
                 verify_pins=verify_pins, fq_all=fq_all,
-                streamed_parts=streamed_parts, cites=cites,
+                streamed_parts=streamed_parts, cites=cites, root=root,
             )
         finally:
             await handle.aclose()
@@ -395,7 +424,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         memory_refs: tuple[MemoryRef, ...], memory_ids_used: list[str],
         slot_outputs: list[dict[str, Any]], slot_pins: list[dict[str, Any]],
         verify_pins: list[dict[str, Any]], fq_all: list[dict[str, Any]],
-        streamed_parts: list[str], cites: SlotCitationAllocator,
+        streamed_parts: list[str], cites: SlotCitationAllocator, root,
     ) -> AgentResponse:
         """N4 슬롯 생성 루프 본체. `_generate_pipelined` 가 try/finally(handle.aclose)로
         감싸 호출한다 — 어떤 종료 경로든 미소비 검색 task 가 정리되도록 분리했다."""
@@ -404,6 +433,25 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         total_second_pass = 0
         total_second_necessary = 0
         total_neighbor = 0
+        # 토큰 집계(D4) — 다콜(슬롯별 + 종합)이라 AgentResponse.token_usage 는 비우되,
+        # Prometheus 토큰 패널이 0 으로 굶지 않도록 슬롯·종합 토큰을 합산해 record_tokens.
+        # composer(_generate_single)가 단일콜에서 하는 것을 슬롯 다콜로 확장.
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        # TTFT(D1) — 배리어 제거의 효과를 실측하는 핵심 지표(설계 §10 #1). 첫 *본문* 토큰이
+        # 흐르는 시점을 잡아 root span 에 ttft_ms 로 남긴다. None=토큰 미발생(거부/굶음).
+        ttft_ms: float | None = None
+
+        def _mark_ttft() -> None:
+            nonlocal ttft_ms
+            if ttft_ms is None:
+                ttft_ms = (time.monotonic() - started) * 1000
+
+        # 재현 원본(reproducibility_durable_archiving.design.v1 §3.1/§3.2) — 슬롯·종합
+        # 프롬프트 *원문* 과 슬롯 CONTEXT/cite 맵을 누적해 turn 종료/실패 시 artifact 에 flush.
+        # OTel span(64KB cap·만료)이 아니라 event_sink 에 남겨 만료·절단과 무관히 재현한다.
+        prompt_render_calls: list[dict[str, Any]] = []
+        snapshot_slots: list[dict[str, Any]] = []
 
         for idx, slot in enumerate(ordered):
             # === 슬롯 future 소비(배리어 없음 — 이 슬롯만 await; 실패는 그 슬롯만 degrade) ===
@@ -471,11 +519,28 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             #     f"{len(pipe.necessary)}개, 멀티홉 {len(pipe.multihop_ids)}개\n"
             # )
 
-            with _TRACER.start_as_current_span("llm.slot_generation") as ss:
+            # D3 — 생성 span 을 그 슬롯 *검색-검증* span(agent.slot.<name>)에 link 로 잇는다.
+            # 검색 task 가 생성보다 먼저 떠서 부모-자식 중첩이 불가하므로(인과는 검색→생성),
+            # OpenInference/OTel 표준대로 link 로 연결한다 → Phoenix 에서 슬롯 단위로 검색→
+            # 생성 지연을 귀인. 검색 span context 가 없으면(degrade/empty) link 없이 진행.
+            links = []
+            search_ctx = getattr(pipe, "span_context", None)
+            if search_ctx is not None:
+                from opentelemetry.trace import Link
+                links = [Link(search_ctx)]
+            with _TRACER.start_as_current_span("llm.slot_generation",
+                                               links=links) as ss:
                 ss.set_attribute("slot.name", slot.name)
                 ss.set_attribute("slot.facet", slot.facet or "")
                 ss.set_attribute("slot.index", idx)
                 ss.set_attribute("slot.num_chunks", len(sub_chunks))
+                # D3 — 생성 span 만 봐도 이 슬롯이 검색에서 어떻게 걸러졌는지 보이게(검색 카운트
+                # 는 agent.slot 검색 span 에만 있어 생성 span 에선 안 보이던 문제).
+                ss.set_attribute("slot.num_necessary", len(pipe.necessary))
+                ss.set_attribute("slot.num_second_pass", pipe.num_second_pass)
+                ss.set_attribute("slot.num_neighbor", len(pipe.neighbor_chunks))
+                ss.set_attribute("slot.fallback_context", fallback_ctx)
+                ss.set_attribute("slot.search_method", pipe.method)
                 rendered = self._render_slot_prompt(
                     request.query_text, spec, slot, sub_chunks, sub_pack,
                     prior_sections=self._prior_sections_block(slot_outputs, slot),
@@ -483,10 +548,26 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 )
                 slot_prompt_hash = _sha16(rendered)
                 ss.set_attribute("slot.rendered_prompt_hash", slot_prompt_hash)
+                # 재현 원본 누적 — 렌더 *직후*(생성 전)에 캡처해, 이 슬롯 생성이 실패해도
+                # 실패 슬롯 프롬프트가 artifact 에 남는다(설계 §3.3 — 실패 turn 보존).
+                prompt_render_calls.append({
+                    "node": f"slot:{slot.name}", "facet": slot.facet,
+                    "rendered_prompt": rendered,
+                    "rendered_prompt_hash": slot_prompt_hash,
+                    "model_options": self._slot_model_options(),
+                    "context_chunk_ids": [c.chunk_id for c in sub_chunks],
+                    "allowed_cites": sorted(allowed_cites),
+                })
+                snapshot_slots.append({
+                    "slot": slot.name, "facet": slot.facet,
+                    "chunks": [c.model_dump(mode="json") for c in sub_chunks],
+                    "global_cite_chunk_ids": list(slot_pack.new_chunk_ids),
+                })
                 try:
                     result = await self._slot_generate_stream(
                         llm, rendered, span=ss, prefix=header,
                         model_options_override=self._slot_model_options(),
+                        on_first_token=_mark_ttft,
                     )
                 except LLMUnavailableError as exc:
                     ss.record_exception(exc)
@@ -499,6 +580,12 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                         upstream_error=str(exc)[:500],
                         error_type=type(exc).__name__,
                     )
+                    # 실패 turn 도 재현 원본 보존(설계 §3.3) — 실패 직전까지 + 실패 슬롯
+                    # 프롬프트가 이미 prompt_render_calls/snapshot_slots 에 누적됨. flush 후 거부.
+                    await self._record_prompt_render(
+                        request.interaction_id, prompt_render_calls)
+                    await self._write_pipelined_snapshot(
+                        request.interaction_id, snapshot_slots, cites)
                     return await self._refuse(
                         request, started, tool_calls, RefusalReason.LLM_UNAVAILABLE,
                         error_code="llm_unavailable",
@@ -538,6 +625,8 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 "verdict": verdict,
                 "completion_tokens": int(result.token_usage.get("completion_tokens", 0)),
             })
+            total_prompt_tokens += int(result.token_usage.get("prompt_tokens", 0))
+            total_completion_tokens += int(result.token_usage.get("completion_tokens", 0))
             await emit_step("slot_generation", "ok", slot=slot.name,
                             l0=verdict["l0"], l1=verdict.get("l1"),
                             regen=verdict.get("regen", 0))
@@ -561,6 +650,12 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                     request.query_text, spec, slot_outputs)
                 synth_hash = _sha16(synth_prompt)
                 sy.set_attribute("synthesize.rendered_prompt_hash", synth_hash)
+                # 종합 프롬프트 원문도 재현 원본에 누적(렌더 직후).
+                prompt_render_calls.append({
+                    "node": "synthesize", "rendered_prompt": synth_prompt,
+                    "rendered_prompt_hash": synth_hash,
+                    "model_options": self._synth_model_options(),
+                })
                 try:
                     synth = await self._slot_generate_stream(
                         llm, synth_prompt, span=sy, prefix="\n\n",
@@ -568,6 +663,9 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                     )
                     closing = synth.text.strip()
                     synth_mode = "model"
+                    total_prompt_tokens += int(synth.token_usage.get("prompt_tokens", 0))
+                    total_completion_tokens += int(
+                        synth.token_usage.get("completion_tokens", 0))
                 except LLMUnavailableError as exc:
                     # 종합 LLM 미가용은 거부가 아니라 닫음 블록 생략으로 degrade(본문은 이미
                     # 스트리밍됨). 핀(synth_mode)뿐 아니라 span 에도 명시해 실패를 1급으로
@@ -608,8 +706,31 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             llm_id=llm_id, model_id=getattr(llm, "model_id", "unknown"),
             regulatory_grounding="n_a",
         )
+        # D4 — 슬롯·종합 토큰 합산을 Prometheus 에 기록(다콜이라 terminal token 은 비움).
+        if total_prompt_tokens or total_completion_tokens:
+            metrics.record_tokens(prompt_tokens=total_prompt_tokens,
+                                  completion_tokens=total_completion_tokens)
         metrics.record_terminal(outcome="answer", latency_ms=response.latency_ms,
                                 scenario_object="n_a", scenario_depth="n_a")
+
+        # D1/D2 — root(agent.run) span 보강: 최종 답(output.value)·TTFT·집계 토큰·슬롯 수.
+        # 루트 AGENT span 은 입력만 있고 출력/요약이 비어 trace 타일이 자명하지 않던 문제.
+        oi.set_io(root, output_value=answer_text)
+        root.set_attribute("agent.num_slots", len(slot_pins))
+        root.set_attribute("agent.evidence_gap", evidence_gap)
+        if ttft_ms is not None:
+            root.set_attribute("agent.ttft_ms", round(ttft_ms, 1))
+        if total_prompt_tokens or total_completion_tokens:
+            root.set_attribute("agent.prompt_tokens", total_prompt_tokens)
+            root.set_attribute("agent.completion_tokens", total_completion_tokens)
+        if self._persona:
+            root.set_attribute("agent.persona_id", self._persona.persona_id)
+
+        # 재현 원본 영구화(설계 §3.1/§3.2) — 슬롯·종합 프롬프트 원문 + 슬롯 CONTEXT/cite 맵을
+        # artifact 에 남긴다. OTel 만료·64KB cap 과 무관히 이 turn 을 바이트 단위로 재구성.
+        await self._record_prompt_render(request.interaction_id, prompt_render_calls)
+        await self._write_pipelined_snapshot(
+            request.interaction_id, snapshot_slots, cites)
 
         # 최종 마무리 — composer 의 _finalize_turn(N5 세션 업데이트 + event.persist) 재사용.
         await self._finalize_turn(

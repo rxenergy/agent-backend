@@ -1204,11 +1204,15 @@ class ComposerRunner(ComposerBase):
     async def _slot_generate_stream(
         self, llm: LLMPort, prompt: str, *, span,
         prefix: str = "", model_options_override: dict[str, Any] | None = None,
+        on_first_token=None,
     ) -> LLMResult:
         """토큰 단위 스트리밍 생성 — 종합(닫음 블록)처럼 *검수 없이 그대로 흘리는* 출력에
         쓴다(슬롯 본문은 검수 후 노출해야 하므로 비스트리밍 _slot_generate). `prefix` 는
         본문과 닫음 블록 사이 구분(빈 줄 등)을 첫 토큰 *앞*에 한 번 emit 한다. 누적 텍스트를
-        LLMResult 로 돌려줘 호출부가 answer_text 재구성·cite 가드에 쓴다."""
+        LLMResult 로 돌려줘 호출부가 answer_text 재구성·cite 가드에 쓴다.
+
+        `on_first_token`(선택) — 첫 *본문* 토큰 직전 1회 호출(TTFT 계측용, D1). 동기 콜백.
+        미지정(composer)이면 영향 없음."""
         opts = model_options_override or self._synth_model_options()
         text_buf: list[str] = []
         token_usage: dict[str, int] = {}
@@ -1216,8 +1220,11 @@ class ComposerRunner(ComposerBase):
         first = True
         async for delta in llm.generate_stream(prompt, model_options=opts):
             if delta.content:
-                if first and prefix:
-                    await emit_token(prefix)
+                if first:
+                    if on_first_token is not None:
+                        on_first_token()
+                    if prefix:
+                        await emit_token(prefix)
                     first = False
                 text_buf.append(delta.content)
                 await emit_token(delta.content)

@@ -49,7 +49,7 @@ from app.application.agents.events import (
 )
 from app.application.agents.llm_router import LLMRouter
 from app.application.context.pack import ContextBuilder, ContextPack
-from app.application.events.recorder import EventRecorder
+from app.application.events.recorder import EventRecorder, current_trace_id
 from app.application.memory.policies import (
     SessionInjectionDecision,
     decide_session_injection,
@@ -711,6 +711,36 @@ class ComposerBase:
         m.record_terminal(outcome="refused", latency_ms=response.latency_ms,
                           scenario_object="n_a", scenario_depth="n_a")
         return response
+
+    # ------------------------------------------------------------------
+    # rendered 프롬프트 *원문* 영구화(재현성 — reproducibility_durable_archiving.design.v1).
+    # OTel span 은 미리보기(64KB cap)·만료(Tempo 7d/Phoenix 30d) 대상이라, 재현 입력의
+    # 원본은 artifact store(event_sink)에 남겨야 한다. 다콜(슬롯·종합) 변형은 calls[] 에
+    # 누적해 turn 종료/실패 시 1회 flush. rendered_prompt_hash 는 InteractionEvent 핀과
+    # 동일 값이라 span↔event↔artifact 가 같은 해시로 상관된다.
+    # ------------------------------------------------------------------
+    async def _record_prompt_render(
+        self, interaction_id: str, calls: list[dict[str, Any]],
+    ) -> None:
+        """calls[] = [{node, rendered_prompt, rendered_prompt_hash, model_options?,
+        prompt_profile_id?, context_chunk_ids?, allowed_cites?}]. 빈 calls 는 skip
+        (캡처할 프롬프트 없음 — 예: 검색 0건 직거부). sink 실패는 turn 을 깨지 않는다
+        (관측·아카이브는 best-effort — 생성 결과가 1급)."""
+        if not calls:
+            return
+        try:
+            await self._sink.write_prompt_render_record(
+                interaction_id,
+                {"schema": "prompt_render/v1",
+                 "interaction_id": interaction_id,
+                 "trace_id": current_trace_id(),
+                 "agent_variant": self.spec.variant_id,
+                 "calls": calls},
+            )
+        except Exception:  # noqa: BLE001 — 아카이브 실패가 응답을 막지 않는다.
+            _LOG.warning("prompt_render_persist_failed",
+                         interaction_id=interaction_id,
+                         variant=self.spec.variant_id)
 
 
 def _render_spec_block(spec: AnswerSpec) -> str:

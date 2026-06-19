@@ -145,6 +145,10 @@ class _SlotPipelineResult:
     num_second_pass: int = 0
     second_method: str = "skip"
     rationale2: str = ""
+    # 이 슬롯 검색-검증 span(agent.slot.<name>)의 context — 생성 루프가 llm.slot_generation
+    # span 을 여기에 *link* 로 잇는다(D3). 검색이 생성보다 먼저 떠 부모-자식 불가 →
+    # OTel link 로 슬롯 단위 검색→생성 귀인. span 미생성(0건 degrade)이면 None.
+    span_context: Any = None
 
 
 class _SlotPipelineMixin:
@@ -414,6 +418,8 @@ class _SlotPipelineMixin:
                 "second_method": second_method,
                 "rationale": rationale,
             })
+            # 생성 span 이 link 로 이을 수 있게 이 슬롯 검색 span context 를 캡처(D3).
+            slot_span_context = slot_span.get_span_context()
 
         return _SlotPipelineResult(
             slot_name=slot_name, method=method, num_first_pass=len(slot_chunks),
@@ -421,7 +427,7 @@ class _SlotPipelineMixin:
             fq_list=fq_list, second_pass=second_pass, neighbor_chunks=neighbor_chunks,
             tool_results=tool_results,
             num_second_pass=num_second_pass, second_method=second_method,
-            rationale2=rationale2,
+            rationale2=rationale2, span_context=slot_span_context,
         )
 
 

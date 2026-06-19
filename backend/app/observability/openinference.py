@@ -44,11 +44,35 @@ RETRIEVAL_DOCUMENTS = "retrieval.documents"  # prefix
 TOOL_NAME = "tool.name"
 TOOL_PARAMETERS = "tool.parameters"
 
-# 프롬프트·검색 결과를 Phoenix 에서 *그대로* 확인할 수 있게 truncation 을 제거한다.
-# 이전엔 8KB cap 으로 잘렸으나, span 값을 잘라 디버깅이 어려웠다. OTel 콜렉터의
-# 속성 크기 한도(설정값)에 맡기고, 애플리케이션 단에서는 전체 텍스트를 싣는다.
+# span 속성 값 크기 상한(문자 수). 슬롯 파이프라인(composer_pipelined)은 full chunk body 를
+# 담은 슬롯 프롬프트를 슬롯마다 LLM span 에 싣는데, 본문이 수십~수백 KB 라 한 트레이스가 수
+# MB 까지 부푼다 → Phoenix 렌더 지연·gRPC 메시지 한도 초과·Tempo 저장 비용. 콜렉터에 span
+# attribute limit 이 없으므로(infra/otel/collector.yaml) 앱 단에서 1차로 막는다. 전체 본문은
+# context_snapshot(artifact store) + rendered_prompt_hash 로 재현되므로 span 은 미리보기면
+# 충분하다(재현은 해시·아티팩트, 관측은 미리보기 — 책임 분리).
+#
+# 기본 64KB — 통상 프롬프트(수 KB)는 무손실, 병리적 거대 본문만 자른다. 잘릴 때는 끝에
+# 마커를 붙여 "잘림"이 디버깅에서 명시적이게 한다(조용한 절단 금지). 0/음수면 무제한
+# (콜렉터 한도에만 의존 — 이전 동작). OTEL_SPAN_ATTR_MAX_CHARS 로 조절.
+def _span_attr_max_chars() -> int:
+    import os
+    raw = os.getenv("OTEL_SPAN_ATTR_MAX_CHARS", "")
+    if not raw.strip():
+        return 65536
+    try:
+        return int(raw)
+    except ValueError:
+        return 65536
+
+
+_TRUNC_MARKER = "\n…[truncated by OTEL_SPAN_ATTR_MAX_CHARS — full text in context_snapshot]"
+
+
 def _truncate(s: str, limit: int | None = None) -> str:
-    return s
+    cap = limit if limit is not None else _span_attr_max_chars()
+    if cap <= 0 or len(s) <= cap:
+        return s
+    return s[:cap] + _TRUNC_MARKER
 
 
 def _as_json(value: Any) -> str:
