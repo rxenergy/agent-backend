@@ -252,6 +252,15 @@ services:
       WEBUI_AUTH: ${OPEN_WEBUI_AUTH:-true}
       WEBUI_SECRET_KEY: ${OPEN_WEBUI_SECRET_KEY:-change-me-local}
       WEBUI_NAME: ${OPEN_WEBUI_NAME:-SMR Agent}
+      # 모델 시드(env) — 드롭다운 *노출*은 백엔드 /v1/models 자동 발견이 처리하고
+      # (OPENAI_API_BASE_URL), env 는 그 위에 *기본 선택*과 *메타데이터*만 시드한다.
+      #   DEFAULT_MODELS — 새 채팅의 기본 선택 모델 id(`<variant>@<llm>` 전체값). llm id 가
+      #     환경별로 다르므로(local=fake-echo, onprem=vLLM served-name) 변수로 빼 환경별
+      #     주입. 미설정이면 OpenWebUI 가 목록 첫 모델(=백엔드 default_variant) 선택.
+      #   DEFAULT_MODEL_METADATA — 모델별 메타(JSON). 페르소나 설명을 시드해 모델 카드에
+      #     역할이 보이게 한다(표시명 자체는 v0.9.5 env 경로 없음 → Workspace>Models 보강).
+      DEFAULT_MODELS: ${OPEN_WEBUI_DEFAULT_MODELS:-}
+      DEFAULT_MODEL_METADATA: ${OPEN_WEBUI_MODEL_METADATA:-{}}
     ports:
       - "${OPEN_WEBUI_PORT:-3100}:8080"
     volumes:
