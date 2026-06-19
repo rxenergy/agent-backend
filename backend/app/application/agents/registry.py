@@ -73,6 +73,10 @@ class AgentDeps:
     # 조회. 미배선(None/빈 dict)이면 페르소나 variant 가 profile 없이 graceful(단계 A — 바인딩
     # 만, 소비는 단계 B~D). 중립 `composer` variant 는 persona=None 이라 무관.
     composer_persona_sources: dict[str, Any] = field(default_factory=dict)
+    # composer_pipelined retrieval.rescope — none_necessary 슬롯(1차 검색 전체 빗나감)의
+    # 스코프 재계획 프롬프트 source. 재현 핀(어느 프롬프트가 재계획을 만들었나)·테스트
+    # 가시성용. verify_slot 과 같은 Node2(sub) 를 공유한다. 미배선 시 None.
+    composer_rescope_source: Any = None
     # composer_pipelined Node2(sub) — 슬롯 검증(retrieval.verify_slot) + 외부참조 선별
     # (retrieval.follow_up) 보조 LLM(SECONDARY_LLM resolve 결과). 변형은 두 작업을 도구로
     # 호출하므로 러너가 직접 쓰진 않으나, 재현 핀(어느 모델이 검증·외부참조를 골랐는가)·

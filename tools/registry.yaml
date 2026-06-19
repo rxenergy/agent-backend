@@ -54,6 +54,18 @@ tools:
     retry: 0
     required: false
 
+  # retrieval.rescope — verify_slot 이 none_necessary(1차 검색 전체 빗나감)로 판정한 슬롯의
+  # 검색 스코프를 재계획(collection/status/design/canonical_id + boost/filter). secondary_llm
+  # (sub)에서 슬롯당 1회 호출 — verify/follow_up 과 같은 노드. required:false — 미배선/실패 시
+  # 그 슬롯 재검색 없음(graceful skip, 기여 0). verify→{follow_up|rescope}→verify 분기 *교체*라
+  # 슬롯당 LLM 호출 패턴은 follow_up 경로와 동일. timeout/retry 는 verify_slot 과 동형.
+  retrieval.rescope:
+    version: v1
+    adapter: vllm_rescope
+    timeout_ms: 60000
+    retry: 0
+    required: false
+
   document.resolve_citation:
     version: v1
     adapter: env:RETRIEVER_BACKEND   # opensearch | local — wired in profiles.py

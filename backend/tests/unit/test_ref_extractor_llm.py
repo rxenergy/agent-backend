@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 
 import pytest
+from structlog.testing import capture_logs
 
 from app.adapters.ref_postprocess.ref_extractor_rule import (
     RESOLVE_WITH_FOLLOW_UP_SCHEMA,
     extract_refs_with_follow_up,
+    resolve_text_with_follow_up,
 )
+from app.adapters.ref_postprocess.ref_resolver import Candidate, ResolvedRef
 from app.adapters.ref_postprocess.settings import RefSettings
 from app.adapters.tools.retrieval_follow_up import RetrievalFollowUpTool
 from app.domain.retrieval import FollowUpInput, RetrievedChunk
@@ -53,18 +56,17 @@ class _SchemaEchoLLM:
 
 @pytest.mark.asyncio
 async def test_extract_refs_with_follow_up_uses_llmport_and_json_schema_grammar() -> None:
+    # 방안 B — follow_up_query 는 reference 에 inline nested(평행 배열·target_identifiers 폐기).
     llm = _SchemaEchoLLM({
         "references": [
             {"raw_citation": "RG 1.68", "kind": "RG", "identifier": "RG 1.68",
-             "section_path": []},
-        ],
-        "follow_up_queries": [
-            {"query_text": "testing acceptance criteria",
-             "target_identifiers": ["RG 1.68"], "intent": "acceptance"},
+             "section_path": [],
+             "follow_up_query": {"query_text": "testing acceptance criteria",
+                                 "intent": "acceptance"}},
         ],
     })
 
-    raw_refs, raw_follow_ups = await extract_refs_with_follow_up(
+    raw_refs = await extract_refs_with_follow_up(
         query_text="what are the testing criteria?",
         chunk_text="see RG 1.68 for details",
         settings=RefSettings.from_env(),
@@ -77,10 +79,11 @@ async def test_extract_refs_with_follow_up_uses_llmport_and_json_schema_grammar(
         kind="json_schema", value=RESOLVE_WITH_FOLLOW_UP_SCHEMA
     )
     assert [m.role for m in llm.last_messages] == ["system", "user"]
-    # 응답 파싱이 그대로 동작.
+    # 응답 파싱이 그대로 동작 — follow_up_query 가 그 reference 에 실린다.
     assert [r.identifier for r in raw_refs] == ["RG 1.68"]
-    assert raw_follow_ups[0]["query_text"] == "testing acceptance criteria"
-    assert raw_follow_ups[0]["target_identifiers"] == ["RG 1.68"]
+    assert raw_refs[0].follow_up_query == {
+        "query_text": "testing acceptance criteria", "intent": "acceptance",
+    }
 
 
 class _FakeRefExtractor:
@@ -186,7 +189,7 @@ async def test_follow_up_tool_passes_per_chunk_search_direction() -> None:
 @pytest.mark.asyncio
 async def test_necessity_prompt_includes_search_direction_block() -> None:
     # search_direction 이 주어지면 user content 에 SEARCH DIRECTION 블록이 실린다.
-    llm = _SchemaEchoLLM({"references": [], "follow_up_queries": []})
+    llm = _SchemaEchoLLM({"references": []})
     await extract_refs_with_follow_up(
         query_text="q", chunk_text="see RG 1.68",
         settings=RefSettings.from_env(), llm=llm,
@@ -206,7 +209,7 @@ async def test_necessity_mode_uses_necessity_system_prompt() -> None:
         SYSTEM_PROMPT_WITH_FOLLOW_UP,
     )
 
-    llm = _SchemaEchoLLM({"references": [], "follow_up_queries": []})
+    llm = _SchemaEchoLLM({"references": []})
     await extract_refs_with_follow_up(
         query_text="q", chunk_text="see RG 1.68",
         settings=RefSettings.from_env(), llm=llm,
@@ -218,10 +221,106 @@ async def test_necessity_mode_uses_necessity_system_prompt() -> None:
     assert "ANSWER SPEC:" in user_msg and "SPEC-BLOCK" in user_msg
     assert "SLOT SEARCH QUERY: SLOT-Q" in user_msg
 
-    llm2 = _SchemaEchoLLM({"references": [], "follow_up_queries": []})
+    llm2 = _SchemaEchoLLM({"references": []})
     await extract_refs_with_follow_up(
         query_text="q", chunk_text="see RG 1.68",
         settings=RefSettings.from_env(), llm=llm2,
     )
     assert llm2.last_messages[0].content == SYSTEM_PROMPT_WITH_FOLLOW_UP
     assert "ORIGINAL USER QUERY:" in llm2.last_messages[1].content
+
+
+# ---------------------------------------------------------------------------
+# 방안 B — per-reference resolve walk (resolve_text_with_follow_up)
+# reference 가 inline 으로 소유한 follow_up_query 가 그 reference 의 해소 source_id 와
+# 결합되는지(cross-array join 없이), 미해소 시 drop+로그되는지 검증.
+# ---------------------------------------------------------------------------
+
+class _StubResolver:
+    """RefResolver 대역 — RawRef → 미리 지정한 후보로 해소한다. resolve_many 는
+    입력 순서를 보존(production 불변식과 동일)해 zip 인덱스 정렬을 유지한다."""
+
+    def __init__(self, by_identifier: dict[str, list[Candidate]]) -> None:
+        self._by_identifier = by_identifier
+
+    def resolve_many(self, raw_refs):
+        return [
+            ResolvedRef(
+                raw_citation=r.raw_citation, kind=r.kind,
+                candidates=self._by_identifier.get(r.identifier, []),
+            )
+            for r in raw_refs
+        ]
+
+
+@pytest.mark.asyncio
+async def test_nested_follow_up_resolves_to_owning_reference_source_ids() -> None:
+    # (a) reference 가 inline 으로 가진 follow_up_query → 그 reference 의 해소 source_id 결합.
+    llm = _SchemaEchoLLM({
+        "references": [
+            {"raw_citation": "RG 1.68", "kind": "RG", "identifier": "RG 1.68",
+             "section_path": [],
+             "follow_up_query": {"query_text": "acceptance criteria",
+                                 "intent": "acceptance"}},
+        ],
+    })
+    resolver = _StubResolver({
+        "RG 1.68": [Candidate(source_id="src-1", score=0.9, matched_on="x")],
+    })
+    out = await resolve_text_with_follow_up(
+        query_text="q", chunk_text="see RG 1.68",
+        resolver=resolver, settings=RefSettings.from_env(), llm=llm,
+        necessity_only=True,
+    )
+    fqs = out["follow_up_queries"]
+    assert len(fqs) == 1
+    assert fqs[0].query_text == "acceptance criteria"
+    assert fqs[0].target_source_ids == ["src-1"]
+    assert fqs[0].intent == "acceptance"
+
+
+@pytest.mark.asyncio
+async def test_reference_without_follow_up_yields_no_query_and_no_drop_log() -> None:
+    # (b) follow_up_query 부재 → follow-up 없음, drop 로그도 *미발생*(부재 ≠ drop).
+    llm = _SchemaEchoLLM({
+        "references": [
+            {"raw_citation": "RG 1.68", "kind": "RG", "identifier": "RG 1.68",
+             "section_path": []},
+        ],
+    })
+    resolver = _StubResolver({
+        "RG 1.68": [Candidate(source_id="src-1", score=0.9, matched_on="x")],
+    })
+    with capture_logs() as logs:
+        out = await resolve_text_with_follow_up(
+            query_text="q", chunk_text="see RG 1.68",
+            resolver=resolver, settings=RefSettings.from_env(), llm=llm,
+            necessity_only=True,
+        )
+    assert out["follow_up_queries"] == []
+    assert not [e for e in logs if e.get("event") == "follow_up_dropped_unresolved"]
+
+
+@pytest.mark.asyncio
+async def test_unresolved_reference_drops_follow_up_and_logs() -> None:
+    # (c) follow_up_query 있으나 후보가 min_score 미만 → drop + follow_up_dropped_unresolved 로그.
+    llm = _SchemaEchoLLM({
+        "references": [
+            {"raw_citation": "RG 9.99", "kind": "RG", "identifier": "RG 9.99",
+             "section_path": [],
+             "follow_up_query": {"query_text": "orphan query", "intent": ""}},
+        ],
+    })
+    resolver = _StubResolver({
+        "RG 9.99": [Candidate(source_id="src-low", score=0.3, matched_on="weak")],
+    })
+    with capture_logs() as logs:
+        out = await resolve_text_with_follow_up(
+            query_text="q", chunk_text="see RG 9.99",
+            resolver=resolver, settings=RefSettings.from_env(), llm=llm,
+            min_score=0.6, necessity_only=True,
+        )
+    assert out["follow_up_queries"] == []
+    drops = [e for e in logs if e.get("event") == "follow_up_dropped_unresolved"]
+    assert len(drops) == 1
+    assert drops[0]["dropped"] == 1

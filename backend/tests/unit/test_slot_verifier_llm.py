@@ -226,6 +226,73 @@ async def test_empty_chunks_is_fallback_noop() -> None:
     out = await _verify(verifier, [])
 
     assert llm.calls == 0
-    assert out == {"necessary_chunk_ids": [], "multihop_chunk_ids": [],
+    assert out == {"verdict": "has_necessary", "opinion": {},
+                   "necessary_chunk_ids": [], "multihop_chunk_ids": [],
                    "multihop_search_directions": {}, "neighbor_requests": {},
                    "rationale": "", "method": "fallback"}
+
+
+@pytest.mark.asyncio
+async def test_none_necessary_verdict_emits_opinion() -> None:
+    # verdict=none_necessary → 청크 식별자 전부 비고 opinion(why/what)을 낸다(재검색 트리거용).
+    llm = _ScriptedLLM({
+        "verdict": "none_necessary",
+        "necessary_chunk_ids": [],
+        "neighbor_requests": [],
+        "multihop": [],
+        "opinion": {
+            "why_not_needed": "all chunks are off-topic SRP review procedure",
+            "what_is_needed": "NuScale FSAR Chapter 6 ECCS design passages",
+        },
+    })
+    verifier = SlotVerifierLlm(llm=llm, source=_FakeSource())
+    out = await _verify(verifier, _chunks("c1", "c2", "c3"))
+
+    assert out["method"] == "llm"
+    assert out["verdict"] == "none_necessary"
+    assert out["necessary_chunk_ids"] == []
+    assert out["multihop_chunk_ids"] == []
+    assert out["opinion"]["what_is_needed"] == "NuScale FSAR Chapter 6 ECCS design passages"
+    # rationale 은 재검색 방향(what_is_needed)을 실어 UI thinking 에 노출된다.
+    assert "none_necessary" in out["rationale"]
+    assert "ECCS design" in out["rationale"]
+
+
+@pytest.mark.asyncio
+async def test_none_necessary_with_chunk_ids_forces_empty() -> None:
+    # 모델이 none_necessary 면서 배열을 잘못 채워도 파서가 강제로 비운다(contract 강제).
+    llm = _ScriptedLLM({
+        "verdict": "none_necessary",
+        "necessary_chunk_ids": ["c1", "c2"],
+        "neighbor_requests": [{"chunk_id": "c1", "direction": "after"}],
+        "multihop": [{"chunk_id": "c2", "search_direction": "x"}],
+        "opinion": {"why_not_needed": "wrong family", "what_is_needed": "the right one"},
+    })
+    verifier = SlotVerifierLlm(llm=llm, source=_FakeSource())
+    out = await _verify(verifier, _chunks("c1", "c2"))
+
+    assert out["verdict"] == "none_necessary"
+    assert out["necessary_chunk_ids"] == []
+    assert out["multihop_chunk_ids"] == []
+    assert out["multihop_search_directions"] == {}
+    assert out["neighbor_requests"] == {}
+
+
+@pytest.mark.asyncio
+async def test_none_necessary_missing_what_is_needed_downgrades() -> None:
+    # what_is_needed 가 비면 재검색 방향이 없으므로 has_necessary 로 downgrade(내용 없는
+    # 재검색 방지) — 빈 necessary 는 그대로 유효 판정(empty necessary).
+    llm = _ScriptedLLM({
+        "verdict": "none_necessary",
+        "necessary_chunk_ids": [],
+        "neighbor_requests": [],
+        "multihop": [],
+        "opinion": {"why_not_needed": "off-topic", "what_is_needed": ""},
+    })
+    verifier = SlotVerifierLlm(llm=llm, source=_FakeSource())
+    out = await _verify(verifier, _chunks("c1", "c2"))
+
+    assert out["method"] == "llm"
+    assert out["verdict"] == "has_necessary"
+    assert out["opinion"] == {}
+    assert out["necessary_chunk_ids"] == []

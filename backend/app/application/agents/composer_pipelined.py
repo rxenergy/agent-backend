@@ -365,11 +365,16 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                 ]
                 first_pass, pre_results = await self._slot_first_pass_search(
                     ctx=ctx, slot_queries=slot_queries, per_query_k=per_query_k)
+                # 슬롯 1차 planning 스코프(첫 쿼리 기준 — slot_query_text 가 첫 쿼리를 쓰는 것과
+                # 일관). none_necessary 재계획(rescope)이 "무엇이 빗나갔나" 를 알도록 전달한다.
+                slot_q0 = slot_queries[0]
                 res = await self._run_slot_pipeline(
                     request=request, ctx=ctx, spec_block=spec_block,
                     slot_name=slot_name,
                     slot_query=slot_query_text.get(slot_name, request.query_text),
                     slot_chunks=first_pass, pre_tool_results=pre_results,
+                    slot_scope={"target": slot_q0.get("target", {}),
+                                "filters": slot_q0.get("filters", {})},
                 )
                 return SlotSearchResult(
                     slot_name=slot_name, necessary=res.necessary,
@@ -653,6 +658,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         # 토큰 집계(D4) — 다콜(슬롯별 + 종합)이라 AgentResponse.token_usage 는 비우되,
         # Prometheus 토큰 패널이 0 으로 굶지 않도록 슬롯·종합 토큰을 합산해 record_tokens.
         # composer(_generate_single)가 단일콜에서 하는 것을 슬롯 다콜로 확장.
+        total_none_necessary = 0  # verdict=none_necessary → rescope 재검색한 슬롯 수
         total_prompt_tokens = 0
         total_completion_tokens = 0
         # TTFT(D1) — 배리어 제거의 효과를 실측하는 핵심 지표(설계 §10 #1). 첫 *본문* 토큰이
@@ -719,10 +725,13 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             # 비활성화 후에도 관측/재현에서 검증 근거를 그대로 읽을 수 있게 한다.
             verify_pins.append({
                 "slot": slot.name, "method": pipe.method,
+                "verdict": pipe.verdict,
                 "num_first_pass": pipe.num_first_pass,
                 "num_necessary": len(pipe.necessary),
                 "num_neighbor": len(pipe.neighbor_chunks),
                 "num_multihop": len(pipe.multihop_ids),
+                "num_rescope_queries": len(pipe.rescope_queries),
+                "rescope_method": pipe.rescope_method,
                 "num_second_pass": pipe.num_second_pass,
                 "num_second_necessary": len(pipe.second_pass),
                 "second_method": pipe.second_method,
@@ -735,6 +744,8 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             total_neighbor += len(pipe.neighbor_chunks)
             total_second_pass += pipe.num_second_pass
             total_second_necessary += len(pipe.second_pass)
+            if pipe.verdict == "none_necessary":
+                total_none_necessary += 1
 
             # === 슬롯 CONTEXT = 검증 통과 1차 ∪ 2차. cite-N 은 *생성 전* 에 전역 배정 ===
             # SlotCitationAllocator 가 이 슬롯 청크에 전역 cite-N 을 매겨 sub-pack 을 만든다 —
@@ -868,6 +879,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                             verify_pins, fq_all, slot_pins, sess, post,
                             total_multihop, total_second_pass, total_second_necessary,
                             cites.all_chunk_ids, total_neighbor=total_neighbor,
+                            total_none_necessary=total_none_necessary,
                         ),
                     )
 
@@ -926,7 +938,8 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                             verdict=judge["verdict"])
 
         await emit_step("slot_search", "ok", necessary=len(cites.all_chunk_ids),
-                        multihop=total_multihop, second_pass=total_second_pass)
+                        multihop=total_multihop, second_pass=total_second_pass,
+                        none_necessary=total_none_necessary)
 
         evidence_gap = not slot_outputs or not cites.all_chunk_ids
 
@@ -1027,6 +1040,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
             verify_pins, fq_all, slot_pins, sess, post,
             total_multihop, total_second_pass, total_second_necessary,
             cites.all_chunk_ids, total_neighbor=total_neighbor,
+            total_none_necessary=total_none_necessary,
             evidence_gap=evidence_gap,
             synth_mode=synth_mode, synth_hash=synth_hash,
             verification_status=verification_status, verdict_counts=verdict_counts,
@@ -1101,6 +1115,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
         sess: dict[str, Any], post,
         total_multihop: int, total_second_pass: int, total_second_necessary: int,
         global_chunk_ids: list[str], *, total_neighbor: int = 0,
+        total_none_necessary: int = 0,
         evidence_gap: bool = False,
         synth_mode: str = "off", synth_hash: str | None = None,
         verification_status: str | None = None,
@@ -1159,6 +1174,7 @@ class ComposerPipelinedRunner(_SlotPipelineMixin, ComposerRunner):
                     "total_necessary": len(global_chunk_ids),
                     "total_neighbor": total_neighbor,
                     "total_multihop": total_multihop,
+                    "total_none_necessary": total_none_necessary,
                     "second_pass_total": total_second_pass,
                     "second_necessary_total": total_second_necessary,
                     "slots": verify_pins,
