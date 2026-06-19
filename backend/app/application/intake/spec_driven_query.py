@@ -277,13 +277,22 @@ class QueryFormulator:
         self._policy_hash = policy_hash
 
     async def formulate(
-        self, query_text: str, spec: AnswerSpec, *, reasoning_label: str | None = None
+        self, query_text: str, spec: AnswerSpec, *, reasoning_label: str | None = None,
+        persona_profile: str | None = None,
     ) -> tuple[tuple[FormulatedQuery, ...], str]:
         prompt = (
             self._prompt
             .replace("{query}", query_text)
             .replace("{spec}", _render_spec(spec))
         )
+        # 페르소나 프로필(composer_persona_framework.design.v1 §6.3) — composer 페르소나
+        # variant 가 자기 fragment 를 넘기면 검색 설계 프롬프트 앞에 prepend 한다(같은 fragment
+        # 의 답 척추·collection 우선순위를 모델이 검색 라우팅 우선순위로 읽는다 — soft boost,
+        # 사용자 결정: 모델 판단). 정적 body 불변(policy_hash 안정), 동적 입력만 prepend.
+        # facet→collection 라우팅 값·status/design 배타성·canonical_id 게이트는 페르소나
+        # 무관(governance §5.1 — 근거·cite 페르소나 불변). 중립(None)이면 현행 동작 불변.
+        if persona_profile:
+            prompt = persona_profile.rstrip() + "\n\n" + prompt
         with _TRACER.start_as_current_span("intake.spec_driven_query") as span:
             oi.set_kind(span, oi.KIND_LLM)
             oi.set_io(span, input_value=prompt)

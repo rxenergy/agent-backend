@@ -247,7 +247,8 @@ class ComposerRunner(SpecDrivenRunner):
                 policy_hash=self._query_source.policy_hash,
             )
             queries, formulation_method = await n2.formulate(
-                request.query_text, spec, reasoning_label="검색 쿼리 생성")
+                request.query_text, spec, reasoning_label="검색 쿼리 생성",
+                persona_profile=self._persona_profile())
             truncated = False
             if len(queries) > self._max_queries:
                 truncated = True
@@ -939,6 +940,12 @@ class ComposerRunner(SpecDrivenRunner):
         body = (self._slot_source.prompt_body if self._slot_source
                 else self._generation_source.prompt_body).strip()
         parts = [body]
+        # 페르소나 프로필(composer_persona_framework.design.v1 §6.4) — 같은 fragment 를 본문
+        # 앞에 prepend(독자가 누구인지·표현 register). 사실·인용은 불변(grounding/cite 게이트
+        # 페르소나 무관, §5.1·§5.4) — 페르소나는 *표현/프레이밍*만 바꾼다. 중립(None)이면 미주입.
+        persona = self._persona_profile()
+        if persona:
+            parts.append("# PERSONA\n" + persona.strip())
         if self._citation_contract:
             parts.append("# CITATION CONTRACT\n" + self._citation_contract.strip())
         # 전역 답변 사양 — 슬롯이 전체 구조 안에서 자기 위치를 알게 한다(_render_spec_block
@@ -967,6 +974,12 @@ class ComposerRunner(SpecDrivenRunner):
         depth_line = f"depth(전개 심도): {slot.depth}\n" if slot.depth else ""
         deps_line = (f"depends_on(연결할 선행 구획): {', '.join(slot.depends_on)}\n"
                      if slot.depends_on else "")
+        # register — 페르소나가 정한 표현 톤(evaluative/comparative/directive). 사실은 불변,
+        # 어조만 독자에 맞춘다(설계 §6.4). 중립(persona=None)이면 미주입(현행 동작 불변).
+        register_line = (
+            f"register(표현 톤 — 사실 불변, 어조만): {self._persona.register}\n"
+            if self._persona else ""
+        )
         parts.append(
             f"# THIS SECTION{tag}\n"
             f"단계: {stage_index + 1} / 총 {stage_total} 구획 중\n"
@@ -974,6 +987,7 @@ class ComposerRunner(SpecDrivenRunner):
             f"{role_line}"
             f"{depth_line}"
             f"{deps_line}"
+            f"{register_line}"
             f"answer_structure: {spec.answer_structure or '-'}\n"
             f"governing_normative_class: {spec.governing_normative_class or '-'}\n"
             f"무엇을 확립할 것인가: {slot.description or slot.role or slot.name}\n"
@@ -1060,7 +1074,21 @@ class ComposerRunner(SpecDrivenRunner):
                 "단계 제안' (2–4 actionable next steps grounded in what the answer established "
                 "or left open). Add no new regulatory fact or [cite-N]. Same language as QUERY."
             )
-        parts = [body, "# ANSWER STRUCTURE\n" + (spec.answer_structure or "-")]
+        parts = [body]
+        # 페르소나 프로필 + 다음액션 종류(설계 §6.4) — 닫음 블록의 "다음 단계 제안"을 이 독자가
+        # 취할 액션 종류(review/design/operate)로 맞춘다. 사실·cite 불변(새 규제사실 금지는 본문
+        # 규칙 유지) — 페르소나는 *어떤 다음 행동을 제안하는가*의 프레이밍만 바꾼다. 중립=미주입.
+        persona = self._persona_profile()
+        if persona:
+            parts.append("# PERSONA\n" + persona.strip())
+        if self._persona:
+            parts.append(
+                "# NEXT-ACTION FRAME\n"
+                f"이 독자가 취할 다음 액션의 종류: {self._persona.next_action_kind} "
+                "(review=재검토·판정 / design=설계 적용 / operate=운전 조치). '다음 단계 제안'을 "
+                "이 종류에 맞춰라 — 새 규제사실·[cite-N] 추가 금지(본문 규칙 유지)."
+            )
+        parts.append("# ANSWER STRUCTURE\n" + (spec.answer_structure or "-"))
         sec_lines = [f"## SECTION [{o['slot'].name}]\n{o['text']}" for o in slot_outputs]
         parts.append("# SECTIONS ALREADY SHOWN\n" + "\n\n".join(sec_lines))
         parts.append("# QUERY\n" + query_text)
