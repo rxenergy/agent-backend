@@ -58,11 +58,15 @@ _NEIGHBOR_DIRECTIONS = frozenset({"before", "after", "both"})
 
 
 def _synthesize_rationale(
-    *, num_necessary: int, num_neighbor: int, multihop_directions: dict[str, str]
+    *, num_necessary: int, num_neighbor: int, multihop_directions: dict[str, str],
+    verdict: str = "has_necessary", what_is_needed: str = "",
 ) -> str:
     """verify_slot_v2 는 더 이상 자유 rationale 을 내지 않으므로, 구조화 산출에서 핀·UI
     thinking 연속성용 요약 문장을 합성한다. 멀티홉 search_direction 은 방향 텍스트까지
-    실어 "어느 각도로 재검색하려는지"가 근거에 남게 한다(cap 안에서)."""
+    실어 "어느 각도로 재검색하려는지"가 근거에 남게 한다(cap 안에서). none_necessary 면
+    필요 청크가 없으므로 재검색 방향(what_is_needed)을 근거로 노출한다."""
+    if verdict == "none_necessary":
+        return f"필요 청크 없음(none_necessary) — 재검색 방향: {what_is_needed[:400]}"
     parts = [f"필요 {num_necessary}개"]
     if num_neighbor:
         parts.append(f"이웃 보강 {num_neighbor}개")
@@ -102,7 +106,8 @@ class SlotVerifierLlm:
         verifiable = [c for c in chunks if c.get("chunk_id")]
         all_ids = [str(c.get("chunk_id")) for c in verifiable]
         if not all_ids:
-            return {"necessary_chunk_ids": [], "multihop_chunk_ids": [],
+            return {"verdict": "has_necessary", "opinion": {},
+                    "necessary_chunk_ids": [], "multihop_chunk_ids": [],
                     "multihop_search_directions": {}, "neighbor_requests": {},
                     "rationale": "", "method": "fallback"}
 
@@ -142,6 +147,9 @@ class SlotVerifierLlm:
             # 사유를 실어 러너가 UI thinking 에 "검증 호출 실패 → 전량 보존" 을 노출하게 한다.
             reason = f"{_FALLBACK_RATIONALE_PREFIX} ({type(exc).__name__}: {str(exc)[:200]})"
             return {
+                # fallback 은 전량 보존·재검색 안 함 → verdict 는 has_necessary 고정.
+                "verdict": "has_necessary",
+                "opinion": {},
                 "necessary_chunk_ids": list(all_ids),
                 "multihop_chunk_ids": [],
                 "multihop_search_directions": {},
@@ -151,6 +159,8 @@ class SlotVerifierLlm:
             }
 
         return {
+            "verdict": parsed["verdict"],
+            "opinion": parsed["opinion"],
             "necessary_chunk_ids": parsed["necessary_chunk_ids"],
             "multihop_chunk_ids": parsed["multihop_chunk_ids"],
             "multihop_search_directions": parsed["multihop_search_directions"],
@@ -184,9 +194,14 @@ class SlotVerifierLlm:
         ])
 
     def _parse_ids(self, content: str, all_ids: list[str]) -> dict[str, Any]:
-        """슬롯 모델 JSON(verify_slot_v2) → {necessary_chunk_ids, multihop_chunk_ids,
-        multihop_search_directions, neighbor_requests, rationale}.
+        """슬롯 모델 JSON(verify_slot_v2) → {verdict, opinion, necessary_chunk_ids,
+        multihop_chunk_ids, multihop_search_directions, neighbor_requests, rationale}.
 
+        BINARY verdict(has_necessary/none_necessary)를 먼저 읽는다. none_necessary 면 청크
+        식별자 출력을 모두 비우고 opinion(why_not_needed/what_is_needed)을 파싱한다 — 단
+        what_is_needed 가 비면 내용 없는 재검색을 막기 위해 has_necessary 로 downgrade.
+
+        has_necessary(또는 verdict 누락=레거시):
         스키마: necessary_chunk_ids(id 리스트) + neighbor_requests([{chunk_id,direction}]) +
         multihop([{chunk_id,search_direction}]). 모든 id 는 입력 id 의 *부분집합*으로 필터한다
         (hallucinated id 제거, 입력 순서 보존 — 결정성). neighbor 는 necessary 의 부분집합으로
@@ -200,6 +215,32 @@ class SlotVerifierLlm:
         if not isinstance(data, dict):
             raise ValueError("verify_slot output not an object")
         id_set = set(all_ids)
+
+        # BINARY verdict — enum 외/누락은 has_necessary 로 coerce(레거시 출력 방어).
+        verdict = str(data.get("verdict") or "has_necessary").strip().lower()
+        if verdict not in ("has_necessary", "none_necessary"):
+            verdict = "has_necessary"
+
+        if verdict == "none_necessary":
+            raw_op = data.get("opinion") or {}
+            why = str(raw_op.get("why_not_needed", "")).strip() if isinstance(raw_op, dict) else ""
+            what = str(raw_op.get("what_is_needed", "")).strip() if isinstance(raw_op, dict) else ""
+            if what:
+                # 청크 식별자는 모두 비운다(contract 강제 — 모델이 배열을 잘못 채웠어도).
+                return {
+                    "verdict": "none_necessary",
+                    "opinion": {"why_not_needed": why, "what_is_needed": what},
+                    "necessary_chunk_ids": [],
+                    "multihop_chunk_ids": [],
+                    "multihop_search_directions": {},
+                    "neighbor_requests": {},
+                    "rationale": _synthesize_rationale(
+                        num_necessary=0, num_neighbor=0, multihop_directions={},
+                        verdict="none_necessary", what_is_needed=what,
+                    ),
+                }
+            # what_is_needed 가 비면 재검색 방향이 없음 → has_necessary 로 떨궈 기존 경로로.
+            verdict = "has_necessary"
 
         raw_necessary = {str(i) for i in (data.get("necessary_chunk_ids") or [])}
         # 입력 순서 보존 + 부분집합 필터(입력 id 순회로 hallucinated id 제거·결정성 확보).
@@ -239,6 +280,8 @@ class SlotVerifierLlm:
             multihop_directions=directions,
         )
         return {
+            "verdict": "has_necessary",
+            "opinion": {},
             "necessary_chunk_ids": necessary,
             "multihop_chunk_ids": multihop,
             "multihop_search_directions": directions,

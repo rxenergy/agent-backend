@@ -378,6 +378,96 @@ def _render_spec(spec: AnswerSpec) -> str:
     return "\n".join(lines)
 
 
+def resolve_query_scope(
+    q: dict[str, Any],
+) -> tuple[dict[str, list[str]], dict[str, Any], dict[str, Any]]:
+    """모델이 낸 1개 쿼리 dict 의 스코프 채널(collection/status/design/canonical_id +
+    각 _mode)을 결정형 게이트로 해소해 (target, filters, scope_audit) 를 만든다.
+
+    표현=모델(채널·mode 선택), 결정=코드(검증·배타성·정규화). N2 `_parse` 와
+    retrieval.rescope 어댑터가 *같은* 해소를 공유하도록 순수 함수로 분리했다(드리프트 방지).
+    query_text/slot_name 추출은 호출부 책임 — 이 함수는 스코프 채널만 본다.
+
+      - collection: _COLLECTIONS 검증. mode=filter→filters, 그 외→target(boost).
+      - status: 규제 collection(RG/SRP/DSRS)에만 합성(배타성). 부적합이면 audit 기록·무시.
+      - design: nuscale_* collection 에만 합성(배타성). 부적합이면 audit 기록·무시.
+      - canonical_id: FSAR(wildcard)/NRC_MANUAL(exact) 검증기 순차 + 10CFR Part→page 환산.
+    """
+    target: dict[str, list[str]] = {}
+    filters: dict[str, Any] = {}
+
+    def _put(field: str, value: str, mode: str) -> None:
+        # mode=filter → hard-scope(filters), 그 외(boost/누락) → 가산 boost(target).
+        (filters if mode == "filter" else target)[field] = [value]
+
+    # (1) collection — 기존 채널. 역할 구분의 1차 신호.
+    coll_raw = q.get("collection")
+    collection = coll_raw.strip() if isinstance(coll_raw, str) else None
+    if collection in _COLLECTIONS:
+        _put("collection", collection,
+             str(q.get("collection_mode") or "boost").strip().lower())
+    else:
+        collection = None  # enum 외/누락은 미설정으로 정규화(아래 정합 게이트 입력).
+
+    # 무시된 채널 감사 — 모델이 *값을 냈는데* 배타성/게이트로 버려진 경우만 기록한다
+    # (silent drop 금지 — 원칙 6). 모델이 애초에 안 낸 채널은 drop 이 아니므로 미기록.
+    audit: dict[str, Any] = {}
+
+    # (2) status — 규제 collection(RG/SRP/DSRS)에만 합성(§4.3 배타성 강제).
+    status = q.get("status")
+    if isinstance(status, str) and status in _STATUS_VALUES:
+        if collection in _STATUS_COLLECTIONS:
+            _put(_STATUS_FIELD, status,
+                 str(q.get("status_mode") or "boost").strip().lower())
+        else:
+            audit["status_dropped"] = True  # 비규제 collection 에 status → 무시.
+
+    # (3) design — nuscale_* collection 에만 합성(§5.3 배타성 강제).
+    design = q.get("design")
+    if isinstance(design, str) and design in _DESIGN_VALUES:
+        if collection and collection.startswith(_DESIGN_COLLECTION_PREFIX):
+            _put(_DESIGN_FIELD, design,
+                 str(q.get("design_mode") or "boost").strip().lower())
+        else:
+            audit["design_dropped"] = True  # 규제/미지정 collection 에 design → 무시.
+
+    # (4) canonical_id — 게이트 통과 시만 승격. FSAR(NuScale, wildcard) 와
+    # NRC_MANUAL(RG/SRP/DSRS/10CFR, exact) 두 검증기를 순차로 시도한다(§5b.2/§9).
+    # FSAR 형(FSAR-... 접두)은 _validate_fsar_canonical 가 챕터→wildcard·범위 검증·
+    # Part 검증을 한다. 그 외는 _validate_canonical_id(정규식+prefix 정합).
+    cid = q.get("canonical_id")
+    if isinstance(cid, str) and cid.strip():
+        cid_s = cid.strip()
+        cid_mode = str(q.get("canonical_id_mode") or "boost").strip().lower()
+        if cid_s.upper().startswith("FSAR-"):
+            valid = _validate_fsar_canonical(cid_s, collection)
+        else:
+            valid = _validate_canonical_id(cid_s, collection)
+        if valid:
+            # 10CFR 단일 Part → 볼륨 canonical 환산 + page_range 좁힘(설계 §3.3). page_range 는
+            # 의미상 hard-scope 라 mode=filter 일 때만 filters 에 싣는다(boost 면 페이지 범위
+            # 의미가 약해 생략 — 볼륨 boost 만). 맵 miss/예약/볼륨형은 page 미합성(폴백).
+            part_info = (_resolve_10cfr_part_pages(valid)
+                         if collection == "10CFR" or valid.upper().startswith("10CFR-")
+                         else None)
+            if part_info and part_info.get("vol_canonical"):
+                _put(_CANONICAL_FIELD, part_info["vol_canonical"], cid_mode)
+            else:
+                _put(_CANONICAL_FIELD, valid, cid_mode)
+            if part_info:
+                audit["canonical_part"] = part_info.get("part")
+                audit["page_range_resolved"] = bool(part_info.get("resolved"))
+                if part_info.get("reserved"):
+                    audit["canonical_part_reserved"] = True
+                pr = part_info.get("page_range")
+                if pr and cid_mode == "filter":
+                    filters[_PAGE_RANGE_FIELD] = pr
+        else:
+            audit["canonical_id_rejected"] = True  # 정규식/범위/prefix 불일치 → 버림.
+
+    return target, filters, audit
+
+
 def _parse(text: str) -> tuple[FormulatedQuery, ...]:
     text = (text or "").strip()
     start, end = text.find("{"), text.rfind("}")
@@ -400,78 +490,7 @@ def _parse(text: str) -> tuple[FormulatedQuery, ...]:
         if not qt:
             continue
         slot = str(q.get("slot_name") or "").strip() or "query"
-        target: dict[str, list[str]] = {}
-        filters: dict[str, Any] = {}
-
-        def _put(field: str, value: str, mode: str) -> None:
-            # mode=filter → hard-scope(filters), 그 외(boost/누락) → 가산 boost(target).
-            (filters if mode == "filter" else target)[field] = [value]
-
-        # (1) collection — 기존 채널. 역할 구분의 1차 신호.
-        coll_raw = q.get("collection")
-        collection = coll_raw.strip() if isinstance(coll_raw, str) else None
-        if collection in _COLLECTIONS:
-            _put("collection", collection,
-                 str(q.get("collection_mode") or "boost").strip().lower())
-        else:
-            collection = None  # enum 외/누락은 미설정으로 정규화(아래 정합 게이트 입력).
-
-        # 무시된 채널 감사 — 모델이 *값을 냈는데* 배타성/게이트로 버려진 경우만 기록한다
-        # (silent drop 금지 — 원칙 6). 모델이 애초에 안 낸 채널은 drop 이 아니므로 미기록.
-        audit: dict[str, Any] = {}
-
-        # (2) status — 규제 collection(RG/SRP/DSRS)에만 합성(§4.3 배타성 강제).
-        status = q.get("status")
-        if isinstance(status, str) and status in _STATUS_VALUES:
-            if collection in _STATUS_COLLECTIONS:
-                _put(_STATUS_FIELD, status,
-                     str(q.get("status_mode") or "boost").strip().lower())
-            else:
-                audit["status_dropped"] = True  # 비규제 collection 에 status → 무시.
-
-        # (3) design — nuscale_* collection 에만 합성(§5.3 배타성 강제).
-        design = q.get("design")
-        if isinstance(design, str) and design in _DESIGN_VALUES:
-            if collection and collection.startswith(_DESIGN_COLLECTION_PREFIX):
-                _put(_DESIGN_FIELD, design,
-                     str(q.get("design_mode") or "boost").strip().lower())
-            else:
-                audit["design_dropped"] = True  # 규제/미지정 collection 에 design → 무시.
-
-        # (4) canonical_id — 게이트 통과 시만 승격. FSAR(NuScale, wildcard) 와
-        # NRC_MANUAL(RG/SRP/DSRS/10CFR, exact) 두 검증기를 순차로 시도한다(§5b.2/§9).
-        # FSAR 형(FSAR-... 접두)은 _validate_fsar_canonical 가 챕터→wildcard·범위 검증·
-        # Part 검증을 한다. 그 외는 _validate_canonical_id(정규식+prefix 정합).
-        cid = q.get("canonical_id")
-        if isinstance(cid, str) and cid.strip():
-            cid_s = cid.strip()
-            cid_mode = str(q.get("canonical_id_mode") or "boost").strip().lower()
-            if cid_s.upper().startswith("FSAR-"):
-                valid = _validate_fsar_canonical(cid_s, collection)
-            else:
-                valid = _validate_canonical_id(cid_s, collection)
-            if valid:
-                # 10CFR 단일 Part → 볼륨 canonical 환산 + page_range 좁힘(설계 §3.3). page_range 는
-                # 의미상 hard-scope 라 mode=filter 일 때만 filters 에 싣는다(boost 면 페이지 범위
-                # 의미가 약해 생략 — 볼륨 boost 만). 맵 miss/예약/볼륨형은 page 미합성(폴백).
-                part_info = (_resolve_10cfr_part_pages(valid)
-                             if collection == "10CFR" or valid.upper().startswith("10CFR-")
-                             else None)
-                if part_info and part_info.get("vol_canonical"):
-                    _put(_CANONICAL_FIELD, part_info["vol_canonical"], cid_mode)
-                else:
-                    _put(_CANONICAL_FIELD, valid, cid_mode)
-                if part_info:
-                    audit["canonical_part"] = part_info.get("part")
-                    audit["page_range_resolved"] = bool(part_info.get("resolved"))
-                    if part_info.get("reserved"):
-                        audit["canonical_part_reserved"] = True
-                    pr = part_info.get("page_range")
-                    if pr and cid_mode == "filter":
-                        filters[_PAGE_RANGE_FIELD] = pr
-            else:
-                audit["canonical_id_rejected"] = True  # 정규식/범위/prefix 불일치 → 버림.
-
+        target, filters, audit = resolve_query_scope(q)
         out.append(FormulatedQuery(slot_name=slot, query_text=qt,
                                    target=target, filters=filters,
                                    scope_audit=audit))

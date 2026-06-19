@@ -217,11 +217,25 @@ spec_driven_generation_prompts:
 spec_driven_verify_prompts:
   spec_driven_verify_v2:
     profile_version: v1
-    prompt:        {path: spec_driven/verify_slot_v2.md,            version: v2, sha256: "489e43b3ef4505b51969f45bbe12b4012b5702f62a28ebd504588c9d9b4b39c2"}
-    output_schema: {path: spec_driven/schemas/verify_slot_v2.json,  version: v2, sha256: "c7b8216e49ad2448c84664bcd66b9f4e0d783fda2c7497da678d1a68e6e8a4ad"}
+    # v3 — BINARY verdict(has_necessary/none_necessary) + none_necessary 시 opinion
+    # (why_not_needed/what_is_needed) 추가. has_necessary 출력은 v2 와 동형.
+    prompt:        {path: spec_driven/verify_slot_v2.md,            version: v3, sha256: "a12003b9104ff59e2a24eea8ad1bb7a6a01b37a9024f8fb27d801f96f8dd215b"}
+    output_schema: {path: spec_driven/schemas/verify_slot_v2.json,  version: v3, sha256: "baa29e9460c144cd8eba0c10318690ade981a7d93fc08a9d0c6d80b451aa2b09"}
     # max_tokens — necessary id 리스트 + neighbor_requests(id+방향) + multihop(id+search_direction
-    # 1문장)/슬롯당 청크 ≤ 20. search_direction 문장이 추가돼 기존 600 대비 상향(→900).
-    model_options: {temperature: 0.0, max_tokens: 900}
+    # 1문장)/슬롯당 청크 ≤ 20. v3: none_necessary opinion 두 단락 여유로 900→1100 상향.
+    model_options: {temperature: 0.0, max_tokens: 1100}
+
+# spec_driven_v2 retrieval.rescope — none_necessary 슬롯의 검색 스코프 재계획(planning
+# 스코프 어휘 collection/status/design/canonical_id + boost/filter 재사용). SpecDrivenRescope
+# Source 가 boot 시 sha 검증(원칙 5). query_formulation 과 동일 출력 shape(slot_name 제외).
+spec_driven_rescope_prompts:
+  spec_driven_rescope_v1:
+    profile_version: v1
+    prompt:        {path: spec_driven/rescope_v1.md,            version: v1, sha256: "ef2dd8fe12b91778b85f2408e099d8d4011b844916d2339b2240d063750dddd6"}
+    output_schema: {path: spec_driven/schemas/rescope_v1.json,  version: v1, sha256: "9e69b3000ed771e383fdc5543e0d76520d1218c36e90419cb81bd9a3f60ad6d6"}
+    # max_tokens — reasoning 1-2문장 + 재계획 쿼리 1-5개(query_text + 스코프 채널). N2
+    # query_formulation(1400)과 동형 규모.
+    model_options: {temperature: 0.0, max_tokens: 1400}
 
 # composer — spec_driven_v1 N0~N3.5 를 계승하고 N4 만 슬롯 단위로 대체한 variant 의 N4
 # 프롬프트(설계 docs/plans/spec_driven_slotwise_generation.design.v1.md).

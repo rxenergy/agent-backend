@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Any
 
 from app.application.agents.spec_driven_v1 import (
@@ -39,6 +40,7 @@ _TRACER = get_tracer("agent")
 
 _VERIFY_TOOL = "retrieval.verify_slot"
 _FOLLOW_UP_TOOL = "retrieval.follow_up"
+_RESCOPE_TOOL = "retrieval.rescope"  # none_necessary 슬롯 스코프 재계획
 _FETCH_CHUNKS_TOOL = "document.fetch_chunks"  # neighbor_requests 이웃 보강(id 조회)
 
 # chunk_id `<prefix>_c<NNNN>` 의 prefix 와 ordinal 분해(이웃 id 계산용).
@@ -48,6 +50,10 @@ _CHUNK_ORD_RE = re.compile(r"^(.*_c)(\d+)$")
 # ref_resolver._CFR_YEAR_RE(adapter)와 같은 발상이나, application 레이어 자족성을
 # 위해 여기 작은 정규식을 따로 둔다(adapter import 회피).
 _PKG_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+
+# near-duplicate 동일내용 판정 임계값(difflib ratio). 정규화 본문 유사도가 이 값 이상이면
+# 같은 그룹으로 접는다 — 띄어쓰기/문장부호 차이나 revision 간 수치만 다른 청크를 흡수(사용자 결정).
+_SIMILARITY_THRESHOLD = 0.95
 
 
 def _content_key(c: RetrievedChunk) -> str | None:
@@ -69,24 +75,49 @@ def _recency_sort_key(c: RetrievedChunk) -> tuple[str, int, float]:
     return (date, year, c.score)
 
 
+def _is_near_duplicate(a: str, b: str) -> bool:
+    """정규화 본문 a,b 가 near-duplicate(difflib ratio>=임계값)인지. 길이비 게이트로
+    명백히 길이가 다른 쌍은 ratio 계산 전 조기 기각(O(n^2) 비교 비용 절감) — min/max 길이비가
+    임계값 미만이면 ratio 상한도 임계값 미만이라 비교가 불필요하다. 이어서 값싼 상한
+    quick_ratio 로 한 번 더 거른 뒤 정확 ratio 로 최종 판정."""
+    la, lb = len(a), len(b)
+    if not la or not lb:
+        return False
+    if min(la, lb) / max(la, lb) < _SIMILARITY_THRESHOLD:
+        return False
+    sm = SequenceMatcher(None, a, b, autojunk=False)
+    if sm.quick_ratio() < _SIMILARITY_THRESHOLD:
+        return False
+    return sm.ratio() >= _SIMILARITY_THRESHOLD
+
+
 def dedupe_latest_version(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
-    """본문 내용이 동일한 청크 그룹마다 최신 버전 1개만 남긴다(예외 안전).
+    """본문 내용이 (거의) 동일한 청크 그룹마다 최신 버전 1개만 남긴다(예외 안전).
 
-    NRC 코퍼스의 CFR 연도판(CFR-1997-… vs CFR-2025-…)처럼 본문이 글자 그대로 같고
-    문서 버전만 다른 중복을, verify_slot LLM 호출 직전에 최신판 1개로 접는다.
+    NRC 코퍼스에는 글자 그대로 같지는 않아도 사실상 동일한 청크가 많다 — CFR 연도판
+    (CFR-1997-… vs CFR-2025-…), 띄어쓰기/문장부호만 다른 청크, revision 에 따라 같은 문장에서
+    수치(압력·온도 등)만 달라진 청크 등. 이런 near-duplicate 를 verify_slot LLM 호출 직전에
+    최신판 1개로 접는다(수치만 다른 revision 은 최신 청크만 남고 오래된 값 청크는 제거된다).
 
-      - 그룹핑: _content_key(정규화 본문 완전일치). 빈 본문은 고유키(chunk_id)로 두어
-        절대 합쳐지지 않게 한다(빈 텍스트끼리 오병합 방지).
-      - 그룹 내 선택: _recency_sort_key 최댓값 1개(response_date→packageId 연도→score).
+      - 그룹핑: _content_key(정규화 본문) 끼리 difflib 유사도가 _SIMILARITY_THRESHOLD(0.95)
+        이상이면 같은 클러스터. greedy single-link — 각 청크를 기존 클러스터 seed(처음 들어온
+        멤버의 정규화 본문)와 순서대로 비교해 첫 매칭에 합류, 없으면 새 클러스터 생성.
+        빈 본문(_content_key=None)은 절대 병합하지 않고 단독 클러스터로 둔다(오병합 방지).
+      - 클러스터 내 선택: _recency_sort_key 최댓값 1개(response_date→packageId 연도→score).
       - 입력 *원순서* 보존(keep id 집합으로 원리스트 필터)."""
-    by_group: dict[str, list[RetrievedChunk]] = {}
+    clusters: list[tuple[str | None, list[RetrievedChunk]]] = []  # (seed_key, members)
     for c in chunks:
-        key = _content_key(c) or f"\x00{c.chunk_id}"  # 빈본문 → 고유키
-        by_group.setdefault(key, []).append(c)
-    keep_ids: set[str] = set()
-    for grp in by_group.values():
-        winner = max(grp, key=_recency_sort_key)  # date→year→score desc
-        keep_ids.add(winner.chunk_id)
+        key = _content_key(c)  # None=빈본문 → 절대 병합 안 함
+        placed = False
+        if key is not None:
+            for seed_key, members in clusters:
+                if seed_key is not None and _is_near_duplicate(key, seed_key):
+                    members.append(c)
+                    placed = True
+                    break
+        if not placed:
+            clusters.append((key, [c]))
+    keep_ids = {max(m, key=_recency_sort_key).chunk_id for _, m in clusters}
     return [c for c in chunks if c.chunk_id in keep_ids]
 
 
@@ -145,6 +176,14 @@ class _SlotPipelineResult:
     num_second_pass: int = 0
     second_method: str = "skip"
     rationale2: str = ""
+    # === none_necessary 재검색(retrieval.rescope) ===
+    # verdict: Stage1 BINARY 판정("has_necessary"|"none_necessary"). none_necessary 면 1차
+    # 청크 전체가 빗나가 necessary 가 비고, opinion(why/what)으로 스코프를 재계획했다.
+    verdict: str = "has_necessary"
+    opinion: dict[str, str] = field(default_factory=dict)
+    # rescope 가 재계획한 검색 쿼리(각 {query_text,target,filters,scope_audit}) + 호출 경로.
+    rescope_queries: list[dict[str, Any]] = field(default_factory=list)
+    rescope_method: str = ""  # "" (미발생) | "llm" | "fallback"
 
 
 class _SlotPipelineMixin:
@@ -194,19 +233,28 @@ class _SlotPipelineMixin:
         self, *, request, ctx: ToolExecutionContext, spec_block: str,
         slot_name: str, slot_query: str, slot_chunks: list[RetrievedChunk],
         pre_tool_results: list[Any] | None = None,
+        slot_scope: dict[str, Any] | None = None,
     ) -> _SlotPipelineResult:
-        """한 슬롯: Node1 검증 → (멀티홉 청크에 대해) Node2 외부참조 선별 → 2차 검색 →
-        2차 재검증. tool 결과는 record 하지 않고 모아서 반환한다(호출부가 슬롯 원순서로
+        """한 슬롯: Node1 검증 → 분기 → 2차 검색 → 2차 재검증. 분기는 Node1 BINARY 판정:
+          - has_necessary → (멀티홉 청크에 대해) Node2 외부참조 선별(follow_up) → 2차 검색.
+          - none_necessary(1차 전체 빗나감) → opinion 으로 스코프 재계획(rescope) → 2차 검색.
+        두 경로 모두 2차 결과를 동일 verify_slot 으로 재검증한다(Stage4). 재검색은 1회만
+        (3차 홉 없음). tool 결과는 record 하지 않고 모아서 반환한다(호출부가 슬롯 원순서로
         순차 record → 결정성·race 방지). 어떤 단계든 실패/미배선이면 안전 degrade
-        (necessary=전량, 멀티홉 없음 → 단일노드 동작과 동형).
+        (necessary=전량, 멀티홉·재검색 없음 → 단일노드 동작과 동형).
 
         `pre_tool_results` 는 호출부(composer_pipelined)가 슬롯 1차 검색을 이 함수 *밖*에서
         돌렸을 때 그 tool_results 를 앞에 합치기 위한 것(record 순서 보존). v2 는 None.
 
-        슬롯의 4 stage 도구 호출은 여기서 연 `agent.slot.<name>` span 하나의 자식으로 묶인다
+        `slot_scope` 는 이 슬롯의 *1차 planning 스코프*({"target":..,"filters":..}) — rescope
+        가 "무엇이 빗나갔는지" 를 알고 재계획하도록 입력으로 넘긴다. None → 빈 스코프(재계획
+        시 초기 스코프 힌트 없이 — spec_driven_v2 는 미전달이라 None 으로 무변경 동작).
+
+        슬롯의 도구 호출은 여기서 연 `agent.slot.<name>` span 하나의 자식으로 묶인다
         — gather task 마다 contextvars 가 독립이라 슬롯끼리 섞이지 않는다(Phoenix 에서
         agent.run > agent.slot.<name> > {도구} 로 슬롯 단위로 읽힌다)."""
         tool_results: list[Any] = list(pre_tool_results or [])
+        init_scope: dict[str, Any] = slot_scope or {}
         # verify LLM 호출 직전 — 본문 동일 청크는 최신판 1개로 접는다(CFR 연도판 등).
         # by_id 부터 일관되게 축소된 집합을 보도록 진입부에서 한 번 dedup.
         slot_chunks = dedupe_latest_version(slot_chunks)
@@ -228,6 +276,8 @@ class _SlotPipelineMixin:
             by_id = {c.chunk_id: c for c in slot_chunks}
             # === Stage 1 — Node1 verify ===
             method = "fallback"
+            verdict = "has_necessary"                 # BINARY 판정(fallback 기본 = has_necessary)
+            opinion: dict[str, str] = {}              # none_necessary 일 때만 채워짐
             necessary_ids: list[str] = list(by_id)   # fallback 기본 = 전량 필요
             multihop_ids: list[str] = []
             rationale = ""
@@ -248,6 +298,8 @@ class _SlotPipelineMixin:
                 tool_results.append(v)
                 if v.status == "success" and v.output:
                     method = str(v.output.get("method", "llm"))
+                    verdict = str(v.output.get("verdict", "has_necessary"))
+                    opinion = dict(v.output.get("opinion") or {})
                     nids = [i for i in (v.output.get("necessary_chunk_ids") or []) if i in by_id]
                     mids = [i for i in (v.output.get("multihop_chunk_ids") or []) if i in by_id]
                     necessary_ids = nids
@@ -267,6 +319,8 @@ class _SlotPipelineMixin:
                     }
             except Exception:  # noqa: BLE001 — ToolUnknown/실패 → 단일노드 degrade(전량 필요).
                 method = "fallback"
+                verdict = "has_necessary"  # degrade 는 재검색 트리거 안 함(전량 보존).
+                opinion = {}
                 necessary_ids = list(by_id)
                 multihop_ids = []
                 # adapter fallback 과 일관 — 빈 근거 대신 실패 사유를 실어 UI thinking 노출.
@@ -300,9 +354,23 @@ class _SlotPipelineMixin:
                 except Exception:  # noqa: BLE001 — 미배선/실패 → 이웃 없이 진행(graceful).
                     neighbor_chunks = []
 
-            # === Stage 2 — Node2 외부참조 선별(enhanced follow_up, necessity_only) ===
+            # === Stage 2 — 분기: has_necessary → follow_up / none_necessary → rescope ===
+            # 두 경로 모두 fq_list 를 채워 Stage 3(2차 검색) → Stage 4(재검증)로 흘려보낸다.
+            #   - follow_up fq: {query_text, target_source_ids, ...} → 외부 문서 스코프 검색.
+            #   - rescope fq:   {query_text, target, filters, ...} → 재계획 스코프 검색.
+            # research_mode 로 Stage 3 검색 filter 를 분기한다(target_source_ids vs target/filters).
             fq_list: list[dict[str, Any]] = []
+            research_mode = False  # True → rescope 경로(재계획 스코프로 검색)
+            rescope_method = ""
+            # none_necessary(1차 전체 빗나감) + 재검색 방향 있음 + 멀티홉 없음 → rescope 재검색.
+            # 멀티홉이 있으면 그 외부 표적을 우선(multihop-first) — opinion 재검색은 멀티홉 빈 경우만.
+            do_rescope = (
+                verdict == "none_necessary"
+                and bool(opinion.get("what_is_needed"))
+                and not multihop
+            )
             if multihop:
+                # === Stage 2a — Node2 외부참조 선별(enhanced follow_up, necessity_only) ===
                 try:
                     fu = await self._tools.invoke(  # type: ignore[attr-defined]
                         _FOLLOW_UP_TOOL,
@@ -322,28 +390,61 @@ class _SlotPipelineMixin:
                         fq_list = fu.output.get("follow_up_queries", []) or []
                 except Exception:  # noqa: BLE001 — graceful skip(2차 검색 없음).
                     fq_list = []
+            elif do_rescope:
+                # === Stage 2b — none_necessary 스코프 재계획(retrieval.rescope) ===
+                # opinion + 1차 스코프로 검색 스코프를 새로 잡는다(미배선/실패 → graceful skip).
+                research_mode = True
+                try:
+                    rs = await self._tools.invoke(  # type: ignore[attr-defined]
+                        _RESCOPE_TOOL,
+                        {
+                            "query_text": request.query_text,
+                            "answer_spec": spec_block,
+                            "slot_name": slot_name,
+                            "slot_query": slot_query,
+                            "why_not_needed": str(opinion.get("why_not_needed", "")),
+                            "what_is_needed": str(opinion.get("what_is_needed", "")),
+                            "initial_scope": init_scope,
+                        },
+                        ctx,
+                    )
+                    tool_results.append(rs)
+                    if rs.status == "success" and rs.output:
+                        fq_list = rs.output.get("queries", []) or []
+                        rescope_method = str(rs.output.get("method", "llm"))
+                except Exception:  # noqa: BLE001 — graceful skip(재검색 없음).
+                    fq_list = []
+                    rescope_method = "fallback"
 
-            # === Stage 3 — Node2 2차 검색(참조 문서 내부, score 게이트 keep_k) ===
+            # === Stage 3 — 2차 검색(score 게이트 keep_k) ===
+            # follow_up 경로: 참조 문서(target_source_ids) 내부 검색. rescope 경로: 재계획
+            # 스코프(target/filters)로 검색. research_mode 로 검색 filter 를 분기한다.
             second_pass_raw: list[RetrievedChunk] = []
-            searchable = [fq for fq in fq_list if fq.get("target_source_ids")]
+            if research_mode:
+                searchable = [fq for fq in fq_list if fq.get("query_text")]
+            else:
+                searchable = [fq for fq in fq_list if fq.get("target_source_ids")]
             if searchable:
                 # gather 의 자식 search span 들은 task 생성 시점 context(=이 슬롯 span)를
                 # 캡처하므로 모두 슬롯 span 의 자식으로 nesting 된다.
+                def _search_payload(fq: dict[str, Any]) -> dict[str, Any]:
+                    base = {
+                        "query_text": fq["query_text"],
+                        "top_k": self._follow_up_fetch_k,  # type: ignore[attr-defined]
+                        "min_token_count": self._min_token_count,  # type: ignore[attr-defined]
+                    }
+                    if research_mode:
+                        # 재계획 스코프 — 그 쿼리 자신의 target(boost)/filters(hard-scope).
+                        base["target"] = fq.get("target", {})
+                        base["filters"] = {**_NOISE_FILTER, **fq.get("filters", {})}
+                    else:
+                        # follow_up — 참조 외부 문서로 hard-scope.
+                        base["filters"] = {**_NOISE_FILTER, "source_id": fq["target_source_ids"]}
+                    return base
+
                 sub_results = await asyncio.gather(
                     *(
-                        self._tools.invoke(  # type: ignore[attr-defined]
-                            _SEARCH_TOOL,
-                            {
-                                "query_text": fq["query_text"],
-                                "top_k": self._follow_up_fetch_k,  # type: ignore[attr-defined]
-                                "min_token_count": self._min_token_count,  # type: ignore[attr-defined]
-                                "filters": {
-                                    **_NOISE_FILTER,
-                                    "source_id": fq["target_source_ids"],
-                                },
-                            },
-                            ctx,
-                        )
+                        self._tools.invoke(_SEARCH_TOOL, _search_payload(fq), ctx)  # type: ignore[attr-defined]
                         for fq in searchable
                     ),
                     return_exceptions=True,
@@ -406,9 +507,11 @@ class _SlotPipelineMixin:
             # 끌어와 표시하므로, 슬롯 처리 결과 요약을 명시한다(verify_pins 와 동일 출처).
             oi.set_io(slot_span, output_value={
                 "method": method,
+                "verdict": verdict,
                 "num_necessary": len(necessary),
                 "num_neighbor": len(neighbor_chunks),
                 "num_multihop": len(multihop_ids),
+                "num_rescope_queries": len(fq_list) if research_mode else 0,
                 "num_second_pass": num_second_pass,
                 "num_second_necessary": len(second_pass),
                 "second_method": second_method,
@@ -422,6 +525,9 @@ class _SlotPipelineMixin:
             tool_results=tool_results,
             num_second_pass=num_second_pass, second_method=second_method,
             rationale2=rationale2,
+            verdict=verdict, opinion=opinion,
+            rescope_queries=fq_list if research_mode else [],
+            rescope_method=rescope_method,
         )
 
 

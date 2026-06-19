@@ -12,6 +12,14 @@ services:
     image: agent-backend:dev
     environment:
       APP_PROFILE: local
+      # 임베더 가중치(e5, fermi)를 호스트 ./models 에서 직접 로드한다. fermi-1024 는
+      # HF gated repo 라 토큰 없이는 다운로드가 401 로 막혀 local(fake) retriever 로
+      # fallback 된다 — 로컬 마운트로 우회한다. EMBEDDING_*_MODEL 이 /app/models 절대
+      # 경로를 가리키므로 HF 조회 자체를 하지 않는다.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      - ../../models:/app/models:ro
     depends_on:
       otel-collector:
         condition: service_started

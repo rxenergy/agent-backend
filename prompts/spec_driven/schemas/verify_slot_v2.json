@@ -1,11 +1,26 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "spec_driven_verify_v2",
-  "description": "spec_driven_v2 Node2 slot-verification output. Identifiers only (address-not-content): which retrieved chunks are necessary to answer this slot, which of those need their adjacent (before/after) chunks fetched for context, and which point to an external document that must be searched (multi-hop) along with the direction that follow-up search should take. All chunk ids must be a subset of the chunk ids shown in the prompt.",
+  "description": "spec_driven_v2 Node2 slot-verification output. First decide `verdict` (BINARY). has_necessary: at least one retrieved chunk helps — fill the chunk-id arrays (identifiers only, address-not-content). none_necessary: the whole retrieved set is off-target — leave the chunk-id arrays empty and fill `opinion` instead (why the set is not needed + what kind of evidence IS needed, to steer a re-scoped re-search). All chunk ids must be a subset of the chunk ids shown in the prompt.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["necessary_chunk_ids", "neighbor_requests", "multihop"],
+  "required": ["verdict", "necessary_chunk_ids", "neighbor_requests", "multihop"],
   "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["has_necessary", "none_necessary"],
+      "description": "has_necessary: at least one retrieved chunk is needed — fill necessary_chunk_ids / neighbor_requests / multihop. none_necessary: NONE of the retrieved chunks are needed — leave those three arrays empty and fill `opinion` instead. Prefer has_necessary if even one chunk genuinely helps."
+    },
+    "opinion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["why_not_needed", "what_is_needed"],
+      "description": "Present ONLY when verdict is none_necessary. A single opinion about the whole retrieved set (NOT per-chunk evidence). Address-not-content: describe the KIND of evidence, never copy chunk text.",
+      "properties": {
+        "why_not_needed": {"type": "string", "description": "One short paragraph: why the ENTIRE retrieved chunk set does not answer this slot (e.g. wrong collection / wrong document family / wrong granularity / off-topic). Refer to the set as a whole."},
+        "what_is_needed": {"type": "string", "description": "One short paragraph: what KIND of chunk/information IS needed to answer this slot, phrased to steer a re-scoped re-search (which document family / authority / facet to look in)."}
+      }
+    },
     "necessary_chunk_ids": {
       "type": "array",
       "items": {"type": "string"},
