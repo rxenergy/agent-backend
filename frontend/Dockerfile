@@ -81,6 +81,25 @@ ENV WEBUI_NAME="RX AI Agent v.1.0" \
 # 빈 if 가 남아 IndentationError 로 컨테이너가 죽으므로 두 줄을 함께 삭제.
 RUN sed -i "/if WEBUI_NAME != 'Open WebUI':/,+1d" /app/backend/open_webui/env.py
 
+# "Suggested" 프롬프트 카드 완전 제거 (아래 DEFAULT_PROMPT_SUGGESTIONS="[]" 와 짝).
+# config.py 는 DEFAULT_PROMPT_SUGGESTIONS 가 빈 배열이면 "비었으니 샘플 6개로
+# 채워라" 로 해석해(영어 예시 카드) 빈 값으로는 절대 비울 수 없다. 그 fallback
+# 조건을 무력화해야 env 의 빈 배열이 그대로 유지된다. 프론트엔드 Suggestions
+# 컴포넌트는 length==0 이면 "Suggested" 라벨+카드 영역 전체를 숨긴다.
+# (조건을 'if False:' 로 치환 — 블록 삭제 대신 치환이라 들여쓰기가 안 깨진다.)
+RUN sed -i "s/^if default_prompt_suggestions == \[\]:/if False:  # RX: keep empty suggestions empty/" /app/backend/open_webui/config.py
+
+# ---- 설정 단일 소스화: env 가 항상 권위 (PersistentConfig 무력화) -----------
+# OpenWebUI 의 다수 설정(USER_PERMISSIONS_*, DEFAULT_PROMPT_SUGGESTIONS, ENABLE_*
+# 일부)은 "ConfigVar"(PersistentConfig) 라, 최초 부팅 시 DB(config 테이블)에
+# 시드된 뒤로는 env 변경이 무시된다 (공식 문서 "Troubleshooting Ignored
+# Environment Variables"). aws-mvp 는 EBS(/data)에 SQLite 를 영속화하므로 이
+# 함정에 정확히 걸린다 — 재빌드해도 UI 가 안 바뀜.
+#   → False 로 두면 OpenWebUI 가 DB 를 무시하고 항상 env 를 읽는다. 즉 이미지
+#     /compose 가 설정의 단일 소스가 된다(MVP/IaC 정책 부합). 트레이드오프:
+#     운영자가 Admin UI 로 바꾼 값은 재시작 시 사라진다(설정 드리프트 방지로 OK).
+ENV ENABLE_PERSISTENT_CONFIG=false
+
 # ---- Auth posture: invite-only, no public signup (spec §5.1, §F5) ------------
 # Real WEBUI_SECRET_KEY is mounted from the secrets manager at runtime.
 ENV WEBUI_AUTH=true \
@@ -107,6 +126,34 @@ ENV ENABLE_COMMUNITY_SHARING=false \
     ENABLE_AUTOCOMPLETE_GENERATION=false \
     ENABLE_TAGS_GENERATION=false \
     ENABLE_TITLE_GENERATION=true
+
+# ---- UI 군더더기 제거: 사용자 권한(PersistentConfig) 차원의 기능 차단 -------
+# 위 ENABLE_* 는 "서버에서 기능 자체를 켜고/끄는" 글로벌 토글이고, 아래
+# USER_PERMISSIONS_* 는 "사용자 역할에게 그 UI 사용권을 줄지" 권한이다 (레이어
+# 다름). controls / temporary chat / notes 처럼 글로벌 토글이 없는 UI 군더더기는
+# 오직 이 권한으로만 숨길 수 있다.
+#
+# 이 키들은 PersistentConfig(ConfigVar) 라 원래 DB 시드 후 env 가 무시되지만,
+# 위 ENABLE_PERSISTENT_CONFIG=false 로 env 가 항상 권위를 갖게 했으므로 여기
+# 값이 그대로 적용된다. (CHAT_CONTROLS=false 는 Controls 버튼/패널 전체를 숨기는
+# master switch — 공식 문서: 이게 false 면 하위 valves/params 권한은 무의미.)
+ENV USER_PERMISSIONS_CHAT_CONTROLS=false \
+    USER_PERMISSIONS_CHAT_TEMPORARY=false \
+    USER_PERMISSIONS_CHAT_VALVES=false \
+    USER_PERMISSIONS_CHAT_SYSTEM_PROMPT=false \
+    USER_PERMISSIONS_CHAT_PARAMS=false \
+    USER_PERMISSIONS_FEATURES_NOTES=false \
+    USER_PERMISSIONS_FEATURES_MEMORIES=false \
+    USER_PERMISSIONS_FEATURES_FOLDERS=false \
+    USER_PERMISSIONS_FEATURES_CALENDAR=false \
+    USER_PERMISSIONS_FEATURES_CHANNELS=false \
+    USER_PERMISSIONS_FEATURES_CODE_INTERPRETER=false \
+    USER_PERMISSIONS_FEATURES_IMAGE_GENERATION=false \
+    USER_PERMISSIONS_FEATURES_WEB_SEARCH=false
+
+# "Suggested" 프롬프트 추천 카드 제거 (PersistentConfig, ui.prompt_suggestions).
+# 빈 배열이면 신규 대화 화면의 추천 카드가 사라진다.
+ENV DEFAULT_PROMPT_SUGGESTIONS="[]"
 
 # ---- Feedback is first-class (spec §8.3 원칙 3, §F4) -------------------------
 ENV ENABLE_MESSAGE_RATING=true
