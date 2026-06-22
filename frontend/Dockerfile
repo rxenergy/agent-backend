@@ -71,8 +71,15 @@ RUN set -eux; \
 FROM ghcr.io/open-webui/open-webui:${OPENWEBUI_VERSION}
 
 # ---- Identity / locale -------------------------------------------------------
-ENV WEBUI_NAME="RX Agent UI" \
+ENV WEBUI_NAME="RX AI Agent v.1.0" \
     DEFAULT_LOCALE=ko
+
+# OpenWebUI 의 env.py 는 WEBUI_NAME 이 정확히 "Open WebUI" 가 아니면 무조건
+# " (Open WebUI)" 를 덧붙인다 (의도된 attribution, env 토글 없음 — 제거 요청
+# upstream PR/Discussion #3766 은 closed). fork 없이 해당 if 블록(조건+본문
+# 2줄) 을 통째로 제거해 "RX AI Agent v.1.0" 만 노출되게 한다. 본문만 지우면
+# 빈 if 가 남아 IndentationError 로 컨테이너가 죽으므로 두 줄을 함께 삭제.
+RUN sed -i "/if WEBUI_NAME != 'Open WebUI':/,+1d" /app/backend/open_webui/env.py
 
 # ---- Auth posture: invite-only, no public signup (spec §5.1, §F5) ------------
 # Real WEBUI_SECRET_KEY is mounted from the secrets manager at runtime.

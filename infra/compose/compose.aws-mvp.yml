@@ -37,7 +37,7 @@ services:
 
       # Auth 정책은 frontend/Dockerfile 의 ENV 가 기본값 — 여기서는 시크릿만.
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
-      WEBUI_NAME: ${OPEN_WEBUI_NAME:-RX Agent UI}
+      WEBUI_NAME: ${OPEN_WEBUI_NAME:-RX AI Agent v.1.0}
       WEBUI_URL: ${WEBUI_URL}
       WEBUI_SESSION_COOKIE_SECURE: ${WEBUI_SESSION_COOKIE_SECURE:-true}
       WEBUI_SESSION_COOKIE_SAME_SITE: ${WEBUI_SESSION_COOKIE_SAME_SITE:-lax}
