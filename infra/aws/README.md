@@ -207,15 +207,17 @@ aws ec2 create-snapshot \
 
 | 항목 | 월 |
 |---|---|
-| EC2 t3.small 24/7 | $15 |
+| EC2 t3.large 24/7 (8GB RAM) | ~$60 |
 | EBS gp3 40GB | $3.5 |
 | EIP (부착 중) | $0 |
 | 데이터 전송 | ~$1 |
 | ECR 스토리지 (이미지 5개) | <$1 |
 | Bedrock (사용량 기반, litellm 경유) | 호출량 비례 (별도) |
-| **합계** | **~$20 / 월 + Bedrock 사용량** |
+| **합계** | **~$65 / 월 + Bedrock 사용량** |
 
-> litellm 컨테이너는 t3.small 안에서 OpenWebUI 와 같이 돈다(추가 인스턴스 없음).
+> litellm 컨테이너는 같은 인스턴스 안에서 OpenWebUI 와 함께 돈다(추가 인스턴스 없음).
+> t3.large(8GB)는 컨테이너 3개(open-webui+caddy+litellm)에 충분한 RAM 여유를 둔다.
+> 비용을 줄이려면 t3.medium(4GB, ~$30/월)도 가능하나, swap 의존이 남는다.
 > Bedrock 비용만 토큰 사용량에 비례해 별도 과금된다.
 
 DNS 는 회사 도메인 등록기관에서 무료, Tailscale 은 Free plan (3 user/100 device 이하).
