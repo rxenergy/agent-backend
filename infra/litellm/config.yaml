@@ -1,0 +1,36 @@
+# LiteLLM Proxy — aws-mvp Bedrock passthrough.
+#
+# OpenWebUI(OpenAI-compat) → 이 프록시 → Amazon Bedrock(Claude) 변환만 한다.
+# 에이전트 로직(RAG/검증/재현성 이벤트) 없음 — raw chat passthrough.
+# 온프레 agent-api(SMR 에이전트)와 OpenWebUI 에서 *공존* 노출된다.
+#
+# 인증: bearer token. LiteLLM 은 env AWS_BEARER_TOKEN_BEDROCK 가 있으면 자동으로
+#   bearer 방식(SigV4/boto3 미경유)을 쓴다. config 에 키를 쓰지 않는다.
+#
+# ⚠ model 의 inference-profile ID 는 **추측 금지**. 배포 region 에서
+#   `aws bedrock list-inference-profiles --region <region>` 로 ACTIVE 한 ID 를
+#   확인해 박는다. 아래는 예시 — region 가용성에 맞춰 교체.
+
+model_list:
+  # 모델 ID 는 ap-northeast-2 의 GLOBAL inference-profile 실측값
+  # (aws bedrock list-inference-profiles, 2026-06-23 확인). 모두 status=ACTIVE.
+  - model_name: claude-opus-4-8
+    litellm_params:
+      model: bedrock/global.anthropic.claude-opus-4-8
+      aws_region_name: os.environ/AWS_REGION
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: bedrock/global.anthropic.claude-sonnet-4-6
+      aws_region_name: os.environ/AWS_REGION
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0
+      aws_region_name: os.environ/AWS_REGION
+
+litellm_settings:
+  # OpenWebUI 가 보내는 미지원 파라미터는 조용히 버린다(400 방지).
+  drop_params: true
+
+general_settings:
+  # OpenWebUI → litellm 인증. compose 가 env 로 주입(SSM SecureString).
+  master_key: os.environ/LITELLM_MASTER_KEY

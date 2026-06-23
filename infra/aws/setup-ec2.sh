@@ -16,7 +16,7 @@
 #   ALLOWED_SSH_CIDR    (기본 0.0.0.0/0 — SSM 권장이라 SSH 는 막아도 됨)
 #
 # 사전 등록 필요 (스크립트 실행 전):
-#   1) SSM Parameter Store 시크릿 3개 — `make aws-secrets-put` 또는 README §3
+#   1) SSM Parameter Store 시크릿 5개 — `make aws-secrets-put` 또는 README §3
 #   2) 회사 도메인 등록기관에 A 레코드 추가 (출력된 EIP 사용) — 본 스크립트 이후
 
 set -euo pipefail
@@ -196,12 +196,14 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 COMPOSE_B64=$(base64 -w0 < "${REPO_ROOT}/infra/compose/compose.aws-mvp.yml")
 ENV_B64=$(base64 -w0     < "${REPO_ROOT}/infra/env/aws-mvp.env")
 CADDY_B64=$(base64 -w0   < "${REPO_ROOT}/infra/caddy/Caddyfile")
+LITELLM_B64=$(base64 -w0 < "${REPO_ROOT}/infra/litellm/config.yaml")
 
 sed -e "s|@@AWS_REGION@@|${REGION}|g" \
     -e "s|@@ECR_REGISTRY@@|${ECR_REG}|g" \
     -e "s|@@COMPOSE_B64@@|${COMPOSE_B64}|g" \
     -e "s|@@ENV_B64@@|${ENV_B64}|g" \
     -e "s|@@CADDY_B64@@|${CADDY_B64}|g" \
+    -e "s|@@LITELLM_B64@@|${LITELLM_B64}|g" \
     "${SCRIPT_DIR}/user-data.sh" > "${USERDATA_FILE}"
 
 # user-data 크기 검증.
@@ -268,7 +270,7 @@ cat <<EOF
 ║ 다음 단계:                                                            ║
 ║   1. 회사 도메인 등록기관에 A 레코드 추가:                            ║
 ║        agent.<your-domain>   A   ${EIP}                               ║
-║   2. SSM 시크릿 3개 등록되어 있는지 확인:                             ║
+║   2. SSM 시크릿 5개 등록되어 있는지 확인:                             ║
 ║        make aws-secrets-put                                           ║
 ║   3. user-data 가 끝나길 기다린 후 (~3분):                            ║
 ║        make aws-status                                                ║

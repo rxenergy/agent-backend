@@ -9,10 +9,10 @@
 > 재현 가능하게 만들고, 반복 작업(이미지 빌드/푸시/재배포) 은 Makefile + SSM
 > Send-Command 로 무인화한다.
 >
-> **EC2 는 Git 을 사용하지 않는다.** 3개 config 파일(`compose.aws-mvp.yml`,
-> `aws-mvp.env`, `Caddyfile`) 은 `setup-ec2.sh` 가 base64 로 user-data 에
-> 인라인하고, 재배포 시 `deploy.sh` 가 SSM Send-Command 로 직접 EC2 에
-> 덮어쓴다. 로컬 레포 ↔ EC2 동기화는 `make aws-deploy` 가 책임진다.
+> **EC2 는 Git 을 사용하지 않는다.** 4개 config 파일(`compose.aws-mvp.yml`,
+> `aws-mvp.env`, `Caddyfile`, `litellm/config.yaml`) 은 `setup-ec2.sh` 가
+> base64 로 user-data 에 인라인하고, 재배포 시 `deploy.sh` 가 SSM Send-Command
+> 로 직접 EC2 에 덮어쓴다. 로컬 레포 ↔ EC2 동기화는 `make aws-deploy` 가 책임진다.
 
 ## 토폴로지
 
@@ -23,8 +23,11 @@
             ┌─── EC2 t3.small (ap-northeast-2) ───────────┐
             │  Caddy :443/:80  → reverse proxy            │
             │      open-webui :8080 (ECR image)           │
-            │           └─ OPENAI_API_BASE_URL=           │
-            │              http://onprem-agent:8000/v1 ◀┐ │
+            │       OPENAI_API_BASE_URLS (공존 2개):      │
+            │        [0] http://onprem-agent:8000/v1 ◀──┐ │
+            │        [1] http://litellm:4000/v1 ──┐     │ │
+            │      litellm :4000 (Bedrock 변환) ◀──┘     │ │
+            │           └──HTTPS(bearer)──> Bedrock      │ │
             │  tailscaled (hostname=aws-frontend)       │ │
             │  /data (EBS gp3 20GB)                     │ │
             └───────────────────────────────────────────┼─┘
@@ -34,6 +37,13 @@
             │  compose.onprem.yml: agent-api:8000, vllm,..│
             └─────────────────────────────────────────────┘
 ```
+
+OpenWebUI 모델 드롭다운에 백엔드 2개가 *공존* 노출된다:
+- **온프레 agent-api** (SMR 에이전트 — RAG/검증/재현성 이벤트 경유)
+- **litellm → Bedrock** (raw Claude passthrough — 에이전트 로직 미경유, fallback/비교용)
+
+⚠ litellm 경로는 사용자 입력이 raw 로 AWS Bedrock 으로 송신된다(재현성 이벤트
+없음). 재현 가능한 실행은 온프레 agent-api connection 에서만 보장된다.
 
 ## 파일 구성
 
@@ -48,8 +58,8 @@ infra/aws/
 └── .state/             ← 생성된 ID 캐시 (gitignore — InstanceId/EIP/PEM)
 ```
 
-`infra/compose/compose.aws-mvp.yml`, `infra/env/aws-mvp.env`, `infra/caddy/Caddyfile`
-은 EC2 위에서 컨테이너 런타임이 사용한다.
+`infra/compose/compose.aws-mvp.yml`, `infra/env/aws-mvp.env`, `infra/caddy/Caddyfile`,
+`infra/litellm/config.yaml` 은 EC2 위에서 컨테이너 런타임이 사용한다.
 
 ## 사전 준비
 
@@ -64,10 +74,16 @@ infra/aws/
 ### 1. 시크릿 등록
 ```bash
 make aws-secrets-put
-# WEBUI_SECRET_KEY: 자동 생성
-# OPENAI_API_KEY: 백엔드 토큰 입력 (검증 안 하면 'dummy')
-# Tailscale authkey: Tailscale 어드민에서 발급한 키 입력
+# WEBUI_SECRET_KEY:   자동 생성
+# OPENAI_API_KEY:     온프레 agent-api 토큰 입력 (검증 안 하면 'dummy')
+# Tailscale authkey:  Tailscale 어드민에서 발급한 키 입력
+# bedrock_api_key:    Bedrock 임시 API 키(bearer token) 입력
+# litellm_master_key: 자동 생성
 ```
+
+> **Bedrock 모델 ID 확인**: `infra/litellm/config.yaml` 의 inference-profile ID 는
+> 배포 region 에서 ACTIVE 한 것이어야 한다. 추측 금지 —
+> `aws bedrock list-inference-profiles --region ap-northeast-2` 로 확인해 박는다.
 
 ### 2. ECR 레포 + EC2 + EBS + EIP + SG + IAM Role 생성
 ```bash
@@ -156,8 +172,22 @@ sudo docker logs caddy
 ### OpenWebUI 가 백엔드 모델을 못 봄
 ```bash
 make aws-ssh
+# [0] 온프레 agent-api
 docker exec open-webui curl -sf http://onprem-agent:8000/v1/models
-# 실패 → tailnet 문제. 성공인데 UI 에서 안 보이면 OPENAI_API_KEY 토큰 불일치.
+# 실패 → tailnet 문제. 성공인데 UI 에서 안 보이면 OPENAI_API_KEYS[0] 토큰 불일치.
+```
+
+### Bedrock(litellm) 모델이 안 보임
+```bash
+make aws-ssh
+docker logs litellm
+# [1] litellm → Bedrock. master key 로 모델 목록 확인:
+docker exec litellm curl -sf -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  http://localhost:4000/v1/models
+# - 인증 401: AWS_BEARER_TOKEN_BEDROCK 만료/오타 (SSM bedrock_api_key 점검)
+# - 모델 없음/AccessDenied: config.yaml inference-profile ID 가 region 에서 미가용
+#   (aws bedrock list-inference-profiles 로 ACTIVE ID 확인)
+# - UI 에 안 뜸: OPENAI_API_KEYS[1] 이 litellm_master_key 와 불일치
 ```
 
 ### 데이터 백업
@@ -182,6 +212,10 @@ aws ec2 create-snapshot \
 | EIP (부착 중) | $0 |
 | 데이터 전송 | ~$1 |
 | ECR 스토리지 (이미지 5개) | <$1 |
-| **합계** | **~$20 / 월** |
+| Bedrock (사용량 기반, litellm 경유) | 호출량 비례 (별도) |
+| **합계** | **~$20 / 월 + Bedrock 사용량** |
+
+> litellm 컨테이너는 t3.small 안에서 OpenWebUI 와 같이 돈다(추가 인스턴스 없음).
+> Bedrock 비용만 토큰 사용량에 비례해 별도 과금된다.
 
 DNS 는 회사 도메인 등록기관에서 무료, Tailscale 은 Free plan (3 user/100 device 이하).

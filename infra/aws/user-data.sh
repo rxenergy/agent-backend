@@ -13,6 +13,7 @@
 #   COMPOSE_B64    -> infra/compose/compose.aws-mvp.yml base64 (line-wrap 없음)
 #   ENV_B64        -> infra/env/aws-mvp.env base64
 #   CADDY_B64      -> infra/caddy/Caddyfile base64
+#   LITELLM_B64    -> infra/litellm/config.yaml base64
 #
 # Git 의존성 없음. 3개 config 파일을 user-data 에 직접 박아 EC2 에 기록.
 # 재배포 시 새 config 가 필요하면 deploy.sh 가 SSM Send-Command 로 갱신.
@@ -81,30 +82,59 @@ else
     mkdir -p /data/open-webui /data/caddy/data /data/caddy/config
 fi
 
+# 4.5 swap (멱등) — t3.small(2GB RAM)에 컨테이너 3개(open-webui+caddy+litellm)를
+# 올리면 메모리가 빠듯해 OOM 으로 호스트가 행에 빠진다. 2GB swapfile 로 완충한다.
+# swappiness 를 낮춰(20) 평시엔 RAM 우선, 압박 시에만 swap 으로 흘린다.
+if ! swapon --show | grep -q '/swapfile'; then
+    fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+fi
+grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+sysctl -w vm.swappiness=20 || true
+grep -q 'vm.swappiness' /etc/sysctl.conf || echo 'vm.swappiness=20' >> /etc/sysctl.conf
+
 # 5. 시크릿 → /etc/agent-frontend/aws-mvp.secret.env
 mkdir -p /etc/agent-frontend
 chmod 700 /etc/agent-frontend
+
+ssm_get() {
+    aws ssm get-parameter --region "${REGION}" \
+        --name "$1" --with-decryption --query Parameter.Value --output text
+}
+
+WEBUI_SECRET_KEY_VAL=$(ssm_get /rx-agent/frontend/webui_secret_key)
+# 온프레 agent-api 호출 토큰(connection[0]). 백엔드가 검증 안 하면 'dummy'.
+ONPREM_TOKEN=$(ssm_get /rx-agent/frontend/openai_api_key)
+# Bedrock bearer token → litellm. litellm master key → OpenWebUI 가 litellm 호출 시 사용.
+BEDROCK_API_KEY_VAL=$(ssm_get /rx-agent/frontend/bedrock_api_key)
+LITELLM_MASTER_KEY_VAL=$(ssm_get /rx-agent/frontend/litellm_master_key)
+
 {
-    echo "WEBUI_SECRET_KEY=$(aws ssm get-parameter --region ${REGION} \
-        --name /rx-agent/frontend/webui_secret_key \
-        --with-decryption --query Parameter.Value --output text)"
-    echo "OPENAI_API_KEY=$(aws ssm get-parameter --region ${REGION} \
-        --name /rx-agent/frontend/openai_api_key \
-        --with-decryption --query Parameter.Value --output text)"
+    echo "WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY_VAL}"
+    # OPENAI_API_BASE_URLS 와 index 로 짝지음: [0]=온프레 토큰, [1]=litellm master key.
+    echo "OPENAI_API_KEYS=${ONPREM_TOKEN};${LITELLM_MASTER_KEY_VAL}"
+    # litellm 컨테이너용.
+    echo "AWS_BEARER_TOKEN_BEDROCK=${BEDROCK_API_KEY_VAL}"
+    echo "LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY_VAL}"
 } > /etc/agent-frontend/aws-mvp.secret.env
 chmod 600 /etc/agent-frontend/aws-mvp.secret.env
 
 # 6. Config 파일을 /opt/agent-saas/ 에 기록 (git clone 대신 base64 inline)
 #    deploy.sh 가 추후 같은 위치를 SSM 으로 덮어쓴다.
 APP_DIR=/opt/agent-saas
-mkdir -p "${APP_DIR}/infra/compose" "${APP_DIR}/infra/env" "${APP_DIR}/infra/caddy"
+mkdir -p "${APP_DIR}/infra/compose" "${APP_DIR}/infra/env" "${APP_DIR}/infra/caddy" \
+         "${APP_DIR}/infra/litellm"
 
 echo "@@COMPOSE_B64@@" | base64 -d > "${APP_DIR}/infra/compose/compose.aws-mvp.yml"
 echo "@@ENV_B64@@"     | base64 -d > "${APP_DIR}/infra/env/aws-mvp.env"
 echo "@@CADDY_B64@@"   | base64 -d > "${APP_DIR}/infra/caddy/Caddyfile"
+echo "@@LITELLM_B64@@" | base64 -d > "${APP_DIR}/infra/litellm/config.yaml"
 
 echo "[user-data] config 파일 기록 완료:"
-ls -la "${APP_DIR}/infra/compose/" "${APP_DIR}/infra/env/" "${APP_DIR}/infra/caddy/"
+ls -la "${APP_DIR}/infra/compose/" "${APP_DIR}/infra/env/" \
+       "${APP_DIR}/infra/caddy/" "${APP_DIR}/infra/litellm/"
 
 # 7. ECR 로그인 (인스턴스 Role 의 ECR ReadOnly 권한 사용)
 aws ecr get-login-password --region "${REGION}" \

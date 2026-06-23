@@ -10,7 +10,7 @@
 #      tag:frontend-aws. tailnet 안에서 onprem-agent:8000 도달 가능.
 #   2) /data (EBS gp3) 마운트 — OpenWebUI SQLite + Caddy ACME 데이터 영속화.
 #   3) /etc/agent-frontend/aws-mvp.secret.env 가 SSM 에서 생성됨
-#      (WEBUI_SECRET_KEY, OPENAI_API_KEY 등).
+#      (WEBUI_SECRET_KEY, OPENAI_API_KEYS, AWS_BEARER_TOKEN_BEDROCK, LITELLM_MASTER_KEY).
 #
 # Usage:
 #   docker compose \
@@ -29,9 +29,12 @@ services:
     expose:
       - "8080"
     environment:
-      # OpenAI-compatible 백엔드 (Tailscale MagicDNS)
-      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy}
+      # OpenAI-compatible 백엔드 2개를 *공존* 노출(세미콜론 구분, index 로 짝지음):
+      #   [0] 온프레 agent-api(SMR 에이전트, Tailscale MagicDNS)
+      #   [1] litellm 사이드카(raw Bedrock Claude passthrough)
+      # 단수 OPENAI_API_BASE_URL/OPENAI_API_KEY 대신 복수형(URLS/KEYS)을 쓴다.
+      OPENAI_API_BASE_URLS: ${OPENAI_API_BASE_URLS}
+      OPENAI_API_KEYS: ${OPENAI_API_KEYS}
       ENABLE_OPENAI_API: "true"
       ENABLE_OLLAMA_API: "false"
 
@@ -57,6 +60,43 @@ services:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
       interval: 10s
       timeout: 3s
+      retries: 12
+      start_period: 30s
+    # litellm 사이드카가 떠 있어야 Bedrock connection 이 모델 목록을 채운다.
+    # service_started 만 — litellm healthcheck 통과 전이라도 OpenWebUI 는 부팅하고,
+    # 모델 목록은 첫 폴링에서 채워진다(온프레 connection 은 litellm 과 무관).
+    depends_on:
+      litellm:
+        condition: service_started
+
+  litellm:
+    # off-the-shelf OpenAI↔Bedrock 변환 프록시. 신규 코드 없음 — config.yaml 만.
+    image: ghcr.io/berriai/litellm:${LITELLM_VERSION:-main-stable}
+    container_name: litellm
+    restart: unless-stopped
+    # t3.small(2GB RAM) OOM 방지 — litellm 가 호스트 메모리를 무제한 점유하지 못하게
+    # 상한을 둔다. 한도 초과 시 호스트 전체가 행에 빠지는 대신 컨테이너만 OOMKill →
+    # restart 된다. swap(호스트 2GB)이 추가 완충. open-webui/caddy 몫을 남기는 값.
+    mem_limit: ${LITELLM_MEM_LIMIT:-768m}
+    # 호스트에 노출하지 않는다 — open-webui 만 compose 네트워크에서 접근.
+    expose:
+      - "4000"
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
+    environment:
+      # Bedrock region + bearer token(임시 API 키). 토큰이 있으면 LiteLLM 이
+      # SigV4/boto3 를 건너뛰고 Authorization: Bearer 로 호출한다.
+      AWS_REGION: ${AWS_REGION}
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK}
+      # OpenWebUI → litellm 인증 마스터 키(secret.env 로 주입).
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+    volumes:
+      - ../litellm/config.yaml:/etc/litellm/config.yaml:ro
+    healthcheck:
+      # litellm 이미지에는 curl 이 없다 — python(이미지에 항상 존재)으로 liveliness
+      # 를 친다. curl 기반 healthcheck 는 영원히 starting/unhealthy 에 머문다.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:4000/health/liveliness',timeout=3).status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
       retries: 12
       start_period: 30s
 

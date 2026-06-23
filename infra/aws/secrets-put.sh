@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# SSM Parameter Store 에 시크릿 3개를 등록한다.
+# SSM Parameter Store 에 시크릿 5개를 등록한다.
 # 이미 존재하면 그대로 두고, 없을 때만 prompt 로 입력 받아 등록.
 #
 # 등록 항목:
 #   /rx-agent/frontend/webui_secret_key      — OpenWebUI 세션 서명 키 (랜덤 자동 생성)
-#   /rx-agent/frontend/openai_api_key        — 백엔드 호출 토큰 (dummy 또는 실제 키)
+#   /rx-agent/frontend/openai_api_key        — 온프레 agent-api 호출 토큰 (dummy 또는 실제 키)
 #   /rx-agent/frontend/tailscale_authkey     — Tailscale auth key (admin console 발급)
+#   /rx-agent/frontend/bedrock_api_key       — Bedrock 임시 API 키(bearer token) → litellm
+#   /rx-agent/frontend/litellm_master_key    — OpenWebUI→litellm 인증 키 (랜덤 자동 생성)
 
 set -euo pipefail
 
@@ -49,5 +51,12 @@ put_if_missing "/rx-agent/frontend/openai_api_key" \
 
 put_if_missing "/rx-agent/frontend/tailscale_authkey" \
     "Tailscale reusable auth key (https://login.tailscale.com/admin/settings/keys)"
+
+put_if_missing "/rx-agent/frontend/bedrock_api_key" \
+    "Bedrock 임시 API 키 (bedrock-api-key-... bearer token)"
+
+put_if_missing "/rx-agent/frontend/litellm_master_key" \
+    "litellm master key" \
+    "openssl rand -hex 32"
 
 log "완료. 다음 단계: make aws-setup (첫 실행) 또는 make aws-deploy (이미 setup 완료 시)"

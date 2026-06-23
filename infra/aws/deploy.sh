@@ -36,10 +36,11 @@ ECR_REGISTRY="${IMAGE%%/*}"
 COMPOSE_B64=$(base64 -w0 < "${REPO_ROOT}/infra/compose/compose.aws-mvp.yml")
 ENV_B64=$(base64 -w0     < "${REPO_ROOT}/infra/env/aws-mvp.env")
 CADDY_B64=$(base64 -w0   < "${REPO_ROOT}/infra/caddy/Caddyfile")
+LITELLM_B64=$(base64 -w0 < "${REPO_ROOT}/infra/litellm/config.yaml")
 
 # SSM Send-Command 의 parameter list 는 JSON. base64 는 안전한 alphabet 이라
 # 그대로 commands 배열에 박을 수 있다. payload 합산 100KB 미만이면 OK.
-TOTAL=$((${#COMPOSE_B64} + ${#ENV_B64} + ${#CADDY_B64}))
+TOTAL=$((${#COMPOSE_B64} + ${#ENV_B64} + ${#CADDY_B64} + ${#LITELLM_B64}))
 log "Config payload: ${TOTAL} bytes (limit ~100KB)"
 
 # 임시 JSON parameters 파일 (긴 문자열을 안전하게 전달)
@@ -50,10 +51,18 @@ cat > "${PARAMS_FILE}" <<EOF
 {
   "commands": [
     "set -e",
-    "mkdir -p /opt/agent-saas/infra/compose /opt/agent-saas/infra/env /opt/agent-saas/infra/caddy",
+    "mkdir -p /opt/agent-saas/infra/compose /opt/agent-saas/infra/env /opt/agent-saas/infra/caddy /opt/agent-saas/infra/litellm",
     "echo ${COMPOSE_B64} | base64 -d > /opt/agent-saas/infra/compose/compose.aws-mvp.yml",
     "echo ${ENV_B64} | base64 -d > /opt/agent-saas/infra/env/aws-mvp.env",
     "echo ${CADDY_B64} | base64 -d > /opt/agent-saas/infra/caddy/Caddyfile",
+    "echo ${LITELLM_B64} | base64 -d > /opt/agent-saas/infra/litellm/config.yaml",
+    "mkdir -p /etc/agent-frontend && chmod 700 /etc/agent-frontend",
+    "WK=\$(aws ssm get-parameter --region ${REGION} --name /rx-agent/frontend/webui_secret_key --with-decryption --query Parameter.Value --output text)",
+    "ON=\$(aws ssm get-parameter --region ${REGION} --name /rx-agent/frontend/openai_api_key --with-decryption --query Parameter.Value --output text)",
+    "BK=\$(aws ssm get-parameter --region ${REGION} --name /rx-agent/frontend/bedrock_api_key --with-decryption --query Parameter.Value --output text)",
+    "LK=\$(aws ssm get-parameter --region ${REGION} --name /rx-agent/frontend/litellm_master_key --with-decryption --query Parameter.Value --output text)",
+    "printf 'WEBUI_SECRET_KEY=%s\\\\nOPENAI_API_KEYS=%s;%s\\\\nAWS_BEARER_TOKEN_BEDROCK=%s\\\\nLITELLM_MASTER_KEY=%s\\\\n' \$WK \$ON \$LK \$BK \$LK > /etc/agent-frontend/aws-mvp.secret.env",
+    "chmod 600 /etc/agent-frontend/aws-mvp.secret.env",
     "mkdir -p /data/open-webui /data/caddy/data /data/caddy/config",
     "chown -R 1000:1000 /data/open-webui",
     "cd /opt/agent-saas/infra/compose",
