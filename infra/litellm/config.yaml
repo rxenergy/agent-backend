@@ -30,6 +30,11 @@ model_list:
 litellm_settings:
   # OpenWebUI 가 보내는 미지원 파라미터는 조용히 버린다(400 방지).
   drop_params: true
+  # pre-call 가드: Bedrock 직결 경로의 대화 이력 차단(거버넌스 누수 방지).
+  # `<module>.<instance>` — LiteLLM 이 config.yaml 디렉토리(=/etc/litellm) 기준으로
+  # strip_history.py 를 import 하므로, 그 파일이 같은 디렉토리에 마운트돼 있어야 한다
+  # (compose.aws-mvp.yml litellm volumes 참조).
+  callbacks: strip_history.proxy_handler_instance
 
 general_settings:
   # OpenWebUI → litellm 인증. compose 가 env 로 주입(SSM SecureString).

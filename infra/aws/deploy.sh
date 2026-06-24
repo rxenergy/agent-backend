@@ -37,10 +37,13 @@ COMPOSE_B64=$(base64 -w0 < "${REPO_ROOT}/infra/compose/compose.aws-mvp.yml")
 ENV_B64=$(base64 -w0     < "${REPO_ROOT}/infra/env/aws-mvp.env")
 CADDY_B64=$(base64 -w0   < "${REPO_ROOT}/infra/caddy/Caddyfile")
 LITELLM_B64=$(base64 -w0 < "${REPO_ROOT}/infra/litellm/config.yaml")
+# pre-call 가드 callback 모듈 — config.yaml 이 strip_history.proxy_handler_instance
+# 를 참조하므로 같은 디렉토리에 함께 전송해야 litellm 이 import 할 수 있다.
+STRIP_B64=$(base64 -w0   < "${REPO_ROOT}/infra/litellm/strip_history.py")
 
 # SSM Send-Command 의 parameter list 는 JSON. base64 는 안전한 alphabet 이라
 # 그대로 commands 배열에 박을 수 있다. payload 합산 100KB 미만이면 OK.
-TOTAL=$((${#COMPOSE_B64} + ${#ENV_B64} + ${#CADDY_B64} + ${#LITELLM_B64}))
+TOTAL=$((${#COMPOSE_B64} + ${#ENV_B64} + ${#CADDY_B64} + ${#LITELLM_B64} + ${#STRIP_B64}))
 log "Config payload: ${TOTAL} bytes (limit ~100KB)"
 
 # 임시 JSON parameters 파일 (긴 문자열을 안전하게 전달)
@@ -56,6 +59,7 @@ cat > "${PARAMS_FILE}" <<EOF
     "echo ${ENV_B64} | base64 -d > /opt/agent-saas/infra/env/aws-mvp.env",
     "echo ${CADDY_B64} | base64 -d > /opt/agent-saas/infra/caddy/Caddyfile",
     "echo ${LITELLM_B64} | base64 -d > /opt/agent-saas/infra/litellm/config.yaml",
+    "echo ${STRIP_B64} | base64 -d > /opt/agent-saas/infra/litellm/strip_history.py",
     "mkdir -p /etc/agent-frontend && chmod 700 /etc/agent-frontend",
     "WK=\$(aws ssm get-parameter --region ${REGION} --name /rx-agent/frontend/webui_secret_key --with-decryption --query Parameter.Value --output text)",
     "ON=\$(aws ssm get-parameter --region ${REGION} --name /rx-agent/frontend/openai_api_key --with-decryption --query Parameter.Value --output text)",

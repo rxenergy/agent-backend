@@ -116,6 +116,12 @@ ENV ENABLE_OPENAI_API=true \
     ENABLE_DIRECT_CONNECTIONS=false
 
 # ---- Disable features outside MVP scope (spec §5.2) --------------------------
+# title/tags/follow-up/autocomplete 생성을 모두 끈다. 보조 task model 미지정 시
+# OpenWebUI 는 답변 완료 후 대화 전문을 같은 /v1/chat/completions 로 재전송해
+# 제목 등을 생성하는데, 그 요청이 agent 백엔드의 풀 workflow 로 흘러들어
+# (백엔드가 <chat_history> scaffolding 을 마지막 사용자 발화로 환원) 동일 질의가
+# 한 번 더 돌고 Phoenix 에 중복 trace 가 집계된다. 모든 프로파일 공통 — env 가
+# 권위(ENABLE_PERSISTENT_CONFIG=false)라 이 한 곳이 단일 소스다.
 ENV ENABLE_COMMUNITY_SHARING=false \
     ENABLE_EVALUATION_ARENA_MODELS=false \
     ENABLE_RAG_WEB_SEARCH=false \
@@ -125,7 +131,8 @@ ENV ENABLE_COMMUNITY_SHARING=false \
     ENABLE_CHANNELS=false \
     ENABLE_AUTOCOMPLETE_GENERATION=false \
     ENABLE_TAGS_GENERATION=false \
-    ENABLE_TITLE_GENERATION=true
+    ENABLE_FOLLOW_UP_GENERATION=false \
+    ENABLE_TITLE_GENERATION=false
 
 # ---- UI 군더더기 제거: 사용자 권한(PersistentConfig) 차원의 기능 차단 -------
 # 위 ENABLE_* 는 "서버에서 기능 자체를 켜고/끄는" 글로벌 토글이고, 아래

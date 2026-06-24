@@ -38,6 +38,14 @@ services:
       ENABLE_OPENAI_API: "true"
       ENABLE_OLLAMA_API: "false"
 
+      # 보조 task(title/tags/follow-up/autocomplete) 생성을 끈다. task model 미지정
+      # 시 OpenWebUI 가 답변 후 대화 전문을 onprem agent 로 재전송 → 동일 질의가
+      # 풀 workflow 로 한 번 더 돌며 Phoenix 에 중복 trace 가 집계되는 것을 막는다.
+      ENABLE_TITLE_GENERATION: ${ENABLE_TITLE_GENERATION:-false}
+      ENABLE_TAGS_GENERATION: ${ENABLE_TAGS_GENERATION:-false}
+      ENABLE_AUTOCOMPLETE_GENERATION: ${ENABLE_AUTOCOMPLETE_GENERATION:-false}
+      ENABLE_FOLLOW_UP_GENERATION: ${ENABLE_FOLLOW_UP_GENERATION:-false}
+
       # Auth 정책은 frontend/Dockerfile 의 ENV 가 기본값 — 여기서는 시크릿만.
       WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}
       WEBUI_NAME: ${OPEN_WEBUI_NAME:-RX AI Agent v.1.0}
@@ -91,6 +99,9 @@ services:
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
     volumes:
       - ../litellm/config.yaml:/etc/litellm/config.yaml:ro
+      # callback 모듈(strip_history.py)은 config.yaml 과 같은 디렉토리에 있어야
+      # LiteLLM 이 `strip_history.proxy_handler_instance` 를 import 할 수 있다.
+      - ../litellm/strip_history.py:/etc/litellm/strip_history.py:ro
     healthcheck:
       # litellm 이미지에는 curl 이 없다 — python(이미지에 항상 존재)으로 liveliness
       # 를 친다. curl 기반 healthcheck 는 영원히 starting/unhealthy 에 머문다.
