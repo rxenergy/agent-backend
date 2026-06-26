@@ -5,18 +5,15 @@
 # .state/user-data.rendered.sh 로 저장해 EC2 launch 시 주입한다.
 # 직접 실행하지 말 것.
 #
-# 치환되는 placeholder (주의: 아래 목록은 토큰을 의도적으로 분리 표기한다.
-# setup-ec2.sh 의 sed -g 치환이 이 주석까지 확장해 user-data 를 2배로
-# 부풀리는 것을 막기 위함 — 실제 토큰은 @@ 로 감싼 한 곳에서만 등장해야 한다):
+# 치환되는 placeholder:
 #   AWS_REGION     -> AWS region
 #   ECR_REGISTRY   -> ECR registry URL (account.dkr.ecr.region.amazonaws.com)
-#   COMPOSE_B64    -> infra/compose/compose.aws-mvp.yml base64 (line-wrap 없음)
-#   ENV_B64        -> infra/env/aws-mvp.env base64
-#   CADDY_B64      -> infra/caddy/Caddyfile base64
-#   LITELLM_B64    -> infra/litellm/config.yaml base64
+#   CONFIG_BUCKET  -> config 운반용 S3 버킷명
+#   CONFIG_PREFIX  -> 버킷 내 prefix (aws-mvp)
 #
-# Git 의존성 없음. 3개 config 파일을 user-data 에 직접 박아 EC2 에 기록.
-# 재배포 시 새 config 가 필요하면 deploy.sh 가 SSM Send-Command 로 갱신.
+# Git 의존성 없음. config(compose/env/Caddyfile/litellm/searxng)는 S3 에서 받는다
+# (setup-ec2.sh 가 업로드, 인스턴스 role 의 config-bucket-read 권한으로 sync).
+# 재배포 시 새 config 는 deploy.sh 가 S3 재업로드 후 SSM 으로 sync 시킨다.
 
 set -euo pipefail
 exec > >(tee -a /var/log/user-data.log) 2>&1
@@ -24,6 +21,8 @@ echo "[user-data] start at $(date -Iseconds)"
 
 REGION="@@AWS_REGION@@"
 ECR_REGISTRY="@@ECR_REGISTRY@@"
+CONFIG_BUCKET="@@CONFIG_BUCKET@@"
+CONFIG_PREFIX="@@CONFIG_PREFIX@@"
 
 # 1. Packages
 dnf -y update
@@ -121,20 +120,16 @@ LITELLM_MASTER_KEY_VAL=$(ssm_get /rx-agent/frontend/litellm_master_key)
 } > /etc/agent-frontend/aws-mvp.secret.env
 chmod 600 /etc/agent-frontend/aws-mvp.secret.env
 
-# 6. Config 파일을 /opt/agent-saas/ 에 기록 (git clone 대신 base64 inline)
-#    deploy.sh 가 추후 같은 위치를 SSM 으로 덮어쓴다.
+# 6. Config 파일을 S3 에서 /opt/agent-saas/infra/ 로 sync (git clone 불요).
+#    setup-ec2.sh 가 s3://${CONFIG_BUCKET}/${CONFIG_PREFIX}/ 에 업로드해 둔다.
+#    인스턴스 role 의 config-bucket-read 권한으로 받는다. 디렉토리 구조 그대로 복원.
 APP_DIR=/opt/agent-saas
-mkdir -p "${APP_DIR}/infra/compose" "${APP_DIR}/infra/env" "${APP_DIR}/infra/caddy" \
-         "${APP_DIR}/infra/litellm"
+mkdir -p "${APP_DIR}/infra"
 
-echo "@@COMPOSE_B64@@" | base64 -d > "${APP_DIR}/infra/compose/compose.aws-mvp.yml"
-echo "@@ENV_B64@@"     | base64 -d > "${APP_DIR}/infra/env/aws-mvp.env"
-echo "@@CADDY_B64@@"   | base64 -d > "${APP_DIR}/infra/caddy/Caddyfile"
-echo "@@LITELLM_B64@@" | base64 -d > "${APP_DIR}/infra/litellm/config.yaml"
+aws s3 sync "s3://${CONFIG_BUCKET}/${CONFIG_PREFIX}/" "${APP_DIR}/infra/" --delete
 
-echo "[user-data] config 파일 기록 완료:"
-ls -la "${APP_DIR}/infra/compose/" "${APP_DIR}/infra/env/" \
-       "${APP_DIR}/infra/caddy/" "${APP_DIR}/infra/litellm/"
+echo "[user-data] config S3 sync 완료:"
+find "${APP_DIR}/infra" -type f | sort
 
 # 7. ECR 로그인 (인스턴스 Role 의 ECR ReadOnly 권한 사용)
 aws ecr get-login-password --region "${REGION}" \

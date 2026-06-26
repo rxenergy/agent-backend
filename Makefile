@@ -38,7 +38,7 @@ COMPOSE_ONPREM_SUB := docker -c $(SUB_CTX) compose \
   build-onprem up-onprem up-onprem-main up-onprem-sub down-onprem down-onprem-main down-onprem-sub \
   logs-onprem logs-onprem-sub ps-onprem ps-onprem-sub clean-onprem export-onprem _onprem-sub-ctx _guard-local-only \
   build-onprem-bedrock up-onprem-bedrock down-onprem-bedrock logs-onprem-bedrock ps-onprem-bedrock \
-  aws-ecr-login aws-build aws-push aws-deploy aws-setup aws-destroy aws-ssh aws-logs aws-status aws-secrets-put
+  aws-ecr-login aws-build aws-push aws-deploy aws-setup aws-setup-s3 aws-destroy aws-ssh aws-logs aws-status aws-secrets-put
 
 help:
 	@echo "Targets:"
@@ -314,6 +314,11 @@ aws-push: aws-ecr-login aws-build
 
 aws-setup:
 	AWS_REGION=$(AWS_REGION) ECR_REGISTRY=$(ECR_REGISTRY) ./infra/aws/setup-ec2.sh
+
+# 일회성 — config 운반용 S3 버킷 + EC2 role read 권한 프로비저닝.
+# 이미 배포된(=aws-setup 재실행 불가) 인스턴스에 S3 운반을 적용할 때 1회 실행.
+aws-setup-s3:
+	AWS_REGION=$(AWS_REGION) ./infra/aws/setup-s3-config.sh
 
 aws-secrets-put:
 	AWS_REGION=$(AWS_REGION) ./infra/aws/secrets-put.sh

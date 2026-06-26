@@ -35,6 +35,7 @@ KEY_NAME="rx-agent-frontend-key"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STATE_DIR="${SCRIPT_DIR}/.state"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 mkdir -p "${STATE_DIR}"
 
 log()  { printf '\033[1;34m[setup-ec2]\033[0m %s\n' "$*"; }
@@ -43,6 +44,13 @@ fail() { printf '\033[1;31m[setup-ec2]\033[0m %s\n' "$*" >&2; exit 1; }
 [ -f "${STATE_DIR}/instance-id" ] && fail "이미 setup 완료 상태입니다 (${STATE_DIR}/instance-id 존재). 먼저 make aws-destroy 후 재시도."
 
 aws sts get-caller-identity >/dev/null || fail "aws cli 자격증명 실패. aws configure 또는 AWS_PROFILE 점검."
+
+# config 운반용 S3 버킷. 시크릿이 아닌 config(compose/env/Caddyfile/litellm/searxng)
+# 를 담는다. user-data base64 inline 의 16KB 한도를 없애기 위한 표준 패턴.
+# 시크릿은 여전히 SSM Parameter Store(아래 role 정책) — S3 에는 올리지 않는다.
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+CONFIG_BUCKET="${CONFIG_BUCKET:-rx-agent-frontend-config-${ACCOUNT_ID}}"
+CONFIG_PREFIX="aws-mvp"
 
 # ─────────────────────────────────────────────────────────────────────────
 # 1. IAM Role + Instance Profile
@@ -84,6 +92,8 @@ if ! aws iam get-role --role-name "${ROLE_NAME}" >/dev/null 2>&1; then
         ]
       }"
 fi
+# config S3 버킷 생성 + role 의 config-bucket-read 권한은 7단계에서
+# setup-s3-config.sh 호출로 일괄 처리(중복 제거, role 생성 직후라 안전).
 
 if ! aws iam get-instance-profile --instance-profile-name "${PROFILE_NAME}" >/dev/null 2>&1; then
     aws iam create-instance-profile --instance-profile-name "${PROFILE_NAME}" >/dev/null
@@ -185,38 +195,47 @@ AMI_ID=$(aws ec2 describe-images --region "${REGION}" --owners amazon \
 log "    AMI=${AMI_ID}"
 
 # ─────────────────────────────────────────────────────────────────────────
-# 7. user-data (rendered with ECR_REGISTRY + 3개 config 파일 base64 인라인)
-#    Git 의존성을 제거하기 위해 compose / env / Caddyfile 을 user-data 안에
-#    직접 박아 넣는다. EC2 부팅 시 base64 decode 해서 /opt/agent-saas/ 에 기록.
+# 7. config → S3 업로드 + user-data 렌더링
+#    Git 의존성 없이 config(compose/env/Caddyfile/litellm/searxng)를 EC2 로 운반.
+#    base64 inline(16KB user-data 한도) 대신 S3 를 쓴다 — 한도 없음, 향후 config
+#    증가에도 안전. EC2 는 부팅 시 `aws s3 sync` 한 번으로 /opt/agent-saas/infra/
+#    전체를 재현한다(인스턴스 role 의 config-bucket-read 권한 사용).
+#    시크릿은 S3 에 올리지 않는다 — 기존대로 SSM Parameter Store.
 # ─────────────────────────────────────────────────────────────────────────
-log "7/8 user-data 렌더링 (config 파일 인라인)"
+log "7/8 config S3 업로드 (s3://${CONFIG_BUCKET}/${CONFIG_PREFIX}/) + user-data 렌더링"
+
+# 7a. 버킷 생성 + role 의 config-bucket-read 권한 (일회성 셋업 스크립트에 위임,
+#     멱등). 위 1단계에서 role 을 이미 만들었으므로 정책이 붙는다.
+AWS_REGION="${REGION}" ROLE_NAME="${ROLE_NAME}" \
+    CONFIG_BUCKET="${CONFIG_BUCKET}" CONFIG_PREFIX="${CONFIG_PREFIX}" \
+    "${SCRIPT_DIR}/setup-s3-config.sh"
+
+# 7b. config 디렉토리를 S3 로 sync. EC2 디렉토리 구조(infra/...)를 그대로 보존.
+upload_config() {  # $1=로컬상대경로  $2=S3 키
+    aws s3 cp "${REPO_ROOT}/infra/$1" "s3://${CONFIG_BUCKET}/${CONFIG_PREFIX}/$2" >/dev/null
+}
+upload_config compose/compose.aws-mvp.yml compose/compose.aws-mvp.yml
+upload_config env/aws-mvp.env             env/aws-mvp.env
+upload_config caddy/Caddyfile             caddy/Caddyfile
+upload_config litellm/config.yaml         litellm/config.yaml
+upload_config litellm/strip_history.py    litellm/strip_history.py
+upload_config searxng/settings.yml        searxng/settings.yml
+log "    config 6개 업로드 완료"
+
+# 7c. user-data 렌더링 — 이제 config 를 inline 하지 않고 placeholder 4개만 치환.
 USERDATA_FILE="${STATE_DIR}/user-data.rendered.sh"
-
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-COMPOSE_B64=$(base64 -w0 < "${REPO_ROOT}/infra/compose/compose.aws-mvp.yml")
-ENV_B64=$(base64 -w0     < "${REPO_ROOT}/infra/env/aws-mvp.env")
-CADDY_B64=$(base64 -w0   < "${REPO_ROOT}/infra/caddy/Caddyfile")
-LITELLM_B64=$(base64 -w0 < "${REPO_ROOT}/infra/litellm/config.yaml")
-
 sed -e "s|@@AWS_REGION@@|${REGION}|g" \
     -e "s|@@ECR_REGISTRY@@|${ECR_REG}|g" \
-    -e "s|@@COMPOSE_B64@@|${COMPOSE_B64}|g" \
-    -e "s|@@ENV_B64@@|${ENV_B64}|g" \
-    -e "s|@@CADDY_B64@@|${CADDY_B64}|g" \
-    -e "s|@@LITELLM_B64@@|${LITELLM_B64}|g" \
+    -e "s|@@CONFIG_BUCKET@@|${CONFIG_BUCKET}|g" \
+    -e "s|@@CONFIG_PREFIX@@|${CONFIG_PREFIX}|g" \
     "${SCRIPT_DIR}/user-data.sh" > "${USERDATA_FILE}"
 
-# user-data 크기 검증.
-# AWS RunInstances 는 base64 인코딩된 user-data 를 25600 bytes 로 제한한다
-# (raw 약 19200 bytes). 경고가 아니라 hard fail — 초과 상태로 launch 하면
-# RunInstances 가 InvalidParameterValue 로 거부한다.
-USERDATA_SIZE=$(wc -c < "${USERDATA_FILE}")
+# user-data 크기 확인. config 가 빠졌으므로 셸 본문(~7KB)만 남아 16KB 한도에
+# 여유롭게 들어간다. file:// 로 넘기면 CLI 가 base64 인코딩(25600 한도)한다.
 USERDATA_B64_SIZE=$(base64 -w0 < "${USERDATA_FILE}" | wc -c)
-log "    user-data size: ${USERDATA_SIZE} bytes raw / ${USERDATA_B64_SIZE} bytes base64 (AWS limit: 25600 base64)"
+log "    user-data base64: ${USERDATA_B64_SIZE} bytes (AWS limit 25600)"
 if [ "${USERDATA_B64_SIZE}" -gt 25600 ]; then
-    log "[ERROR] user-data base64 가 ${USERDATA_B64_SIZE} bytes 로 25600 한도 초과."
-    log "        config 파일(compose/env/Caddyfile)을 줄이거나 gzip 인라인 / S3(옵션 B)로 전환하라."
-    exit 1
+    fail "user-data base64 가 ${USERDATA_B64_SIZE} bytes 로 25600 한도 초과 (config 는 S3 라 셸 본문 문제 — user-data.sh 를 줄여라)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────

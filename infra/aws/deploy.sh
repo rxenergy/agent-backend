@@ -6,9 +6,10 @@
 #   FRONTEND_IMAGE  (필수, e.g. 123.dkr.ecr.ap-northeast-2.amazonaws.com/agent-saas/frontend:abc123)
 #
 # 동작:
-#   1. 로컬의 3개 config 파일을 base64 로 인코딩
+#   1. 로컬 config 파일을 S3(s3://CONFIG_BUCKET/aws-mvp/)로 업로드
 #   2. SSM Send-Command 1발로 EC2 에 전송:
-#        - base64 decode 해서 /opt/agent-saas/ 에 덮어쓰기
+#        - aws s3 sync 로 /opt/agent-saas/infra/ 재현
+#        - 시크릿은 SSM Parameter Store 에서 secret.env 합성
 #        - ECR 로그인 → docker pull → docker compose up -d
 #   3. 명령 완료 대기 + 결과 출력
 
@@ -32,19 +33,28 @@ log "Image:  ${IMAGE}"
 
 ECR_REGISTRY="${IMAGE%%/*}"
 
-# 로컬 config 파일을 base64 로 (단일행, line-wrap 없이)
-COMPOSE_B64=$(base64 -w0 < "${REPO_ROOT}/infra/compose/compose.aws-mvp.yml")
-ENV_B64=$(base64 -w0     < "${REPO_ROOT}/infra/env/aws-mvp.env")
-CADDY_B64=$(base64 -w0   < "${REPO_ROOT}/infra/caddy/Caddyfile")
-LITELLM_B64=$(base64 -w0 < "${REPO_ROOT}/infra/litellm/config.yaml")
-# pre-call 가드 callback 모듈 — config.yaml 이 strip_history.proxy_handler_instance
-# 를 참조하므로 같은 디렉토리에 함께 전송해야 litellm 이 import 할 수 있다.
-STRIP_B64=$(base64 -w0   < "${REPO_ROOT}/infra/litellm/strip_history.py")
+# config 운반 S3 버킷 (setup-s3-config.sh 와 동일 규칙). 시크릿은 S3 아닌 SSM.
+# 버킷·role 정책은 일회성 셋업(make aws-setup-s3 / setup-ec2.sh)이 만든다 —
+# deploy 는 업로드+배포만 담당한다(IAM 변경 권한 불요).
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+CONFIG_BUCKET="${CONFIG_BUCKET:-rx-agent-frontend-config-${ACCOUNT_ID}}"
+CONFIG_PREFIX="aws-mvp"
 
-# SSM Send-Command 의 parameter list 는 JSON. base64 는 안전한 alphabet 이라
-# 그대로 commands 배열에 박을 수 있다. payload 합산 100KB 미만이면 OK.
-TOTAL=$((${#COMPOSE_B64} + ${#ENV_B64} + ${#CADDY_B64} + ${#LITELLM_B64} + ${#STRIP_B64}))
-log "Config payload: ${TOTAL} bytes (limit ~100KB)"
+# 로컬 config 를 S3 로 업로드. EC2 는 SSM 커맨드에서 `aws s3 sync` 로 받는다.
+# base64+SSM inline 대신 S3 — payload 크기 한도 없음, 향후 config 증가에 안전.
+# 버킷이 없으면(=셋업 미실행) 여기서 실패한다 → make aws-setup-s3 먼저 안내.
+if ! aws s3api head-bucket --bucket "${CONFIG_BUCKET}" >/dev/null 2>&1; then
+    echo "[deploy] config 버킷 ${CONFIG_BUCKET} 없음. 먼저 'make aws-setup-s3' 실행." >&2
+    exit 1
+fi
+log "config → s3://${CONFIG_BUCKET}/${CONFIG_PREFIX}/"
+up() { aws s3 cp "${REPO_ROOT}/infra/$1" "s3://${CONFIG_BUCKET}/${CONFIG_PREFIX}/$2" >/dev/null; }
+up compose/compose.aws-mvp.yml compose/compose.aws-mvp.yml
+up env/aws-mvp.env             env/aws-mvp.env
+up caddy/Caddyfile             caddy/Caddyfile
+up litellm/config.yaml         litellm/config.yaml
+up litellm/strip_history.py    litellm/strip_history.py
+up searxng/settings.yml        searxng/settings.yml
 
 # 임시 JSON parameters 파일 (긴 문자열을 안전하게 전달)
 PARAMS_FILE=$(mktemp)
@@ -54,12 +64,8 @@ cat > "${PARAMS_FILE}" <<EOF
 {
   "commands": [
     "set -e",
-    "mkdir -p /opt/agent-saas/infra/compose /opt/agent-saas/infra/env /opt/agent-saas/infra/caddy /opt/agent-saas/infra/litellm",
-    "echo ${COMPOSE_B64} | base64 -d > /opt/agent-saas/infra/compose/compose.aws-mvp.yml",
-    "echo ${ENV_B64} | base64 -d > /opt/agent-saas/infra/env/aws-mvp.env",
-    "echo ${CADDY_B64} | base64 -d > /opt/agent-saas/infra/caddy/Caddyfile",
-    "echo ${LITELLM_B64} | base64 -d > /opt/agent-saas/infra/litellm/config.yaml",
-    "echo ${STRIP_B64} | base64 -d > /opt/agent-saas/infra/litellm/strip_history.py",
+    "mkdir -p /opt/agent-saas/infra",
+    "aws s3 sync s3://${CONFIG_BUCKET}/${CONFIG_PREFIX}/ /opt/agent-saas/infra/ --delete",
     "mkdir -p /etc/agent-frontend && chmod 700 /etc/agent-frontend",
     "WK=\$(aws ssm get-parameter --region ${REGION} --name /rx-agent/frontend/webui_secret_key --with-decryption --query Parameter.Value --output text)",
     "ON=\$(aws ssm get-parameter --region ${REGION} --name /rx-agent/frontend/openai_api_key --with-decryption --query Parameter.Value --output text)",

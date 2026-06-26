@@ -2,7 +2,8 @@
 #
 # 베이스 compose.yml 과 합치지 않는다. AWS EC2 단일 인스턴스에는 백엔드
 # 서비스(agent-api / postgres / opensearch / vllm / phoenix / minio / …) 가
-# 일체 떠 있지 않고, OpenWebUI 컨테이너 + Caddy (TLS 리버스 프록시) 만 띄운다.
+# 일체 떠 있지 않고, OpenWebUI 컨테이너 + Caddy (TLS 리버스 프록시)
+# + litellm(Bedrock 변환 프록시) + searxng(웹검색 사이드카) 만 띄운다.
 # 백엔드 호출은 Tailscale MagicDNS(`onprem-agent`) 로 온프레미스로 빠진다.
 #
 # 사전 조건:
@@ -61,6 +62,17 @@ services:
       # (env 가 "unset" 일 때만 default 가 적용됨).
       # 온프레미스/local 프로파일은 Postgres 를 쓰지만 aws-mvp 는 SQLite 전용.
       DATA_DIR: ${DATA_DIR:-/app/backend/data}
+
+      # ── Web Search (SearXNG 사이드카) ──
+      # OpenWebUI 가 검색엔진 질의→결과 본문 스크랩→RAG 컨텍스트 주입까지 처리.
+      # 두 백엔드(온프레 agent-api / litellm-Bedrock) 무관하게 동작. 채팅 입력창
+      # "+" 메뉴에서 Web Search 토글을 켠 turn 에만 실행된다(모델 자동 아님).
+      ENABLE_WEB_SEARCH: ${ENABLE_WEB_SEARCH:-true}
+      WEB_SEARCH_ENGINE: ${WEB_SEARCH_ENGINE:-searxng}
+      # <query> 는 OpenWebUI 가 치환하는 리터럴 플레이스홀더(공식 형식).
+      SEARXNG_QUERY_URL: ${SEARXNG_QUERY_URL:-http://searxng:8080/search?q=<query>}
+      WEB_SEARCH_RESULT_COUNT: ${WEB_SEARCH_RESULT_COUNT:-4}
+      WEB_SEARCH_CONCURRENT_REQUESTS: ${WEB_SEARCH_CONCURRENT_REQUESTS:-4}
     volumes:
       # EBS 볼륨의 /data/open-webui 를 컨테이너 데이터 디렉토리로 마운트
       - /data/open-webui:/app/backend/data
@@ -76,6 +88,37 @@ services:
     depends_on:
       litellm:
         condition: service_started
+      # SearXNG 가 떠 있어야 첫 검색 질의가 성공. healthcheck 통과 전이라도
+      # OpenWebUI 부팅은 막지 않는다(service_started) — 검색은 사용자가 토글한
+      # turn 에만 호출되므로 약간의 부팅 지연은 무방.
+      searxng:
+        condition: service_started
+
+  searxng:
+    # 메타검색 엔진(자체 인덱스 없음 — Google/Bing/DuckDuckGo 등에 fan-out).
+    # API key 불필요 → SSM 시크릿 추가 0개. limiter OFF 라 Valkey/Redis 도 불필요.
+    image: searxng/searxng:${SEARXNG_VERSION:-latest}
+    container_name: searxng
+    restart: unless-stopped
+    # I/O 바운드(상류 엔진 대기)라 footprint 작음. t3.large 여력 충분하나 상한.
+    mem_limit: ${SEARXNG_MEM_LIMIT:-512m}
+    # 호스트 미노출 — open-webui 만 compose 네트워크에서 접근.
+    expose:
+      - "8080"
+    environment:
+      # settings.yml 의 server.base_url 계산용(내부 주소).
+      SEARXNG_BASE_URL: http://searxng:8080/
+    volumes:
+      # 우리 settings.yml 을 read-only 로 마운트. use_default_settings:true 라
+      # SearXNG 기본 설정 위에 이 파일의 키만 override 된다.
+      - ../searxng/settings.yml:/etc/searxng/settings.yml:ro
+    healthcheck:
+      # searxng 이미지에 wget 존재. /healthz 로 liveliness.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   litellm:
     # off-the-shelf OpenAI↔Bedrock 변환 프록시. 신규 코드 없음 — config.yaml 만.

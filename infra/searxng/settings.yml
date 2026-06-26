@@ -1,0 +1,59 @@
+# SearXNG — aws-mvp 웹검색 사이드카 설정.
+#
+# OpenWebUI 내장 Web Search(WEB_SEARCH_ENGINE=searxng) 의 백엔드.
+# 호스트 미노출(compose expose 8080) — open-webui 만 내부 docker 네트워크로 호출.
+#
+# 운반: 다른 infra config(compose/env/Caddyfile/litellm) 와 동일하게 base64 inline
+#   (최초 부팅 user-data) + SSM Send-Command(재배포) 로 EC2 에 기록된다. git/S3 미사용.
+#
+# 설계 원칙:
+#   - use_default_settings: true → SearXNG 기본 settings.yml 을 베이스로 두고
+#     아래 키만 부분 override. 엔진 목록 전체를 여기 복붙하지 않는다(유지보수/크기).
+#   - limiter: false → 봇 차단/레이트리밋 OFF. 단일 self-host 라 불필요하고,
+#     켜면 (1) Valkey/Redis 컨테이너가 필요해지고 (2) OpenWebUI 질의가 봇으로
+#     차단돼 403 이 난다. 내부망 단일 소비자(open-webui)뿐이므로 OFF 가 맞다.
+#   - formats 에 json 필수 → 없으면 OpenWebUI 질의가 403 Forbidden (OpenWebUI 는
+#     /search?...&format=json 으로 호출함).
+#   - image_proxy: false → OpenWebUI 는 텍스트 결과만 쓴다. 이미지 프록시 불필요.
+#
+# secret_key: 내부망 전용 + limiter/image_proxy OFF 라 노출면이 거의 없어 고정값.
+#   (Parameter Store 시크릿 항목을 늘리지 않으려는 의도 — settings.yml 은 어차피
+#   base64 운반 경로로만 EC2 에 들어가고 Parameter Store 에는 저장되지 않는다.)
+#   외부 노출 토폴로지로 바뀌면 이 값을 SSM SecureString 으로 옮길 것.
+
+use_default_settings: true
+
+general:
+  instance_name: "rx-agent-search"
+  # 디버그 OFF (운영).
+  debug: false
+
+server:
+  # compose 네트워크 내부 주소. open-webui 가 http://searxng:8080 으로 호출.
+  bind_address: "0.0.0.0"
+  port: 8080
+  secret_key: "a897c1f82b7fa3e2ffdca50ca5e0d47cf6c5b5cbb56d5236f205df8eb58f07fb"
+  # 봇 차단/레이트리밋 OFF (단일 내부 소비자, Valkey 의존 제거). 위 주석 참조.
+  limiter: false
+  # 이미지 프록시 불필요(OpenWebUI 는 텍스트 결과만 사용).
+  image_proxy: false
+  # OpenWebUI 는 GET 으로 질의. 명시.
+  method: "GET"
+
+search:
+  # OpenWebUI 연동 필수: json 미포함 시 403 Forbidden.
+  formats:
+    - html
+    - json
+  # 안전 검색 0(off)/1(moderate)/2(strict). 규제도메인 검색이므로 moderate.
+  safe_search: 1
+  # 자동완성 비활성(서버-서버 호출이라 불필요).
+  autocomplete: ""
+
+outgoing:
+  # 상류 엔진(Google/Bing/DuckDuckGo 등) 질의 타임아웃. 기본 2.0s 는 느린 엔진을
+  # 너무 빨리 버린다 — OpenWebUI 가 결과 수를 채우도록 약간 늘린다.
+  request_timeout: 4.0
+  max_request_timeout: 10.0
+  pool_connections: 100
+  pool_maxsize: 20

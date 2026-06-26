@@ -9,10 +9,14 @@
 > 재현 가능하게 만들고, 반복 작업(이미지 빌드/푸시/재배포) 은 Makefile + SSM
 > Send-Command 로 무인화한다.
 >
-> **EC2 는 Git 을 사용하지 않는다.** 4개 config 파일(`compose.aws-mvp.yml`,
-> `aws-mvp.env`, `Caddyfile`, `litellm/config.yaml`) 은 `setup-ec2.sh` 가
-> base64 로 user-data 에 인라인하고, 재배포 시 `deploy.sh` 가 SSM Send-Command
-> 로 직접 EC2 에 덮어쓴다. 로컬 레포 ↔ EC2 동기화는 `make aws-deploy` 가 책임진다.
+> **EC2 는 Git 을 사용하지 않는다.** config 파일(`compose.aws-mvp.yml`,
+> `aws-mvp.env`, `Caddyfile`, `litellm/{config.yaml,strip_history.py}`,
+> `searxng/settings.yml`) 은 S3 버킷(`rx-agent-frontend-config-<account>` /
+> prefix `aws-mvp/`)으로 운반한다. `setup-ec2.sh`/`deploy.sh` 가 로컬→S3 업로드,
+> EC2 는 부팅·재배포 시 `aws s3 sync` 로 `/opt/agent-saas/infra/` 를 재현한다
+> (인스턴스 role 의 `config-bucket-read` 권한). 과거 base64-user-data-inline 방식은
+> 16KB 한도에 부딪혀 S3 로 전환했다. **시크릿은 S3 가 아니라 SSM Parameter Store**
+> (`/rx-agent/frontend/*`)에 남는다. 로컬 ↔ EC2 동기화는 `make aws-deploy` 가 책임진다.
 
 ## 토폴로지
 
@@ -50,16 +54,18 @@ OpenWebUI 모델 드롭다운에 백엔드 2개가 *공존* 노출된다:
 ```
 infra/aws/
 ├── README.md           ← 이 파일
-├── setup-ec2.sh        ← 1회성 인프라 생성 (EC2/EBS/EIP/SG/IAM)
+├── setup-ec2.sh        ← 1회성 인프라 생성 (EC2/EBS/EIP/SG/IAM, 내부에서 setup-s3-config 호출)
+├── setup-s3-config.sh  ← 1회성 config S3 버킷 + EC2 role read 권한 (이미 배포된 인스턴스용)
 ├── user-data.sh        ← EC2 부팅 시 자동 실행 (setup-ec2.sh 가 placeholder 치환)
-├── deploy.sh           ← SSM Send-Command 로 컨테이너 재배포
+├── deploy.sh           ← config S3 업로드 + SSM Send-Command 로 sync + 컨테이너 재배포
 ├── secrets-put.sh      ← SSM Parameter Store 시크릿 등록
 ├── destroy.sh          ← 리소스 일괄 삭제
 └── .state/             ← 생성된 ID 캐시 (gitignore — InstanceId/EIP/PEM)
 ```
 
 `infra/compose/compose.aws-mvp.yml`, `infra/env/aws-mvp.env`, `infra/caddy/Caddyfile`,
-`infra/litellm/config.yaml` 은 EC2 위에서 컨테이너 런타임이 사용한다.
+`infra/litellm/{config.yaml,strip_history.py}`, `infra/searxng/settings.yml` 은
+S3 를 거쳐 EC2 위에서 컨테이너 런타임이 사용한다.
 
 ## 사전 준비
 

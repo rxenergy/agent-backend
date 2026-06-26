@@ -57,6 +57,9 @@ aws iam detach-role-policy --role-name rx-agent-frontend-ec2 \
   --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly 2>/dev/null || true
 aws iam delete-role-policy --role-name rx-agent-frontend-ec2 \
   --policy-name ssm-parameter-read 2>/dev/null || true
+# config S3 버킷 read 인라인 정책 — 남아 있으면 delete-role 이 실패한다.
+aws iam delete-role-policy --role-name rx-agent-frontend-ec2 \
+  --policy-name config-bucket-read 2>/dev/null || true
 aws iam delete-role --role-name rx-agent-frontend-ec2 2>/dev/null || true
 
 # 6. State files
@@ -71,6 +74,8 @@ cat <<EOF
 ║ 수동으로 정리해야 할 것:                                              ║
 ║   - SSM Parameter Store: /rx-agent/frontend/* (시크릿)                ║
 ║     (보존하려면 그대로 둠. 삭제하려면 콘솔/CLI 로 별도 제거)          ║
+║   - S3 config 버킷: rx-agent-frontend-config-<acct> (버저닝 ON)       ║
+║     (config 이력 보존 위해 자동 삭제 안 함. 삭제: aws s3 rb --force)  ║
 ║   - ECR 레포: agent-saas/frontend (이미지 보존을 위해 자동 삭제 안 함)║
 ║   - 회사 도메인 등록기관의 A 레코드                                   ║
 ║   - Tailscale 어드민의 aws-frontend 머신 항목                         ║
