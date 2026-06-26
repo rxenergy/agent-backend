@@ -39,6 +39,11 @@ services:
       ENABLE_OPENAI_API: "true"
       ENABLE_OLLAMA_API: "false"
 
+      # 새 채팅 기본 선택 모델(콤마 구분 다중값). designer(온프레) + opus(Bedrock)
+      # 2개를 시드 → 새 채팅이 멀티모델 비교 상태로 열린다. *기본 선택*일 뿐 잠금이
+      # 아님(사용자가 드롭다운에서 줄이거나 바꿀 수 있음). 미설정이면 목록 첫 모델 선택.
+      DEFAULT_MODELS: ${OPEN_WEBUI_DEFAULT_MODELS:-}
+
       # 보조 task(title/tags/follow-up/autocomplete) 생성을 끈다. task model 미지정
       # 시 OpenWebUI 가 답변 후 대화 전문을 onprem agent 로 재전송 → 동일 질의가
       # 풀 workflow 로 한 번 더 돌며 Phoenix 에 중복 trace 가 집계되는 것을 막는다.
